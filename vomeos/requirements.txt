@@ -1,0 +1,11 @@
+# Vome OS kernel dependencies.
+#
+# This is the whole dependency budget. Everything else the OS uses is the
+# Python standard library. Keeping this list short is what makes the OS
+# cheap to deploy on its own, and adding to it is a deliberate decision,
+# pinned by test_vomeos_independence.py.
+
+anthropic          # the model API
+httpx              # every outbound integration call
+sqlalchemy         # the OS's own persistence
+psycopg2-binary    # Postgres driver for sqlalchemy

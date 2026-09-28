@@ -692,53 +692,58 @@ def _post_record(
 # Duplicate guard (shared by needs-client-info and user-education)
 # ---------------------------------------------------------------------------
 
-def _is_probable_duplicate(draft: str, conversations_text: str) -> dict:
+def _is_probable_duplicate(
+    draft: str, conversations_text: str, ticket_id: str = ""
+) -> dict:
     """High-confidence check: would sending `draft` repeat a reply we have
     ALREADY sent the client in this thread?
 
     Returns {"duplicate": bool, "reason": str, "prior": str}. Deliberately
     conservative -- defaults to duplicate=False (send) on any uncertainty or
     error, because we would rather occasionally send a near-duplicate than
-    silently withhold a reply the engineer asked for.
+    park a reply the engineer asked for behind a Slack click nobody makes.
+
+    The judgment itself lives in agents/support/duplicate_reply_check. It used
+    to be an inline prompt here with a bare `messages.create`, no system
+    prompt, no retry, and no record that it had ever run. Moving it onto the
+    runtime means it inherits the staff handbook and the support division
+    rules, it retries a rate limit instead of silently defaulting to send, its
+    verdict is written to agent_runs, and it can be scored against the answer
+    key in its evals/ directory. The return shape is unchanged, so both
+    call sites behave exactly as before.
+
+    `ticket_id` is optional and only ties the trace row to a ticket.
     """
     if not draft or not draft.strip():
         return {"duplicate": False, "reason": "", "prior": ""}
-    prompt = (
-        "We are about to send the message below to a support client. Decide "
-        "ONLY whether sending it would be a DUPLICATE -- i.e., an earlier "
-        "OUTBOUND message in this same thread already says substantially the "
-        "same thing (the same answer, or the same question/request), so the "
-        "client would effectively receive it twice.\n\n"
-        "Be strict and conservative: answer duplicate=true ONLY if you are "
-        "highly confident an earlier message we already sent covers this. "
-        "Reworded-but-same-meaning counts. If there is any real doubt, answer "
-        "duplicate=false -- we would rather occasionally repeat ourselves "
-        "than withhold a reply.\n\n"
-        "Message we are about to send:\n"
-        f"{draft}\n\n"
-        "Conversation thread (oldest to newest):\n"
-        f"{conversations_text}\n\n"
-        "Return valid JSON only, no prose, no code fences:\n"
-        '{"duplicate": true|false, "reason": "one sentence", '
-        '"prior": "short quote of the earlier message it duplicates, or empty"}'
-    )
+
+    safe_default = {"duplicate": False, "reason": "", "prior": ""}
     try:
-        resp = _anthropic.messages.create(
-            model=SUPPORT_MODEL,
-            max_tokens=300,
-            messages=[{"role": "user", "content": prompt}],
+        from vomeos import run_agent
+
+        result = run_agent(
+            "support.duplicate_reply_check",
+            context={"draft": draft, "thread": conversations_text},
+            subject_type="zoho_ticket",
+            subject_id=ticket_id,
         )
-        raw = resp.content[0].text.strip()
-        raw = re.sub(r"^```(?:json)?\n?", "", raw)
-        raw = re.sub(r"\n?```$", "", raw)
-        data = json.loads(raw)
     except Exception as e:
         print(f"[DUP CHECK] failed ({e}); defaulting to not-duplicate (send)")
-        return {"duplicate": False, "reason": "", "prior": ""}
+        return safe_default
+
+    if not result.ok:
+        # error or a blocked guard. Either way we did not get a usable
+        # verdict, so take the send-side default rather than guessing.
+        print(
+            f"[DUP CHECK] no verdict ({result.why()}); "
+            "defaulting to not-duplicate (send)"
+        )
+        return safe_default
+
     return {
-        "duplicate": bool(data.get("duplicate")),
-        "reason": str(data.get("reason", "")),
-        "prior": str(data.get("prior", "")),
+        "duplicate": bool(result.get("duplicate")),
+        "reason": str(result.get("reason", "") or ""),
+        "prior": str(result.get("prior", "") or ""),
     }
 
 
@@ -955,7 +960,9 @@ def handle_needs_client_info(
     # reply we already sent the client, hold it for human confirm/send/cancel
     # in Slack instead of auto-sending (status stays as the engineer set it).
     # Defaults to sending when it isn't clearly a duplicate.
-    dup = _is_probable_duplicate(draft, conversations_text)
+    dup = _is_probable_duplicate(
+        draft, conversations_text, ticket_id=zoho_ticket_id
+    )
     if dup["duplicate"]:
         return _hold_draft_for_confirm(
             zoho_ticket_id=zoho_ticket_id,

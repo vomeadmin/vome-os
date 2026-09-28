@@ -472,7 +472,9 @@ def handle_user_education(task_id: str, engineer_name: str) -> bool:
     # repeat a reply we already sent the client, hold it for human
     # confirm/send/cancel in Slack instead of auto-sending. Defaults to
     # sending when it isn't clearly a duplicate.
-    dup = _is_probable_duplicate(draft, conversations_text)
+    dup = _is_probable_duplicate(
+        draft, conversations_text, ticket_id=zoho_ticket_id
+    )
     if dup["duplicate"]:
         return _hold_draft_for_confirm(
             zoho_ticket_id=zoho_ticket_id,

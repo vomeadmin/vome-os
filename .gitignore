@@ -9,3 +9,7 @@ __pycache__/
 
 # Claude Code agent worktrees (throwaway, never commit)
 .claude/worktrees/
+
+# Claude Code machine-local permissions. Never commit: it accumulates
+# real ticket IDs and customer emails from allowed command examples.
+.claude/settings.local.json

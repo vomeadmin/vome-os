@@ -1,0 +1,43 @@
+[identity]
+name = "duplicate_reply_check"
+division = "support"
+title = "Duplicate Reply Check"
+reports_to = "sam"
+hired = "2026-09-28"
+
+[model]
+# Standard tier. This is the last judgment before an unattended email goes
+# out, so it wants real reasoning rather than the fast bench.
+#
+# No temperature. The current standard model does not accept the parameter,
+# and the runtime would spend a rejected call per run discovering that. Set
+# it again only if standard is ever pointed at a model that honours it.
+tier = "standard"
+max_tokens = 300
+
+[job]
+charter = "charter.md"
+skills = ["reading-a-ticket-thread", "deciding-not-to-act"]
+requires_context = ["draft", "thread"]
+output = "json"
+
+[guards]
+output = ["json_shape", "non_empty"]
+# It decides ABOUT a client message but its own output is a verdict that only
+# the handler reads. The draft itself is guarded separately by client_message
+# in the calling handler, before this agent is asked.
+client_facing = false
+
+[limits]
+timeout_seconds = 60
+max_retries = 2
+
+[approval]
+requires_ceo_approval = false
+escalate_to = "#vome-support-engineering"
+
+[evals]
+path = "evals/cases.jsonl"
+# Held at the level the roadmap set for the KB gap clusterer: agree with a
+# human on 8 of 10 before the verdict is trusted.
+min_agreement = 0.8
