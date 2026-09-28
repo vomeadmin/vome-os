@@ -35,6 +35,9 @@ ALLOWED_THIRD_PARTY = {
     "anthropic",   # the model API
     "httpx",       # every outbound integration call
     "sqlalchemy",  # the OS's own persistence
+    "celery",      # durable execution
+    "kombu",       # Celery's queue primitives
+    "redis",       # the broker
 }
 
 # Modules that belong to the support application, not to the OS. Named

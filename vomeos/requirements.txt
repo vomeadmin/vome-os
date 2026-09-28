@@ -9,3 +9,6 @@ anthropic          # the model API
 httpx              # every outbound integration call
 sqlalchemy         # the OS's own persistence
 psycopg2-binary    # Postgres driver for sqlalchemy
+celery             # durable execution: queues, workers, beat
+redis              # the broker Celery talks to
+kombu              # Celery's queue primitives, imported directly

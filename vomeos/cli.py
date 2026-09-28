@@ -116,6 +116,46 @@ def cmd_skills() -> int:
     return 0
 
 
+def cmd_jobs() -> int:
+    """What beat would schedule, and where it would send it.
+
+    Loads the job modules the same way a worker does, so this shows what a
+    real beat process would see rather than what the registry happens to hold
+    in this interpreter.
+    """
+    from vomeos.worker import describe, list_jobs, load_job_modules
+
+    load_job_modules()
+    shape = describe()
+    print(f"broker    {shape['broker']}")
+    print(f"timezone  {shape['timezone']}")
+    print(f"queues    {', '.join(shape['queues'])}")
+
+    jobs = list_jobs()
+    if not jobs:
+        print(
+            "\nNo jobs registered. Set VOMEOS_JOB_MODULES to the module "
+            "that calls register_job (for example: support_jobs)."
+        )
+        return 0
+
+    width = max(len(j.key) for j in jobs)
+    header = "JOB".ljust(width)
+    print(f"\n{header}  CRON             QUEUE     CLAIM")
+    for job in jobs:
+        print(
+            f"{job.key.ljust(width)}  {job.cron.ljust(16)} "
+            f"{job.queue.ljust(9)} {job.claim or 'none'}"
+        )
+    if shape["eager"]:
+        print(
+            "\nEager mode: no broker configured, so tasks run inline and "
+            "beat is not driving anything. The in-process APScheduler in "
+            "main.py still owns the schedule."
+        )
+    return 0
+
+
 def cmd_runs(agent: str = "") -> int:
     from vomeos import trace
 
@@ -176,6 +216,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_describe(rest[0])
     if command == "skills":
         return cmd_skills()
+    if command == "jobs":
+        return cmd_jobs()
     if command == "runs":
         return cmd_runs(rest[0] if rest else "")
     if command == "scoreboard":

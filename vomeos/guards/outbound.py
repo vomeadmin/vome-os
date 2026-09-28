@@ -5,7 +5,7 @@ The last check before anything a model wrote leaves the company.
 
 WHY THIS EXISTS
 ---------------
-On 2026-09-07, ticket #8945 (Summit Metro Parks) received an email in which
+On 2026-09-07, ticket #8945 sent a customer an email in which
 the model, instead of writing a client reply, explained to its operator why it
 could not write one. It quoted internal dev notes, named an engineer, listed
 unverified bugs, referenced the system prompt and internal routing rules, and

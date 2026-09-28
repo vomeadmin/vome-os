@@ -23,6 +23,7 @@ agents/         the staff. One directory per agent.
 main.py         the support application: FastAPI webhooks and the scheduler
 ops/            the ticket command center API
 *_handler.py    support workflows (ClickUp status, Calendly, on-prod, ...)
+support_jobs.py the support division's scheduled jobs, registered with the OS
 guides/         how the support automation works and why
 ```
 
@@ -67,12 +68,72 @@ intentions.
 ## Deploying
 
 ```
-web: uvicorn main:app --host 0.0.0.0 --port $PORT
+web:    uvicorn main:app --host 0.0.0.0 --port $PORT
+worker: celery -A vomeos.worker worker -Q support,default --concurrency 4
+beat:   celery -A vomeos.worker beat
 ```
 
-One web process today, on Railway. The kernel runs in-process with the
-support application. Worker processes and a broker are the next thing to
-build, and they will be Vome OS's own, not borrowed from another service.
+Vome OS's own broker and workers, not another service's cluster.
+
+### The cutover is one environment variable
+
+Exactly one thing may own the schedule, or every job runs twice.
+
+**Today, with no `VOMEOS_BROKER_URL` set:** nothing has changed. The
+in-process APScheduler in `main.py` starts as it always has, and the worker
+layer runs inline. Landing this code changes no behaviour.
+
+**Once `VOMEOS_BROKER_URL` is set:** `main.py` does not start APScheduler,
+and Celery beat owns the schedule instead. Rollback is unsetting the same
+variable.
+
+To cut over, **in this order**:
+
+1. Add a Redis service to the Railway project. Do not set anything on `web`
+   yet.
+2. Create a `worker` service from this repo. Give it every variable the `web`
+   service has (it runs the actual jobs, so it needs Anthropic, Zoho,
+   ClickUp, Slack and the database), plus `VOMEOS_BROKER_URL` and
+   `VOMEOS_JOB_MODULES=support_jobs`.
+3. Create a `beat` service the same way. Confirm its log says
+   `beat scheduling 8 job(s)`.
+4. Only now set `VOMEOS_BROKER_URL` on `web`. That is the moment APScheduler
+   stands down and beat takes over.
+
+Rollback at any point is removing `VOMEOS_BROKER_URL` from `web`.
+
+**Only ever run one beat service, at one replica.** Two beats means two of
+every job, the same bug as two web dynos today. Workers scale freely; beat
+does not.
+
+### Why `web` ignores a bare `REDIS_URL`
+
+The worker's broker lookup accepts `VOMEOS_BROKER_URL`, `VOMEOS_REDIS_URL` or
+a plain `REDIS_URL`. The scheduler handoff in `main.py` deliberately does
+**not** read the last one.
+
+Railway injects `REDIS_URL` into any service that references a Redis add-on.
+If `main.py` treated that as "beat owns the schedule now", then simply adding
+Redis to the project would stop all eight scheduled jobs in the web process,
+before any worker existed to take over, and nothing would report it. Handing
+over the schedule has to be an explicit act, so it takes an explicit
+`VOMEOS_` variable that no platform sets on its own.
+
+`test_vomeos_worker.py` pins both halves of that asymmetry.
+
+### Why this exists
+
+APScheduler runs in the web process. That means a second web dyno is a second
+scheduler, so the daily digest goes out twice and the stale sweep closes
+tickets twice. It is a hard ceiling on the web tier and it is invisible until
+you scale. A deploy also kills whatever was mid-flight, which is why there is
+a commit here titled "Allow a forced knowledge refresh after a deploy kills
+one".
+
+Celery is at-least-once, so every scheduled job claims its period in Postgres
+(`vomeos_job_runs`) before doing anything. Delivered twice, runs once. That is
+the same pattern `database.claim_sweeper_run` already used, lifted into the OS
+so every job gets it for free.
 
 ## Environment
 
@@ -87,6 +148,12 @@ VOMEOS_MODEL_STANDARD      the standard bench
 VOMEOS_MODEL_SENIOR        the senior bench
 VOMEOS_CHARTER_WORD_CAP    how long a job description may be
 VOMEOS_MIN_EVAL_CASES      how big an answer key must be
+
+VOMEOS_BROKER_URL          the Redis the workers use. Unset means eager mode
+                           and APScheduler keeps the schedule.
+VOMEOS_JOB_MODULES         comma separated modules that call register_job
+VOMEOS_QUEUES              extra queues to declare before their first job
+VOMEOS_TIMEZONE            cron timezone (default America/Montreal)
 ```
 
 Every table the OS creates is prefixed `vomeos_`, so pointing it at a

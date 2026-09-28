@@ -280,7 +280,48 @@ _scheduler.add_job(
     coalesce=True,
     max_instances=1,
 )
-_scheduler.start()
+
+# ---------------------------------------------------------------------------
+# Scheduler ownership: APScheduler here, or Celery beat in Vome OS
+# ---------------------------------------------------------------------------
+#
+# Exactly one of the two must own the schedule, or every job runs twice.
+#
+# The switch is the broker. With no VOMEOS_BROKER_URL configured, nothing has
+# changed: APScheduler starts in this web process exactly as before. Set the
+# broker and start the `worker` and `beat` processes, and this scheduler stays
+# asleep while Vome OS runs the same jobs off a queue, with a Postgres claim
+# per period and a retry when a worker dies.
+#
+# That makes the cutover one environment variable, and the rollback the same
+# variable. It also fixes the reason this could never scale: APScheduler runs
+# in-process, so a second web dyno means a second scheduler and a doubled
+# daily digest.
+# Deliberately does NOT fall back to a bare REDIS_URL, unlike the worker's
+# broker lookup. Railway injects REDIS_URL into every service that references
+# a Redis add-on, so reading it here would mean that merely ADDING Redis to
+# the project silently stops this scheduler, before any worker or beat
+# process exists to take over. Every scheduled job would stop and nothing
+# would say so.
+#
+# Handing the schedule to beat has to be an explicit act, so it takes an
+# explicit VOMEOS_ variable that no platform sets on its own.
+_VOMEOS_BROKER = (
+    os.environ.get("VOMEOS_BROKER_URL")
+    or os.environ.get("VOMEOS_REDIS_URL", "")
+)
+
+if _VOMEOS_BROKER:
+    print(
+        "[MAIN] VOMEOS_BROKER_URL is set: Vome OS beat owns the schedule. "
+        "In-process APScheduler not started."
+    )
+else:
+    _scheduler.start()
+    print(
+        "[MAIN] No VOMEOS_BROKER_URL: in-process APScheduler owns the "
+        "schedule. Do not run a second web dyno."
+    )
 
 
 # ---------------------------------------------------------------------------
