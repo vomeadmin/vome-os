@@ -1,0 +1,56 @@
+[identity]
+name = "triage_director"
+division = "customer_success"
+title = "Director of Customer Success"
+reports_to = "sam"
+hired = "2026-09-28"
+
+[model]
+# Senior tier. This is the reasoning-heaviest job in the division: read a full
+# thread, weigh partial evidence, and decide what a human should do next.
+# Everything downstream inherits its category, so an error here is an error
+# everywhere. This is the one place worth paying for the best model.
+tier = "senior"
+max_tokens = 2000
+
+[job]
+charter = "charter.md"
+skills = [
+    "reading-a-ticket-thread",
+    "checking-for-existing-work",
+    "writing-the-triage-card",
+    "deciding-not-to-act",
+]
+requires_context = [
+    "ticket_number",
+    "account",
+    "thread",
+    "attachments",
+    "existing_tasks",
+    "kb_matches",
+]
+output = "json"
+
+[guards]
+# Produces a triage card for an internal reviewer. It cannot write to a
+# customer, so client_facing is false and the outbound guards do not apply.
+# The drafting agent that comes later is the one that carries those.
+output = ["json_shape", "non_empty"]
+client_facing = false
+
+[limits]
+timeout_seconds = 120
+max_retries = 2
+
+[approval]
+# Every card lands in front of a person. The agent never acts on its own
+# recommendation, so no separate CEO gate is needed on the agent itself.
+requires_ceo_approval = false
+escalate_to = "#vome-tickets"
+
+[evals]
+path = "evals/cases.jsonl"
+# Held higher than the 0.8 floor. This agent's category decides what every
+# later agent does with the ticket, so it has to be right more often than a
+# single-purpose checker.
+min_agreement = 0.85

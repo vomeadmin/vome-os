@@ -111,6 +111,25 @@ SIGNATURE_DOMAIN = os.environ.get(
 OUTBOUND_MAX_CHARS = int(os.environ.get("VOMEOS_OUTBOUND_MAX_CHARS", "3500"))
 
 
+# The identity approved client replies go out under. A draft signed by the
+# agent instead of the approver is a rule breach, not a style choice: it
+# happened twice in one sprint. Empty disables the check.
+REQUIRED_SIGNATURE = os.environ.get(
+    "VOMEOS_REQUIRED_SIGNATURE", "Sam | Vome team"
+)
+
+# Identities that must never appear as the signer of an outgoing message.
+_DEFAULT_FORBIDDEN_SIGNATURES = ("Vic", "Support Team")
+
+
+def forbidden_signatures() -> tuple[str, ...]:
+    """Signer names that may not appear on an outgoing message."""
+    raw = os.environ.get("VOMEOS_FORBIDDEN_SIGNATURES", "")
+    if raw.strip():
+        return tuple(n.strip() for n in raw.split(",") if n.strip())
+    return _DEFAULT_FORBIDDEN_SIGNATURES
+
+
 def internal_names() -> tuple[str, ...]:
     """Roster of internal names, overridable with VOMEOS_INTERNAL_NAMES.
 

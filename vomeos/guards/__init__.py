@@ -73,6 +73,7 @@ def run_guards(
 # Importing the implementations registers them. Kept at the bottom so the
 # decorator and GuardResult exist first.
 from vomeos.guards import builtin as _builtin  # noqa: E402,F401
+from vomeos.guards import claims as _claims  # noqa: E402,F401
 from vomeos.guards import client as _client  # noqa: E402,F401
 
 __all__ = [
