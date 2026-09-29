@@ -35,6 +35,7 @@ import os
 from vomeos.worker import (
     CLAIM_DAILY,
     CLAIM_MONTHLY,
+    CLAIM_NONE,
     CLAIM_WEEKLY,
     register_job,
 )
@@ -183,6 +184,30 @@ def register_all() -> None:
         claim=CLAIM_MONTHLY,
         time_limit=3600,
         description="Monthly help centre gap clustering",
+    )
+
+    # ClickUp webhook health, every hour on the half hour.
+    #
+    # Hourly, and the only sub-daily job here, because a suspended webhook is
+    # completely silent: no failed request, no timeout, nothing in the logs,
+    # and the board still looks normal. Every hour it stays suspended is
+    # another set of ON PROD tasks whose client emails are never sent. A daily
+    # check would have let the 2026-09-29 outage run most of a day.
+    #
+    # CLAIM_NONE on purpose. The claim table is keyed by period and has no
+    # hourly granularity, and this job does not need one: reactivating an
+    # already-active webhook is a no-op and Slack is only touched when
+    # something is actually wrong, so a double run costs one extra API call.
+    from clickup_webhook_monitor import check_clickup_webhook_health
+
+    register_job(
+        "support.clickup_webhook_health",
+        check_clickup_webhook_health,
+        cron="30 * * * *",
+        queue=QUEUE,
+        claim=CLAIM_NONE,
+        time_limit=120,
+        description="Watch and auto-recover the ClickUp status webhook",
     )
 
 

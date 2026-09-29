@@ -39,6 +39,7 @@ from kb_search import run_kb_health_scan
 from kb_gap import run_monthly_kb_gap_pass
 from kb_sync import run_kb_sync
 from clickup_assignee_handler import handle_assignee_updated
+from clickup_webhook_monitor import check_clickup_webhook_health
 from clickup_needs_review_handler import handle_escalated
 from clickup_user_education_handler import handle_user_education
 from clickup_waiting_client_handler import handle_needs_client_info
@@ -277,6 +278,22 @@ _scheduler.add_job(
         timezone="America/Montreal",
     ),
     misfire_grace_time=3600,
+    coalesce=True,
+    max_instances=1,
+)
+# ClickUp webhook health, hourly at :30.
+#
+# A suspended ClickUp webhook is completely silent: it sends no request at
+# all, so there is no failed call, no timeout and nothing in these logs, while
+# every ON PROD / user education / needs client info / escalated status change
+# is dropped and the client email is never sent. The ClickUp health field is
+# the only place the outage is visible, so something has to go and look.
+# Hourly because a daily check would have let the 2026-09-29 outage run most
+# of a day before anyone saw it.
+_scheduler.add_job(
+    check_clickup_webhook_health,
+    CronTrigger(minute=30, timezone="America/Montreal"),
+    misfire_grace_time=600,
     coalesce=True,
     max_instances=1,
 )

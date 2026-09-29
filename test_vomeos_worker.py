@@ -296,6 +296,16 @@ EXPECTED = {
     "support.kb_gap_pass": ("0 9 1-7 * tue", "support", CLAIM_MONTHLY),
 }
 
+# Jobs added after the migration. Kept separate from EXPECTED so that set
+# keeps meaning "what APScheduler used to run, at the times it ran it", which
+# is the only thing the fidelity check can prove.
+ADDED_SINCE = {
+    # Hourly, and deliberately unclaimed: the claim table has no hourly
+    # granularity and this job is idempotent, so a double run costs one
+    # extra ClickUp API call.
+    "support.clickup_webhook_health": ("30 * * * *", "support", CLAIM_NONE),
+}
+
 
 def test_every_apscheduler_job_was_migrated():
     """All eight, at the same times, on the support queue.
@@ -312,7 +322,9 @@ def test_every_apscheduler_job_was_migrated():
         job.key: (job.cron, job.queue, job.claim)
         for job in job_schedule.list_jobs()
     }
-    assert got == EXPECTED
+    migrated = {k: v for k, v in got.items() if k in EXPECTED}
+    assert migrated == EXPECTED
+    assert got == {**EXPECTED, **ADDED_SINCE}
 
 
 def test_the_riskiest_job_claims_daily():
