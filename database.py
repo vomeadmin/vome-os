@@ -342,6 +342,31 @@ def _database_url_is_usable(url: str) -> bool:
         return False
 
 
+def normalize_database_url(url: str) -> str:
+    """Pin the connection URL to a driver we actually ship.
+
+    Two rewrites, both of which have taken production down once:
+
+    `postgres://` is what some hosts hand out and SQLAlchemy 2.x rejects it.
+
+    A bare `postgresql://` lets SQLAlchemy choose the driver, and it changed
+    its mind: 2.0 picks psycopg2, 2.1 picks psycopg3. `sqlalchemy` was
+    unpinned here, so a rebuild resolved to 2.1 and every query started
+    failing with "No module named 'psycopg'" while the same code worked
+    locally on 2.0. Naming psycopg2 explicitly means the driver is decided by
+    this repository rather than by whatever the resolver felt like that day.
+
+    A URL that already names a driver (`postgresql+asyncpg://`) is left
+    alone, because that is someone being deliberate.
+    """
+    value = (url or "").strip()
+    if value.startswith("postgres://"):
+        value = value.replace("postgres://", "postgresql://", 1)
+    if value.startswith("postgresql://"):
+        value = value.replace("postgresql://", "postgresql+psycopg2://", 1)
+    return value
+
+
 def _get_engine():
     global _engine
     if _engine is None:
@@ -349,11 +374,9 @@ def _get_engine():
             raise RuntimeError(
                 "DATABASE_URL not set — cannot connect to PostgreSQL"
             )
-        url = DATABASE_URL
-        # Railway sometimes uses postgres:// which SQLAlchemy 2.x rejects
-        if url.startswith("postgres://"):
-            url = url.replace("postgres://", "postgresql://", 1)
-        _engine = create_engine(url, pool_pre_ping=True)
+        _engine = create_engine(
+            normalize_database_url(DATABASE_URL), pool_pre_ping=True
+        )
     return _engine
 
 

@@ -52,6 +52,22 @@ def register_table(
     _SCHEMA[name] = (create_sql, index_sql)
 
 
+def normalize_url(url: str) -> str:
+    """Rewrite a connection URL to name the driver explicitly.
+
+    `postgres://` is rejected by SQLAlchemy 2.x, and a bare `postgresql://`
+    lets the installed SQLAlchemy pick the driver, which is not a decision
+    that should change when a dependency resolves differently. A URL that
+    already names a driver is left alone.
+    """
+    value = (url or "").strip()
+    if value.startswith("postgres://"):
+        value = value.replace("postgres://", "postgresql://", 1)
+    if value.startswith("postgresql://"):
+        value = value.replace("postgresql://", "postgresql+psycopg2://", 1)
+    return value
+
+
 def usable() -> bool:
     """True when a database URL is configured and looks like Postgres."""
     url = config.DATABASE_URL
@@ -73,12 +89,13 @@ def get_engine() -> Engine | None:
         if _engine is not None:
             return _engine
         try:
-            url = config.DATABASE_URL
-            # SQLAlchemy dropped the postgres:// alias; some hosts still
-            # hand it out.
-            if url.startswith("postgres://"):
-                url = url.replace("postgres://", "postgresql://", 1)
-            _engine = create_engine(url, pool_pre_ping=True)
+            # Same normalization as the support application, and for the
+            # same reason: SQLAlchemy 2.0 defaults `postgresql://` to
+            # psycopg2 and 2.1 defaults it to psycopg3, so an unpinned
+            # rebuild silently changes the driver under you. Name it.
+            _engine = create_engine(
+                normalize_url(config.DATABASE_URL), pool_pre_ping=True
+            )
             return _engine
         except Exception as exc:
             _engine_failed = True

@@ -6,6 +6,10 @@ httpx
 slack-sdk
 apscheduler
 psycopg2-binary
-sqlalchemy
+# Pinned to the 2.0 line. SQLAlchemy 2.1 changed the default driver for
+# `postgresql://` from psycopg2 to psycopg3, which is not installed, and
+# an unpinned rebuild took production down with ModuleNotFoundError:
+# No module named 'psycopg'. Do not unpin without adding psycopg[binary].
+sqlalchemy>=2.0,<2.1
 celery
 redis
