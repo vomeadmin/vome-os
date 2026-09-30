@@ -51,9 +51,12 @@ from clickup_tasks import (
 from database import _get_engine, DATABASE_URL
 from model_config import SUPPORT_MODEL
 
-if sys.stdout.encoding != "utf-8":
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
+try:
+    if sys.stdout.encoding != "utf-8":
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+except (AttributeError, ValueError):
+    pass
 
 _client = anthropic.Anthropic()
 

@@ -59,9 +59,12 @@ from model_config import SUPPORT_MODEL
 import knowledge_synthesis as ks
 
 # Fix Windows encoding
-if sys.stdout.encoding != "utf-8":
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
+try:
+    if sys.stdout.encoding != "utf-8":
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+except (AttributeError, ValueError):
+    pass
 
 _client = anthropic.Anthropic()
 
