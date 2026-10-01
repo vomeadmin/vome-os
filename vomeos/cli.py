@@ -123,7 +123,12 @@ def cmd_jobs() -> int:
     real beat process would see rather than what the registry happens to hold
     in this interpreter.
     """
-    from vomeos.worker import describe, list_jobs, load_job_modules
+    from vomeos.worker import (
+        describe,
+        list_event_handlers,
+        list_jobs,
+        load_job_modules,
+    )
 
     load_job_modules()
     shape = describe()
@@ -132,21 +137,37 @@ def cmd_jobs() -> int:
     print(f"queues    {', '.join(shape['queues'])}")
 
     jobs = list_jobs()
-    if not jobs:
+    handlers = list_event_handlers()
+    if not jobs and not handlers:
         print(
-            "\nNo jobs registered. Set VOMEOS_JOB_MODULES to the module "
-            "that calls register_job (for example: support_jobs)."
+            "\nNothing registered. Set VOMEOS_JOB_MODULES to the module "
+            "that calls register_job or register_event_handler (for "
+            "example: support_jobs,engineering_jobs)."
         )
         return 0
 
-    width = max(len(j.key) for j in jobs)
-    header = "JOB".ljust(width)
-    print(f"\n{header}  CRON             QUEUE     CLAIM")
-    for job in jobs:
-        print(
-            f"{job.key.ljust(width)}  {job.cron.ljust(16)} "
-            f"{job.queue.ljust(9)} {job.claim or 'none'}"
-        )
+    if jobs:
+        width = max(len(j.key) for j in jobs)
+        header = "JOB".ljust(width)
+        print(f"\n{header}  CRON             QUEUE     CLAIM")
+        for job in jobs:
+            print(
+                f"{job.key.ljust(width)}  {job.cron.ljust(16)} "
+                f"{job.queue.ljust(9)} {job.claim or 'none'}"
+            )
+
+    # Event handlers have no cron: they run when another system says so.
+    # Listed here because "what will this worker actually pick up" is one
+    # question, not two.
+    if handlers:
+        width = max(len(h.key) for h in handlers)
+        print(f"\n{'EVENT HANDLER'.ljust(width)}  QUEUE     DESCRIPTION")
+        for handler in handlers:
+            print(
+                f"{handler.key.ljust(width)}  "
+                f"{handler.queue.ljust(9)} {handler.description}"
+            )
+
     if shape["eager"]:
         print(
             "\nEager mode: no broker configured, so tasks run inline and "

@@ -1,21 +1,24 @@
 """
 vomeos/worker/tasks.py
 
-The two tasks the OS ships. Everything else is data.
+The three tasks the OS ships. Everything else is data.
 
-WHY ONLY TWO
-------------
+WHY ONLY THREE
+--------------
 A Celery task per job would mean the OS importing every application module
 that defines one, which is exactly the dependency the OS is not allowed to
-have. Instead there is one generic task that takes a job key and looks it up
-in the registry, and one that takes an agent address and runs it. Adding a job
-or an agent never requires a new task, a new import, or a worker code change.
+have. Instead there is one generic task per shape of work, each of which
+looks its target up in a registry the application populated. Adding a job, an
+agent or a webhook handler never requires a new task, a new import, or a
+worker code change.
 
-    vomeos.run_job(job_key)          run a registered scheduled job
-    vomeos.run_agent(agent, context) run one agent off the queue
+    vomeos.run_job(job_key)            run a registered scheduled job
+    vomeos.run_agent(agent, context)   run one agent off the queue
+    vomeos.run_event(key, payload)     handle one event from another system
 
-Both are idempotent-by-claim where it matters and both report to the OS's own
-tables rather than to a Celery result backend.
+The three shapes are "at a time", "ask a model", and "something happened".
+All three report to the OS's own tables rather than to a Celery result
+backend.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ import time
 
 from vomeos.worker import claim as job_claim
 from vomeos.worker.app import app
+from vomeos.worker.events import EventError, get_event_handler
 from vomeos.worker.schedule import JobError, get_job
 
 
@@ -123,6 +127,56 @@ def run_agent_task(
     }
 
 
+@app.task(
+    name="vomeos.run_event",
+    bind=True,
+    max_retries=2,
+    default_retry_delay=30,
+)
+def run_event(self, handler_key: str, payload: dict) -> dict:
+    """Handle one event from another system, off the queue.
+
+    For a webhook. The web process verifies the signature, does whatever
+    filtering is free, and hands the payload here so a deploy, a slow third
+    party or a model call cannot take the endpoint down with it.
+
+    No claim: an event has no period to claim, and the OS cannot know what
+    the source system considers the same event twice. Idempotency is the
+    handler's own, keyed on the source's identifier, and every handler
+    registered is required to have one. See `vomeos/worker/events.py`.
+    """
+    try:
+        handler = get_event_handler(handler_key)
+    except EventError as exc:
+        # An unknown key is a configuration problem, not a transient one.
+        print(f"[VOMEOS] {exc}")
+        return {
+            "handler": handler_key,
+            "status": "unknown_handler",
+            "error": str(exc),
+        }
+
+    started = time.monotonic()
+    try:
+        result = handler.fn(payload)
+    except Exception as exc:
+        duration = int((time.monotonic() - started) * 1000)
+        error = f"{type(exc).__name__}: {exc}"
+        print(f"[VOMEOS] {handler.key} failed after {duration}ms: {error}")
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc)
+        return {"handler": handler.key, "status": "error", "error": error}
+
+    duration = int((time.monotonic() - started) * 1000)
+    print(f"[VOMEOS] {handler.key} finished in {duration}ms")
+    return {
+        "handler": handler.key,
+        "status": "ok",
+        "duration_ms": duration,
+        "result": result if isinstance(result, dict) else {},
+    }
+
+
 def enqueue_job(job_key: str, force: bool = False):
     """Queue a scheduled job now, in addition to its cron.
 
@@ -150,3 +204,18 @@ def enqueue_agent(
     return run_agent_task.apply_async(
         args=(agent, context, subject_type, subject_id), queue=target
     )
+
+
+def enqueue_event(handler_key: str, payload: dict, *, queue: str = ""):
+    """Queue an event for its registered handler.
+
+    Routes to the handler's own queue by default, so a flood from one source
+    system cannot starve another division's work.
+
+    In eager mode this runs inline, which is what keeps a webhook working
+    before Redis exists. That is also why the caller must do its filtering
+    before calling this: in eager mode, whatever is enqueued runs inside the
+    web request.
+    """
+    target = queue or get_event_handler(handler_key).queue
+    return run_event.apply_async(args=(handler_key, payload), queue=target)

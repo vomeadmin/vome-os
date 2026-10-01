@@ -34,6 +34,13 @@ from vomeos.worker.app import (
     describe,
     refresh_beat_schedule,
 )
+from vomeos.worker.events import (
+    EventError,
+    EventHandler,
+    get_event_handler,
+    list_event_handlers,
+    register_event_handler,
+)
 from vomeos.worker.schedule import (
     CLAIM_DAILY,
     CLAIM_MONTHLY,
@@ -53,18 +60,24 @@ __all__ = [
     "CLAIM_MONTHLY",
     "CLAIM_NONE",
     "CLAIM_WEEKLY",
+    "EventError",
+    "EventHandler",
     "Job",
     "JobError",
     "app",
     "build_beat_schedule",
     "describe",
     "enqueue_agent",
+    "enqueue_event",
     "enqueue_job",
+    "get_event_handler",
     "get_job",
+    "list_event_handlers",
     "list_jobs",
     "load_job_modules",
     "queues",
     "refresh_beat_schedule",
+    "register_event_handler",
     "register_job",
 ]
 
@@ -77,7 +90,7 @@ celery_app = app
 def __getattr__(name):
     # Deferred so that importing the registry does not pull in the task
     # module, which imports the agent runtime and the Anthropic SDK.
-    if name in ("enqueue_job", "enqueue_agent"):
+    if name in ("enqueue_job", "enqueue_agent", "enqueue_event"):
         from vomeos.worker import tasks
 
         return getattr(tasks, name)

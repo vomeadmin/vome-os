@@ -46,6 +46,7 @@ from celery.schedules import crontab
 from celery.signals import beat_init, worker_init
 from kombu import Queue
 
+from vomeos.worker import events as job_events
 from vomeos.worker import schedule as job_schedule
 
 # ---------------------------------------------------------------------------
@@ -75,15 +76,24 @@ DEFAULT_QUEUE = "default"
 def _queue_names() -> tuple[str, ...]:
     """Queues to declare.
 
-    Registered jobs contribute theirs, and VOMEOS_QUEUES can add more so a
-    division's queue exists before its first job is written.
+    Registered jobs and event handlers contribute theirs, and VOMEOS_QUEUES
+    can add more so a division's queue exists before its first job is written.
     """
     declared = {
         name.strip()
         for name in os.environ.get("VOMEOS_QUEUES", "").split(",")
         if name.strip()
     }
-    return tuple(sorted({DEFAULT_QUEUE, *declared, *job_schedule.queues()}))
+    return tuple(
+        sorted(
+            {
+                DEFAULT_QUEUE,
+                *declared,
+                *job_schedule.queues(),
+                *job_events.queues(),
+            }
+        )
+    )
 
 
 app = Celery(
@@ -185,4 +195,7 @@ def describe() -> dict:
         "timezone": TIMEZONE,
         "queues": list(_queue_names()),
         "jobs": [job.key for job in job_schedule.list_jobs()],
+        "event_handlers": [
+            handler.key for handler in job_events.list_event_handlers()
+        ],
     }

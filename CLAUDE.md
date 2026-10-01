@@ -50,7 +50,7 @@ vomeos/            the kernel. Imports nothing from the app.
   guards/          deterministic output checks, fail closed
   store.py         the OS's own Postgres (all tables vomeos_ prefixed)
   trace.py         vomeos_agent_runs, one row per agent run
-  worker/          Celery app, job registry, period claims
+  worker/          Celery app, job + event registries, period claims
   integrations/    HTTP connectors to other systems
   onboarding.py    the hiring gate
   evaluate.py      the answer-key harness
@@ -62,6 +62,8 @@ agents/            the staff, one directory each
 
 main.py            support app: FastAPI webhooks + APScheduler
 support_jobs.py    the 8 scheduled jobs, registered with the OS
+engineering_jobs.py the Sentry event handler + daily report
+sentry_*.py        the Sentry triage pipeline. See SENTRY_TRIAGE.md
 sprint.py          run a support sprint locally, sends nothing
 clickup_search.py  find the task that already covers a symptom
 product_*.py       product knowledge: navigation, UI strings, guides
@@ -144,7 +146,33 @@ jobs (anything that emails or closes tickets) must always claim.
 
 ---
 
-## State of play, 2026-09-29
+## Adding a webhook handler
+
+Work that arrives when something happens, rather than at a time. Registered
+the same way and for the same reason: the OS owns execution, the application
+owns what runs.
+
+```python
+from vomeos.worker import register_event_handler
+
+register_event_handler(
+    "engineering.sentry_issue", handle_sentry_issue, queue="engineering",
+)
+```
+
+The web endpoint then does only what is cheap and deterministic (verify the
+signature, filter) and calls `enqueue_event(key, payload)`. Everything slow
+happens on a worker, so a deploy or a slow third party cannot take the
+endpoint down.
+
+**An event has no period to claim, so every handler must carry its own
+idempotency key, on the source system's identifier.** Celery delivers at least
+once. `sentry_handler` claims the Sentry issue id in `vomeos_sentry_issues`
+before acting; a handler with no such key is a bug, not a style choice.
+
+---
+
+## State of play, 2026-09-30
 
 **Built and working:**
 - Kernel: manifests, prompt composition, tiers, guards, trace, onboarding gate
@@ -155,8 +183,8 @@ jobs (anything that emails or closes tickets) must always claim.
 - `sprint.py`, proven against the live queue (61 open tickets)
 - Product knowledge: frontend routes (379 mapped), UI strings (13.8k), Setup
   Guide, feature catalog
-- Worker layer: Celery app, job registry, period claims, all 8 APScheduler
-  jobs ported at identical crons
+- Worker layer: Celery app, job registry, event registry, period claims, all 8
+  APScheduler jobs ported at identical crons
 
 **Built but NOT running:**
 - Celery, Redis, workers, beat. No broker is configured, so the OS runs in
@@ -164,6 +192,11 @@ jobs (anything that emails or closes tickets) must always claim.
   `main.py` still owns the schedule exactly as before. Setting
   `VOMEOS_BROKER_URL` is the cutover, and unsetting it is the rollback.
   **Only ever run one beat process.**
+- Sentry triage, phase 1. `POST /webhook/sentry` verifies, redacts, gates and
+  claims into `vomeos_sentry_issues`, and reports at 09:00. It does nothing
+  else on purpose: no model call, no Slack alert, no pull request. It is inert
+  until `SENTRY_WEBHOOK_SECRET` is set, because the endpoint fails closed and
+  403s every unsigned request. See [SENTRY_TRIAGE.md](SENTRY_TRIAGE.md).
 
 **Not built:**
 - Vision. `composer.render_context` builds a text-only message, so agents are
@@ -171,7 +204,12 @@ jobs (anything that emails or closes tickets) must always claim.
 - Backend code as a knowledge source. Connectors exist
   (`integrations/code_search.py`, read-only, no write methods) but no agent is
   granted them.
-- The reply drafter, feature-request analyst, and bug agent.
+- The reply drafter and the feature-request analyst.
+- Sentry triage phases 2 to 5: the three engineering agents, the Slack budget,
+  the patch guard and `code_write.py`. **Phase 5 (opening a pull request)
+  needs an explicit amendment to the handbook rule "commit code, merge a
+  branch, or deploy" before it ships.** The argument is in SENTRY_TRIAGE.md,
+  under "The auto-PR decision". Do not build it before that is agreed.
 
 **Known open items:**
 - The triage answer key was written by Claude, not reviewed by Sam.

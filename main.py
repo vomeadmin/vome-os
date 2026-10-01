@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 import httpx
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from fastapi import FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Request, Response
 
 from agent import (
     process_ticket,
@@ -33,6 +33,7 @@ from agent import (
     sync_zoho_to_clickup,
     is_zoho_reply_event,
 )
+from ops.auth import verify_ops_token
 from ops.router import ops_router
 from intake import run_intake_turn
 from kb_search import run_kb_health_scan
@@ -48,6 +49,10 @@ from calendly_booking_handler import handle_calendly_event
 from database import init_db
 from field_feedback import handle_field_feedback
 from on_prod_handler import handle_on_prod
+from sentry_handler import (
+    handle_webhook as handle_sentry_webhook,
+    run_shadow_report as run_sentry_shadow_report,
+)
 from slack_agent_mention_handler import handle_agent_mention
 from slack_reply_handler import handle_reply
 from slack_digest import send_daily_digest
@@ -294,6 +299,21 @@ _scheduler.add_job(
     check_clickup_webhook_health,
     CronTrigger(minute=30, timezone="America/Montreal"),
     misfire_grace_time=600,
+    coalesce=True,
+    max_instances=1,
+)
+
+# Sentry pipeline report, 09:00. Mirrors engineering.sentry_report in
+# engineering_jobs.py, the same way every job above mirrors support_jobs.py,
+# so the schedule is identical whichever side owns it.
+_scheduler.add_job(
+    run_sentry_shadow_report,
+    CronTrigger(
+        hour=int(os.environ.get("SENTRY_DIGEST_HOUR", "9")),
+        minute=int(os.environ.get("SENTRY_DIGEST_MINUTE", "0")),
+        timezone="America/Montreal",
+    ),
+    misfire_grace_time=3600,
     coalesce=True,
     max_instances=1,
 )
@@ -693,6 +713,40 @@ async def calendly_webhook(request: Request):
         return {"status": "error"}
 
     return {"status": result.get("status", "ok")}
+
+
+# ---------------------------------------------------------------------------
+# Sentry webhook
+# ---------------------------------------------------------------------------
+#
+# Subscribe as a Sentry "Internal Integration" with a webhook URL of
+# <host>/webhook/sentry and the `issue` and `error` resources. The alert rule
+# for regressions and volume thresholds points at the same URL.
+#
+# The work here is deliberately tiny: verify, filter, hand off. Everything
+# that could be slow happens on the engineering queue. See sentry_handler.
+
+@app.post("/webhook/sentry")
+async def sentry_webhook(request: Request):
+    raw_body = await request.body()
+    signature = request.headers.get("sentry-hook-signature", "")
+    resource = request.headers.get("sentry-hook-resource", "")
+
+    try:
+        result = handle_sentry_webhook(raw_body, signature, resource)
+    except Exception as e:
+        # The handler catches its own errors; this is the backstop. Answer
+        # 2xx so Sentry does not retry a payload we cannot process anyway.
+        print(f"[SENTRY ERROR] {e}")
+        return {"status": "error"}
+
+    if result.get("status") == "rejected":
+        # The one path that is not 2xx. A bad signature is either a rotated
+        # secret or someone probing, and both should be loud.
+        print("[SENTRY] rejected webhook with a bad signature")
+        return Response(content="Invalid signature", status_code=403)
+
+    return result
 
 
 @app.post("/chat/intake")
@@ -1619,6 +1673,39 @@ async def debug_calendly_config(check: int = 0):
 async def health():
     env_status = {v: bool(os.environ.get(v)) for v in REQUIRED_ENV}
     return {"status": "ok", "env": env_status}
+
+
+@app.get("/sentry/status", dependencies=[Depends(verify_ops_token)])
+async def sentry_status():
+    """Is the Sentry pipeline configured and what is it dropping?
+
+    A pipeline that rejects every webhook because a secret is missing looks
+    exactly like a quiet week from the outside, so make it answerable.
+
+    Behind the ops token because it names every repository, Sentry project
+    and branch we run. None of that is a secret on its own and all of it is
+    free reconnaissance.
+    """
+    from sentry_handler import describe as describe_sentry
+
+    return describe_sentry()
+
+
+@app.get("/sentry/recent", dependencies=[Depends(verify_ops_token)])
+async def sentry_recent(limit: int = 30, status: str = ""):
+    """Recent issues in the ledger, for tuning the gate by eye.
+
+    Behind the ops token for a stronger reason than /sentry/status: issue
+    titles are redacted, not sanitised, and an error message is the most
+    likely place for a fragment of a customer's data to survive. This is an
+    internal debugging view, not a public one.
+    """
+    import sentry_ledger
+
+    return {
+        "summary": sentry_ledger.summary(days=1),
+        "issues": sentry_ledger.recent(limit=min(limit, 200), status=status),
+    }
 
 
 # ---------------------------------------------------------------------------
