@@ -41,6 +41,7 @@ from dataclasses import asdict, replace
 
 import sentry_gate
 import sentry_ledger
+import sentry_notify
 import sentry_projects
 import sentry_redact
 from vomeos.integrations import sentry as sentry_api
@@ -380,5 +381,6 @@ def describe() -> dict:
         "queue": QUEUE,
         "gate": sentry_gate.describe(),
         "routing": sentry_projects.describe(),
+        "notify": sentry_notify.describe(),
         "sentry": sentry_api.describe(),
     }

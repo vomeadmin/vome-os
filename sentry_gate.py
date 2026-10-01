@@ -62,6 +62,17 @@ def min_level() -> str:
 # Exception types that are noise by construction. Each entry names why,
 # because an unexplained entry is one nobody will ever dare remove.
 IGNORED_EXCEPTION_TYPES = {
+    # Transient by design: the task raises, Celery retries, it succeeds.
+    # Three of these were among the nine survivors on prod-vome, with 217
+    # events between them in a week, which made them the loudest thing in the
+    # feed and the least actionable. Confirmed transient by Sam, 2026-10-01.
+    #
+    # The risk being accepted: a retry that NEVER succeeds now looks identical
+    # to one that does, and nothing surfaces it. If mapped answers start
+    # silently failing to sync, this rule is the reason nobody hears about it.
+    # The honest fix is a "still failing after 24h" check, which is real work
+    # and not worth it until it has actually happened once.
+    "MappedAnswerRetryableError",
     # The client went away mid-response. Nothing is broken on our side and
     # there is nothing to fix.
     "BrokenPipeError",
@@ -151,6 +162,17 @@ IGNORED_CULPRIT_PATTERNS = tuple(
         r"^anonymous$",
         r"/node_modules/",
         r"gtm\.js|googletagmanager|analytics\.js|fbevents\.js",
+        # An engineer typing in a production Django shell. Four of the twenty
+        # new prod-vome issues in one week were this: a DoesNotExist, a
+        # FieldError on a mistyped keyword, an AttributeError on a constant
+        # that does not exist, a bad UUID. All real exceptions, none of them
+        # bugs in the product, and all of them from somebody exploring.
+        #
+        # Deliberately narrow: `management.commands.shell` only, not
+        # `management.commands`. A failing cron or a broken management
+        # command IS a real bug and must still come through. The shell is the
+        # one that is interactive by definition.
+        r"management\.commands\.shell",
     )
 )
 

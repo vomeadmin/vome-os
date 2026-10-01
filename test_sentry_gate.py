@@ -266,6 +266,39 @@ def test_node_modules_errors_are_dropped(monkeypatch):
     ).blocked
 
 
+def test_django_shell_sessions_are_dropped(monkeypatch):
+    # An engineer typing in a production shell. Four of the twenty new
+    # prod-vome issues in one week were this: a DoesNotExist, a FieldError on
+    # a mistyped keyword, an AttributeError on a constant that does not
+    # exist, a bad UUID. Real exceptions, none of them product bugs.
+    _clear(monkeypatch)
+    for title, etype in (
+        ("Opportunity.DoesNotExist: matching query does not exist.",
+         "Opportunity.DoesNotExist"),
+        ("FieldError: Cannot resolve keyword 'opportunity_name' into field.",
+         "FieldError"),
+    ):
+        decision = gate.check(_signal(
+            title=title, exception_type=etype,
+            culprit="django.core.management.commands.shell in <module>",
+        ))
+        assert decision.blocked, title
+        assert decision.rule == "culprit"
+
+
+def test_other_management_commands_are_not_dropped(monkeypatch):
+    # The paired assertion, and the reason the pattern is narrow. A failing
+    # cron or a broken management command is a REAL bug. Only the shell is
+    # interactive by definition.
+    _clear(monkeypatch)
+    for culprit in (
+        "django.core.management.commands.migrate in <module>",
+        "apps.opportunity.management.commands.recalc_start_dates",
+        "SendOpportunityShiftEnrollmentConfirmAttendanceReminderNotificationTask",
+    ):
+        assert gate.check(_signal(culprit=culprit)).passed, culprit
+
+
 def test_our_own_code_is_never_dropped_by_the_culprit_rule(monkeypatch):
     # The paired assertion. The culprit patterns must not match our source.
     _clear(monkeypatch)
