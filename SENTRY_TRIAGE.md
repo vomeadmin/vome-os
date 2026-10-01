@@ -32,16 +32,23 @@ explicitly in "The auto-PR decision" below, not quietly worked around.
 
 ## The projects, and the thing that is not obvious about them
 
-Five Sentry projects, three repositories. The table lives in
+**Seven** Sentry projects, four repositories. The table lives in
 `sentry_projects.py`.
 
-| Sentry project | Repository | Branch | Host | Stack |
-|---|---|---|---|---|
-| `dev-vome-app` | `vomedjango/vomedjango-restored-core-app` | `development` | Bitbucket | backend |
-| `prod-vome` | same repo | `master` | Bitbucket | backend |
-| `dev-volunteer-database` | `vomedjango/vomedjango-database-app` | `development` | Bitbucket | backend |
-| `prod-volunteer-database` | same repo | `master` (unconfirmed) | Bitbucket | backend |
-| `vome-2j` | `samfagen15/VomeApp` | `master` | GitHub | mobile |
+| Sentry project | Repository | Branch | Host | Stack | Data? |
+|---|---|---|---|---|---|
+| `dev-vome-app` | `vomedjango/vomedjango-restored-core-app` | `development` | Bitbucket | backend | yes |
+| `prod-vome` | same repo | `master` | Bitbucket | backend | yes |
+| `dev-volunteer-database` | `vomedjango/vomedjango-database-app` | `development` | Bitbucket | backend | yes |
+| `prod-volunteer-database` | same repo | `master` (unconfirmed) | Bitbucket | backend | yes |
+| `dev-vome-web` | `vomeadmin/vome-react` | `develop` | GitHub | frontend | **none** |
+| `prod-vome-web` | same repo | `master` (unconfirmed) | GitHub | frontend | **none** |
+| `vome-2j` | `samfagen15/VomeApp` | `master` | GitHub | mobile | yes |
+
+**Count the projects from the API, not the dashboard.** The project grid
+honours a "My Teams" filter, which showed five of the seven and sent the first
+version of this table out with the web client missing entirely.
+`find_projects` is the inventory.
 
 **The branch is per project, not per repository, and that is the point.**
 `dev-vome-app` and `prod-vome` are the same repository at different refs.
@@ -84,23 +91,26 @@ occasionally wrong.
 build `com.vomeinc.vomemobile`, build type `app store`, with device, memory
 and foreground state. Those contexts only exist on a native app.
 
-Three things follow from that, and all three want acting on separately from
-this project:
+Three things follow, and the first two want acting on separately from this
+project:
 
-- **The admin web client has no Sentry project at all.** `vomeadmin/vome-react`
-  is the interface our customers spend their day in, and the only frontend
-  project we have is the mobile app. A customer reporting "the schedule page
-  went blank" leaves no trace anywhere today. Of the instrumentation gaps
-  this is the one worth closing first, and it is worth more than any phase of
-  this pipeline.
+- **`dev-vome-web` and `prod-vome-web` receive nothing.** Zero issues in 90
+  days on either, checked against the API on 2026-10-01. A project with no
+  events is not an instrumented service, it is an empty box with a name on
+  it, and it reads as coverage on every dashboard. Either the SDK is missing
+  from vome-react or it is not reporting. This is the most valuable thing on
+  this list: vome-react is the interface customers spend their day in, and
+  today a blank schedule page leaves no trace anywhere.
 - **`vomedjango-chats-app` and `vomedjango-integrations-app` have no project
-  either.** Same gap, lower stakes.
-- **`VOMEOS_GITHUB_OWNER` must be `samfagen15`, not `vomeadmin`.** The mobile
-  repo sits on a personal account while `vome-react` is in the organization,
-  and `code_search.py` reads a single owner. That works today because VomeApp
-  is the only GitHub repo in scope. The day vome-react gets a Sentry project,
-  the analyst needs per-repo owners, which is a small change to
-  `code_search.py` and is noted in phase 3 rather than done now.
+  at all.** Same gap, lower stakes.
+- **Two GitHub owners, now handled in code.** `vome-react` is in the
+  `vomeadmin` org and `VomeApp` is on a personal account, so a single
+  `VOMEOS_GITHUB_OWNER` can reach one or the other and the failure is a 404
+  that reads like "the file does not exist". Every `code_search.py` GitHub
+  method now takes an `owner`, with the env var as the default. The same pass
+  gave `recent_commits` a `ref` on both hosts: Bitbucket's bare `/commits`
+  answers for the main branch, so asking it about a dev error returned the
+  wrong history and looked entirely plausible doing it.
 
 An unmapped project slug is dropped and named in its own section of the daily
 report. A new Sentry project being silently ignored forever is exactly the
@@ -184,6 +194,12 @@ already filed is not news.
 Pure Python, no model, runs inside the webhook before anything is queued. Any
 one of these drops the payload on the floor:
 
+- the issue category is not an error (`issue_category`). Sentry sends
+  performance issues (N+1 queries, slow calls) down the same webhook, and on
+  the live dev project they were four of seven issues in 48 hours. Real work,
+  not bugs, and the fix for one is "add select_related" rather than anything
+  this pipeline should open a PR for. Add `db_query` to
+  `SENTRY_ISSUE_CATEGORIES` to triage them.
 - the project is not in the routing table (`project_unmapped`, reported by
   name rather than swallowed)
 - the project is a dev project (`project_dev`). This is the real production

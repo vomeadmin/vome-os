@@ -130,21 +130,31 @@ class Bitbucket(Connector):
         return _truncate(result)
 
     def recent_commits(
-        self, repo: str, path: str = "", limit: int = 10
+        self, repo: str, path: str = "", limit: int = 10, ref: str = ""
     ) -> IntegrationResult:
-        """What changed here lately.
+        """What changed here lately, on a named branch.
 
         The question behind most regression triage is "what shipped just
         before this started", and this is how to answer it without guessing.
+
+        `ref` is not optional in practice. Bitbucket's bare `/commits`
+        endpoint answers for the repository's main branch, so asking it about
+        an error from the dev deployment returns the wrong history and looks
+        entirely plausible doing it. The branch goes in the path as
+        `/commits/{ref}`, and `path` becomes a query filter rather than a
+        path segment, because the two cannot both be path segments.
         """
         if not _repo_permitted(repo):
             return self._denied("recent_commits", repo)
-        suffix = f"/{path}" if path else ""
+        params: dict = {"pagelen": min(int(limit), 50)}
+        if path:
+            params["path"] = path
+        suffix = f"/{ref}" if ref else ""
         return self._call(
             "recent_commits",
             "GET",
             f"/repositories/{self.workspace}/{repo}/commits{suffix}",
-            params={"pagelen": min(int(limit), 50)},
+            params=params,
         )
 
     def _denied(self, operation: str, repo: str) -> IntegrationResult:
@@ -167,10 +177,25 @@ class GitHub(Connector):
 
     @property
     def owner(self) -> str:
+        """The default owner, used when a caller does not name one.
+
+        WHY EVERY METHOD ALSO TAKES AN OWNER
+        ------------------------------------
+        One environment variable was enough right up until it was not. Our
+        two GitHub repositories sit under different accounts:
+        `vomeadmin/vome-react` is in the organization and
+        `samfagen15/VomeApp` is on a personal account. A single
+        VOMEOS_GITHUB_OWNER can reach one or the other, never both, and the
+        failure is a 404 that reads like "the file does not exist" rather
+        than "you looked in the wrong account".
+
+        So the owner travels with the call. The env var remains the default
+        for a caller that has only one.
+        """
         return os.environ.get("VOMEOS_GITHUB_OWNER", "")
 
     def configured(self) -> bool:
-        return bool(os.environ.get("VOMEOS_GITHUB_TOKEN") and self.owner)
+        return bool(os.environ.get("VOMEOS_GITHUB_TOKEN"))
 
     def headers(self) -> dict[str, str]:
         token = os.environ.get("VOMEOS_GITHUB_TOKEN", "")
@@ -180,10 +205,13 @@ class GitHub(Connector):
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
-    def search_code(self, query: str, repo: str = "") -> IntegrationResult:
+    def search_code(
+        self, query: str, repo: str = "", owner: str = ""
+    ) -> IntegrationResult:
         if repo and not _repo_permitted(repo):
             return self._denied("search_code", repo)
-        scope = f"repo:{self.owner}/{repo}" if repo else f"user:{self.owner}"
+        who = owner or self.owner
+        scope = f"repo:{who}/{repo}" if repo else f"user:{who}"
         return self._call(
             "search_code",
             "GET",
@@ -192,7 +220,7 @@ class GitHub(Connector):
         )
 
     def read_file(
-        self, repo: str, path: str, ref: str = ""
+        self, repo: str, path: str, ref: str = "", owner: str = ""
     ) -> IntegrationResult:
         if not _repo_permitted(repo):
             return self._denied("read_file", repo)
@@ -200,23 +228,37 @@ class GitHub(Connector):
         result = self._call(
             "read_file",
             "GET",
-            f"/repos/{self.owner}/{repo}/contents/{path}",
+            f"/repos/{owner or self.owner}/{repo}/contents/{path}",
             params=params,
         )
         return _truncate(result)
 
     def recent_commits(
-        self, repo: str, path: str = "", limit: int = 10
+        self,
+        repo: str,
+        path: str = "",
+        limit: int = 10,
+        ref: str = "",
+        owner: str = "",
     ) -> IntegrationResult:
+        """What changed here lately, on a named branch.
+
+        `ref` matters as much as `path`. The question behind regression triage
+        is "what shipped just before this started", and the answer differs per
+        branch: an error from the dev deployment was caused by something on
+        `development`, not by whatever last landed on the default branch.
+        """
         if not _repo_permitted(repo):
             return self._denied("recent_commits", repo)
         params = {"per_page": min(int(limit), 50)}
         if path:
             params["path"] = path
+        if ref:
+            params["sha"] = ref
         return self._call(
             "recent_commits",
             "GET",
-            f"/repos/{self.owner}/{repo}/commits",
+            f"/repos/{owner or self.owner}/{repo}/commits",
             params=params,
         )
 

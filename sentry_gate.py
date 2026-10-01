@@ -71,8 +71,6 @@ IGNORED_EXCEPTION_TYPES = {
     # Scanners and bots probing for URLs and vhosts that do not exist.
     "Http404",
     "DisallowedHost",
-    "SuspiciousOperation",
-    "SuspiciousFileOperation",
     "InvalidSessionKey",
     # A deploy replaced the bundle while someone had the old page open. Real,
     # but it is a deploy artefact rather than a bug, and it fires in bulk on
@@ -92,11 +90,27 @@ IGNORED_EXCEPTION_TYPES = {
     "ResizeObserverError",
 }
 
+# DELIBERATELY NOT IGNORED, and they were until the live data arrived:
+# `SuspiciousOperation` and `SuspiciousFileOperation`. Both went on the list
+# on the assumption they were scanner noise. That is true of DisallowedHost,
+# a sibling subclass, and false of these two.
+#
+# The dev project had a real one within 48 hours: "SuspiciousFileOperation:
+# Storage can not find an available filename" on an announcement PDF upload,
+# which is a genuine filename-collision bug in our own attachment path. The
+# rule would have eaten it silently. Django raises the bare parent for real
+# bugs as well, so ignoring a parent class is how a noise list starts
+# swallowing the thing it exists to surface.
+#
+# If the bare SuspiciousOperation does turn out to be noisy, add it back
+# through SENTRY_IGNORE_EXCEPTION_TYPES, which needs no deploy. Evidence
+# first, in both directions.
+
 # Substrings matched against the issue title, for the errors whose type is
 # generic and whose message is the identifying part.
 IGNORED_TITLE_PATTERNS = (
-    # Browser noise. Kept for the day vome-react gets a Sentry project; it
-    # has none today, so none of these currently fire.
+    # Browser noise, for vome-react. Its two projects (dev-vome-web and
+    # prod-vome-web) exist but receive nothing, so none of these fire yet.
     "ResizeObserver loop limit exceeded",
     "ResizeObserver loop completed with undelivered notifications",
     "Loading chunk",
@@ -149,7 +163,7 @@ def _csv_env(name: str) -> tuple[str, ...]:
 def project_allowlist() -> tuple[str, ...]:
     """Sentry projects in scope, from the routing table.
 
-    Never empty, and empty does NOT mean "everything". We run five projects
+    Never empty, and empty does NOT mean "everything". We run seven projects
     and they are all known in advance, so an unrecognised slug is a new
     project nobody has mapped yet, which is a configuration gap to report
     rather than traffic to accept.
@@ -164,6 +178,29 @@ def allowed_environments() -> tuple[str, ...]:
 
 def _extra_ignored_types() -> set[str]:
     return set(_csv_env("SENTRY_IGNORE_EXCEPTION_TYPES"))
+
+
+# Issue categories that enter the pipeline. Errors only, by default.
+#
+# Sentry sends performance issues (N+1 queries, slow DB calls, uncompressed
+# assets) down the same webhook as exceptions, and on the live dev project
+# they were four of seven issues in 48 hours. They are real and worth fixing
+# and they are NOT bugs: the output of triaging one is "add select_related
+# here", which belongs in an optimisation backlog rather than in a bug
+# pipeline that can open a pull request.
+#
+# They were already being dropped, but by accident: their level is `info`, so
+# the level rule caught them and reported them as a level drop. That is the
+# wrong reason, it hides how many there are, and it would break the moment
+# Sentry raised their level. Now they are dropped by name and counted
+# separately, so "should we triage N+1 queries too" becomes an answerable
+# question rather than an invisible one.
+DEFAULT_CATEGORIES = ("error",)
+
+
+def allowed_categories() -> tuple[str, ...]:
+    """Issue categories in scope. Add db_query here to triage N+1 queries."""
+    return _csv_env("SENTRY_ISSUE_CATEGORIES") or DEFAULT_CATEGORIES
 
 
 @dataclass(frozen=True)
@@ -199,13 +236,22 @@ def check(signal: IssueSignal) -> Decision:
     Order is cheapest and most selective first. Every branch names a rule so
     the daily report can say which one is doing the work.
     """
-    # 1. Level. The single most selective rule in normal operation.
+    # 1. Issue category. Before the level rule, because a performance issue
+    # has level `info` and would otherwise be reported as a level drop, which
+    # is true but useless: it hides the count behind the wrong reason.
+    category = (signal.category or "error").lower()
+    if category not in allowed_categories():
+        return Decision(
+            False, "issue_category", f"{category} is not triaged"
+        )
+
+    # 2. Level. The single most selective rule in normal operation.
     if _level_rank(signal.level) < _level_rank(min_level()):
         return Decision(
             False, "level", f"{signal.level or 'unset'} below {min_level()}"
         )
 
-    # 2. Project. THIS is the production filter, not the environment rule
+    # 3. Project. THIS is the production filter, not the environment rule
     # below. Dev and prod are separate Sentry projects here (prod-vome and
     # dev-vome-app are the same codebase), so the routing table decides what
     # is production and the environment tag is only a second line.
@@ -225,7 +271,7 @@ def check(signal: IssueSignal) -> Decision:
             False, rule, f"{signal.project} is not triaged"
         )
 
-    # 3. Environment, the second line.
+    # 4. Environment, the second line.
     #
     # An `issue.created` payload carries no environment field at all, so an
     # unknown environment CANNOT mean "drop it": that would silently discard
@@ -244,20 +290,20 @@ def check(signal: IssueSignal) -> Decision:
     elif os.environ.get("SENTRY_REQUIRE_ENVIRONMENT", "").lower() == "true":
         return Decision(False, "environment_unknown", "no environment on payload")
 
-    # 4. Exception type.
+    # 5. Exception type.
     ignored_types = IGNORED_EXCEPTION_TYPES | _extra_ignored_types()
     if signal.exception_type and signal.exception_type in ignored_types:
         return Decision(
             False, "exception_type", f"{signal.exception_type} is on the list"
         )
 
-    # 5. Title substrings, for the errors whose type is generic.
+    # 6. Title substrings, for the errors whose type is generic.
     title = signal.title or ""
     for pattern in IGNORED_TITLE_PATTERNS:
         if pattern.lower() in title.lower():
             return Decision(False, "title", f"matched {pattern!r}")
 
-    # 6. Culprit. Code that is not ours.
+    # 7. Culprit. Code that is not ours.
     culprit = signal.culprit or ""
     if culprit:
         for pattern in IGNORED_CULPRIT_PATTERNS:
@@ -273,6 +319,7 @@ def describe() -> dict[str, object]:
     """The gate's current configuration, for the health check and the CLI."""
     return {
         "min_level": min_level(),
+        "categories": list(allowed_categories()),
         "projects": list(project_allowlist()),
         "environments": list(allowed_environments()),
         "require_environment": (

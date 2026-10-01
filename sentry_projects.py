@@ -18,8 +18,15 @@ and spend their reasoning on the actual bug.
 THE THING THAT IS NOT OBVIOUS FROM THE SENTRY UI
 ------------------------------------------------
 We separate dev from prod BY PROJECT, not by the `environment` tag. There are
-five projects and they come in pairs: `dev-vome-app` and `prod-vome` are the
-same codebase, as are `dev-volunteer-database` and `prod-volunteer-database`.
+seven projects and they come in dev/prod pairs over three codebases, plus the
+mobile app: `dev-vome-app` and `prod-vome` are the same repo, as are
+`dev-volunteer-database`/`prod-volunteer-database` and
+`dev-vome-web`/`prod-vome-web`.
+
+Count them from the API, not the dashboard. The project grid honours a "My
+Teams" filter, which showed five of the seven and sent the first version of
+this table out with the web client missing entirely. `find_projects` is the
+inventory; a filtered dashboard is not.
 
 That matters because the obvious production filter, "drop anything whose
 environment is not production", does almost nothing here: an `issue.created`
@@ -30,17 +37,19 @@ kept as a second line, not the first.
 
 WHAT IS NOT COVERED
 -------------------
-Three repositories have no Sentry project at all, so their errors are
-invisible to this pipeline and to Sentry generally. That is a gap in
-instrumentation, not in this file, and no amount of work here closes it.
+Two repositories have no Sentry project at all: `vomedjango-chats-app` and
+`vomedjango-integrations-app`. Errors in the chats and integrations services
+are invisible to this pipeline and to Sentry generally.
 
-  * `vomeadmin/vome-react`, the admin web client. This is the surprising one
-    and the most worth fixing: it is the interface our customers spend their
-    day in, and the only frontend Sentry project we have is the mobile app.
-    A customer reporting "the schedule page went blank" leaves no trace
-    anywhere today.
-  * `vomedjango-chats-app`
-  * `vomedjango-integrations-app`
+A third gap is worse because it looks solved. `dev-vome-web` and
+`prod-vome-web` exist for `vomeadmin/vome-react` and have ZERO issues in 90
+days. A project with no events is not an instrumented service, it is an empty
+box with a name on it, and it reads as coverage on every dashboard. Either
+the SDK is not installed in vome-react or it is not reporting. That is the
+most valuable thing on this list to fix: vome-react is the interface customers
+spend their day in, and today a blank schedule page leaves no trace anywhere.
+
+None of these are fixable here. They are SDK work in the services themselves.
 
 AN UNMAPPED PROJECT IS A CONFIGURATION GAP, NOT NOISE
 -----------------------------------------------------
@@ -99,7 +108,7 @@ class Project:
 
 
 # ---------------------------------------------------------------------------
-# The table. Five Sentry projects, three repositories.
+# The table. Seven Sentry projects, four repositories.
 # ---------------------------------------------------------------------------
 
 _PROJECTS: tuple[Project, ...] = (
@@ -158,6 +167,47 @@ _PROJECTS: tuple[Project, ...] = (
         channel_env="SLACK_CHANNEL_ENG_BACKEND",
         ref="development",
         notes="Same repo as prod-volunteer-database, different branch.",
+    ),
+    # The admin web client, vome-react.
+    #
+    # These two were missed on the first pass because the Sentry dashboard was
+    # filtered to "My Teams", which showed 5 of the 7 projects. The API lists
+    # all seven. Worth remembering: a filtered dashboard is not an inventory,
+    # and `find_projects` is.
+    #
+    # Both are EMPTY: zero issues in 90 days on either. The projects exist and
+    # no events reach them, so the SDK in vome-react is either not installed
+    # or not reporting. They are mapped here so they route correctly the day
+    # that is fixed, and so they are not reported as unmapped forever.
+    Project(
+        slug="prod-vome-web",
+        repo="vome-react",
+        host=GITHUB,
+        owner="vomeadmin",
+        stack=FRONTEND,
+        production=True,
+        channel_env="SLACK_CHANNEL_ENG_FRONTEND",
+        # UNCONFIRMED. vome-react's branch naming is the messiest of the
+        # three repos: its default is `develop`, and it also carries
+        # `master`, `ProductionEnv` and `RealProdEnv`. `master` matches the
+        # backend convention, which is the only reason it is the guess.
+        # Harmless while the project is empty. Confirm before it has data.
+        ref="master",
+        notes="EMPTY: no events in 90 days. Check the SDK in vome-react.",
+    ),
+    Project(
+        slug="dev-vome-web",
+        repo="vome-react",
+        host=GITHUB,
+        owner="vomeadmin",
+        stack=FRONTEND,
+        production=False,
+        channel_env="SLACK_CHANNEL_ENG_FRONTEND",
+        # `develop`, not `development`. This repo's default branch really is
+        # spelled differently from the backend repos, which is exactly the
+        # kind of thing a per-project ref field exists to hold.
+        ref="develop",
+        notes="EMPTY: no events in 90 days. Check the SDK in vome-react.",
     ),
     # The mobile app, React Native.
     #
@@ -269,12 +319,14 @@ def describe() -> dict[str, object]:
         ],
         "triaged_slugs": list(triaged),
         "repos_in_scope": list(repos_in_scope()),
-        "uninstrumented_repos": [
-            # The admin web client. No Sentry project, so browser errors are
-            # invisible. The most worth fixing of the three.
-            "vomeadmin/vome-react",
+        "no_sentry_project": [
             "vomedjango/vomedjango-chats-app",
             "vomedjango/vomedjango-integrations-app",
         ],
-        "github_owner_required": "samfagen15",
+        # Projects that exist but receive nothing. Worse than missing, because
+        # they look like coverage. Checked against Sentry on 2026-10-01.
+        "empty_projects": ["dev-vome-web", "prod-vome-web"],
+        "github_owners": sorted(
+            {p.owner for p in _PROJECTS if p.host == GITHUB}
+        ),
     }

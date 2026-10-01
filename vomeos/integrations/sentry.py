@@ -117,6 +117,11 @@ class IssueSignal:
     environment: str = ""
     platform: str = ""
     exception_type: str = ""
+    # Sentry's issue category: "error" for a real exception, or a performance
+    # category such as "db_query" for an N+1 or a slow query. Defaults to
+    # "error" when absent, which is the safe reading: an unknown category
+    # must never cause a real exception to be dropped.
+    category: str = "error"
     times_seen: int = 0
     users_affected: int = 0
     permalink: str = ""
@@ -143,6 +148,25 @@ def _first_tag(tags, key: str) -> str:
             if str(tag[0]) == key:
                 return str(tag[1] or "")
     return ""
+
+
+def _category(payload: dict) -> str:
+    """The issue's category, across the several names Sentry has used.
+
+    A performance issue (an N+1 query, a slow DB call) arrives on the same
+    webhook as an exception and is a completely different kind of work: real,
+    worth fixing, and not a bug report. The gate needs to be able to tell
+    them apart deliberately rather than by accident of level.
+
+    Defaults to "error" when nothing says otherwise, because the cost of
+    mislabelling a performance issue as an error is a wasted triage, and the
+    cost of mislabelling an error as something else is a dropped bug.
+    """
+    for key in ("issueCategory", "issue_category", "issueType", "issue_type"):
+        value = payload.get(key)
+        if value:
+            return str(value).lower()
+    return "error"
 
 
 def _int(value, default: int = 0) -> int:
@@ -203,6 +227,7 @@ def _from_issue(issue: dict, reason: str) -> IssueSignal | None:
         title=str(issue.get("title", "") or ""),
         culprit=str(issue.get("culprit", "") or ""),
         level=str(issue.get("level", "") or "").lower(),
+        category=_category(issue),
         # An issue payload carries no environment. See the gate for what the
         # pipeline does about that rather than guessing.
         environment="",
@@ -231,6 +256,7 @@ def _from_event(event: dict, reason: str) -> IssueSignal | None:
         level=str(
             event.get("level", "") or _first_tag(tags, "level") or ""
         ).lower(),
+        category=_category(event),
         environment=str(
             event.get("environment", "")
             or _first_tag(tags, "environment")

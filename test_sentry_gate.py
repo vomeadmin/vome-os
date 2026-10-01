@@ -88,14 +88,19 @@ def test_all_five_real_projects_are_mapped(monkeypatch):
     # The five Sentry projects we actually run. If one is renamed or a sixth
     # appears, this is where it gets noticed.
     _clear(monkeypatch)
+    # Seven, not five. The dashboard grid honours a "My Teams" filter and
+    # showed five, which is how dev-vome-web and prod-vome-web were missed.
     for slug in (
         "prod-vome",
         "dev-vome-app",
         "prod-volunteer-database",
         "dev-volunteer-database",
+        "prod-vome-web",
+        "dev-vome-web",
         "vome-2j",
     ):
         assert sentry_projects.route(slug) is not None, slug
+    assert len(sentry_projects.all_projects()) == 7
 
 
 def test_the_two_production_backends_and_the_frontend_are_triaged(monkeypatch):
@@ -319,6 +324,7 @@ def test_repos_in_scope_is_what_code_repos_must_contain(monkeypatch):
     _clear(monkeypatch)
     assert sentry_projects.repos_in_scope() == (
         "VomeApp",
+        "vome-react",
         "vomedjango-database-app",
         "vomedjango-restored-core-app",
     )
@@ -335,15 +341,90 @@ def test_backend_and_mobile_route_to_different_channels(monkeypatch):
     assert mobile.stack == sentry_projects.MOBILE
 
 
-def test_the_only_frontend_project_is_the_mobile_app(monkeypatch):
-    # vome-react, the admin web client, has NO Sentry project. If one is ever
-    # added this test fails and the routing table needs a new row, which is
-    # the point: the gap should not be forgotten.
+def test_the_web_projects_are_mapped_and_flagged_empty(monkeypatch):
+    # They exist and receive nothing, which is worse than missing because it
+    # reads as coverage on a dashboard. Mapped so they route correctly the
+    # day the SDK is fixed, and flagged so the gap is not forgotten.
     _clear(monkeypatch)
-    assert "vome-react" not in sentry_projects.repos_in_scope()
-    assert "vomeadmin/vome-react" in (
-        sentry_projects.describe()["uninstrumented_repos"]
+    web = sentry_projects.route("prod-vome-web")
+    assert web.qualified_repo == "vomeadmin/vome-react"
+    assert web.stack == sentry_projects.FRONTEND
+    described = sentry_projects.describe()
+    assert "prod-vome-web" in described["empty_projects"]
+    assert "dev-vome-web" in described["empty_projects"]
+
+
+def test_the_two_github_owners_are_both_represented(monkeypatch):
+    # vome-react is in the vomeadmin org, VomeApp is on a personal account.
+    # A single VOMEOS_GITHUB_OWNER cannot reach both, which is why every
+    # code_search method takes an owner.
+    _clear(monkeypatch)
+    assert sentry_projects.describe()["github_owners"] == [
+        "samfagen15", "vomeadmin"
+    ]
+
+
+def test_vome_react_uses_develop_not_development(monkeypatch):
+    # Its default branch really is spelled differently from the backend
+    # repos. Exactly what a per-project ref field is for.
+    _clear(monkeypatch)
+    assert sentry_projects.route("dev-vome-web").ref == "develop"
+    assert sentry_projects.route("dev-vome-app").ref == "development"
+
+
+# ---------------------------------------------------------------------------
+# Issue category
+# ---------------------------------------------------------------------------
+
+def test_performance_issues_are_dropped_by_their_own_rule(monkeypatch):
+    # Four of seven live issues on the dev project in 48 hours were N+1
+    # queries. They were already being dropped, but by the level rule, which
+    # reported the wrong reason and hid the count.
+    _clear(monkeypatch)
+    decision = gate.check(
+        _signal(title="N+1 Query", category="db_query", level="info")
     )
+    assert decision.blocked
+    assert decision.rule == "issue_category"
+
+
+def test_performance_triage_can_be_switched_on(monkeypatch):
+    _clear(monkeypatch, SENTRY_ISSUE_CATEGORIES="error,db_query")
+    assert gate.check(
+        _signal(title="N+1 Query", category="db_query", level="error")
+    ).passed
+
+
+def test_a_missing_category_is_treated_as_an_error(monkeypatch):
+    # The safe reading. Dropping an exception because a field was absent is
+    # the expensive mistake; triaging a performance issue is the cheap one.
+    _clear(monkeypatch)
+    assert gate.check(_signal(category="")).passed
+
+
+def test_suspicious_file_operation_is_a_real_bug_and_passes(monkeypatch):
+    # REGRESSION. This was on the ignore list as assumed scanner noise. The
+    # live dev project produced a real one within 48 hours: a filename
+    # collision in the announcement attachment upload path.
+    _clear(monkeypatch)
+    assert gate.check(
+        _signal(
+            exception_type="SuspiciousFileOperation",
+            title=(
+                "SuspiciousFileOperation: Storage can not find an available "
+                "filename for announcements/..."
+            ),
+            culprit="/api/announcements/{pk}/attachments/",
+        )
+    ).passed
+
+
+def test_scanner_noise_siblings_are_still_dropped(monkeypatch):
+    # The paired assertion: removing the parent class must not have opened
+    # the gate to the host-header probing that list exists for.
+    _clear(monkeypatch)
+    assert gate.check(_signal(exception_type="DisallowedHost")).blocked
+    assert gate.check(_signal(exception_type="Http404")).blocked
 
 
 def test_mobile_connectivity_noise_is_dropped(monkeypatch):

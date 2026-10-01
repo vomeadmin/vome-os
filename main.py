@@ -1672,7 +1672,24 @@ async def debug_calendly_config(check: int = 0):
 @app.get("/health")
 async def health():
     env_status = {v: bool(os.environ.get(v)) for v in REQUIRED_ENV}
-    return {"status": "ok", "env": env_status}
+    # Booleans only, never values. Same contract as the block above.
+    #
+    # Here rather than only on /sentry/status because that endpoint needs
+    # OPS_TOKEN, and "is the pipeline configured" is exactly the question you
+    # cannot answer when a token is the thing that is missing. A webhook
+    # endpoint that rejects every delivery for a missing secret is invisible
+    # from the outside: it fails closed, so it looks identical to a quiet day.
+    sentry_status = {
+        v: bool(os.environ.get(v))
+        for v in (
+            "SENTRY_WEBHOOK_SECRET",
+            "SENTRY_AUTH_TOKEN",
+            "SENTRY_ORG",
+            "SENTRY_PROJECT_ALLOWLIST",
+            "OPS_TOKEN",
+        )
+    }
+    return {"status": "ok", "env": env_status, "sentry": sentry_status}
 
 
 @app.get("/sentry/status", dependencies=[Depends(verify_ops_token)])
