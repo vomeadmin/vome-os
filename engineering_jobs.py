@@ -71,9 +71,38 @@ def _register_sentry() -> None:
     )
 
 
+def _register_code_access() -> None:
+    """Watch the credentials the pipeline depends on.
+
+    Daily at 08:00, before the 09:00 Sentry report, so a dead token is known
+    about before the report that depends on it goes out.
+
+    Silent when healthy. It posts only when a credential has stopped working
+    or is within 30 days of expiring, because every one of these tokens
+    expires inside a year and an expired token is completely silent: the
+    analyst just reports "could not reach the repository" on every issue.
+    Same failure shape as the suspended ClickUp webhook.
+    """
+    from code_access_monitor import check_code_access
+
+    register_job(
+        "engineering.code_access",
+        check_code_access,
+        cron=(
+            f"{os.environ.get('CODE_ACCESS_MINUTE', '0')} "
+            f"{os.environ.get('CODE_ACCESS_HOUR', '8')} * * *"
+        ),
+        queue=QUEUE,
+        claim=CLAIM_DAILY,
+        time_limit=300,
+        description="Watch Bitbucket, GitHub and Sentry credentials",
+    )
+
+
 def register_all() -> None:
     """Register everything engineering owns. Idempotent."""
     _register_sentry()
+    _register_code_access()
 
 
 # Importing this module registers the work, which is what

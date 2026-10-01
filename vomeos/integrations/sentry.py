@@ -335,6 +335,19 @@ class Sentry(Connector):
             params={"limit": min(_int(limit, 10), 100)},
         )
 
+    def list_projects(self) -> IntegrationResult:
+        """Projects in the organization.
+
+        Exists as a named operation rather than as a caller reaching for
+        `_call`, because a connector's methods are its contract and the
+        credential monitor is a caller like any other. It is also the
+        cheapest honest answer to "does this token still work", which is the
+        monitor's whole job.
+        """
+        return self._call(
+            "list_projects", "GET", f"/organizations/{self.org}/projects/"
+        )
+
     def issue_tags(self, issue_id: str) -> IntegrationResult:
         """Aggregated tag values across the group.
 
@@ -360,6 +373,7 @@ def describe() -> dict[str, object]:
             "latest_event",
             "issue_events",
             "issue_tags",
+            "list_projects",
         ],
         "writes": "none available",
     }

@@ -53,6 +53,7 @@ ENVIRONMENT
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 
 from vomeos import config
@@ -96,7 +97,34 @@ class Bitbucket(Connector):
         )
 
     def headers(self) -> dict[str, str]:
+        """Bearer by default, Basic when an email is configured.
+
+        WHY BOTH
+        --------
+        Bitbucket has three credential shapes in circulation and they do not
+        authenticate the same way:
+
+          * Workspace / Repository Access Tokens: Bearer. Paid plans only.
+          * Atlassian API token WITH scopes: Bearer. Any plan, created at
+            id.atlassian.com rather than inside Bitbucket.
+          * Atlassian API token WITHOUT scopes, and the old app passwords:
+            HTTP Basic, with the Atlassian account email as the username.
+
+        Sending Bearer to a credential that wants Basic returns a bare 401
+        with no hint about which of the two it wanted, which is an hour of
+        somebody's afternoon. Setting VOMEOS_BITBUCKET_EMAIL switches to
+        Basic and is the only signal needed.
+        """
         token = os.environ.get("VOMEOS_BITBUCKET_TOKEN", "")
+        email = os.environ.get("VOMEOS_BITBUCKET_EMAIL", "")
+        if email:
+            import base64
+
+            pair = base64.b64encode(f"{email}:{token}".encode()).decode()
+            return {
+                "Accept": "application/json",
+                "Authorization": f"Basic {pair}",
+            }
         return {
             "Accept": "application/json",
             "Authorization": f"Bearer {token}",
@@ -177,31 +205,64 @@ class GitHub(Connector):
 
     @property
     def owner(self) -> str:
-        """The default owner, used when a caller does not name one.
-
-        WHY EVERY METHOD ALSO TAKES AN OWNER
-        ------------------------------------
-        One environment variable was enough right up until it was not. Our
-        two GitHub repositories sit under different accounts:
-        `vomeadmin/vome-react` is in the organization and
-        `samfagen15/VomeApp` is on a personal account. A single
-        VOMEOS_GITHUB_OWNER can reach one or the other, never both, and the
-        failure is a 404 that reads like "the file does not exist" rather
-        than "you looked in the wrong account".
-
-        So the owner travels with the call. The env var remains the default
-        for a caller that has only one.
-        """
+        """The default owner, used when a caller does not name one."""
         return os.environ.get("VOMEOS_GITHUB_OWNER", "")
 
-    def configured(self) -> bool:
-        return bool(os.environ.get("VOMEOS_GITHUB_TOKEN"))
+    @staticmethod
+    def token_env_name(owner: str) -> str:
+        """The per-owner token variable: VOMEOS_GITHUB_TOKEN_<OWNER>."""
+        slug = re.sub(r"[^A-Za-z0-9]", "_", owner or "").upper()
+        return f"VOMEOS_GITHUB_TOKEN_{slug}" if slug else ""
 
-    def headers(self) -> dict[str, str]:
-        token = os.environ.get("VOMEOS_GITHUB_TOKEN", "")
+    def token_for(self, owner: str = "") -> str:
+        """The token that can actually reach this owner.
+
+        WHY THIS IS PER OWNER AND NOT ONE VARIABLE
+        ------------------------------------------
+        A GitHub fine-grained token is scoped to exactly one account at
+        creation time, in the "Resource owner" dropdown, and that cannot be
+        changed afterwards. Our two GitHub repositories are under different
+        accounts: `vomeadmin/vome-react` in the organization and
+        `samfagen15/VomeApp` on a personal account. So reaching both means
+        two tokens, and one environment variable cannot hold two.
+
+        Worse, using the wrong one does not look like an auth problem.
+        GitHub answers a request for a repo outside the token's owner with
+        404, not 403, so it reads as "that file does not exist" and sends
+        you looking for a renamed module.
+
+        Resolution order: the owner-specific variable first, then the shared
+        VOMEOS_GITHUB_TOKEN, which keeps a single-owner setup working with
+        no changes.
+        """
+        env_name = self.token_env_name(owner or self.owner)
+        if env_name:
+            scoped = os.environ.get(env_name, "")
+            if scoped:
+                return scoped
+        return os.environ.get("VOMEOS_GITHUB_TOKEN", "")
+
+    def configured(self, owner: str = "") -> bool:
+        """With an owner: can we reach that account. Without: any at all.
+
+        The two readings matter because `Connector._call` asks the no-owner
+        question as a guard before every request, and it must not answer "no"
+        just because the default owner is unset. The per-call headers carry
+        the owner-specific token.
+        """
+        if owner:
+            return bool(self.token_for(owner))
+        if os.environ.get("VOMEOS_GITHUB_TOKEN"):
+            return True
+        return any(
+            name.startswith("VOMEOS_GITHUB_TOKEN_") and value
+            for name, value in os.environ.items()
+        )
+
+    def headers(self, owner: str = "") -> dict[str, str]:
         return {
             "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"Bearer {self.token_for(owner)}",
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
@@ -217,6 +278,7 @@ class GitHub(Connector):
             "GET",
             "/search/code",
             params={"q": f"{query} {scope}", "per_page": 20},
+            headers=self.headers(who),
         )
 
     def read_file(
@@ -224,12 +286,14 @@ class GitHub(Connector):
     ) -> IntegrationResult:
         if not _repo_permitted(repo):
             return self._denied("read_file", repo)
+        who = owner or self.owner
         params = {"ref": ref} if ref else None
         result = self._call(
             "read_file",
             "GET",
-            f"/repos/{owner or self.owner}/{repo}/contents/{path}",
+            f"/repos/{who}/{repo}/contents/{path}",
             params=params,
+            headers=self.headers(who),
         )
         return _truncate(result)
 
@@ -255,11 +319,13 @@ class GitHub(Connector):
             params["path"] = path
         if ref:
             params["sha"] = ref
+        who = owner or self.owner
         return self._call(
             "recent_commits",
             "GET",
-            f"/repos/{owner or self.owner}/{repo}/commits",
+            f"/repos/{who}/{repo}/commits",
             params=params,
+            headers=self.headers(who),
         )
 
     def _denied(self, operation: str, repo: str) -> IntegrationResult:
@@ -285,12 +351,29 @@ def _truncate(result: IntegrationResult) -> IntegrationResult:
     return result
 
 
+def github_owners_configured() -> tuple[str, ...]:
+    """Owners we hold a token for, found by scanning the environment.
+
+    Discovered rather than listed, so adding a third account is a Railway
+    variable and not a code change.
+    """
+    github = GitHub()
+    owners = set()
+    for name in os.environ:
+        if name.startswith("VOMEOS_GITHUB_TOKEN_") and os.environ[name]:
+            owners.add(name[len("VOMEOS_GITHUB_TOKEN_"):].lower())
+    if os.environ.get("VOMEOS_GITHUB_TOKEN") and github.owner:
+        owners.add(github.owner.lower())
+    return tuple(sorted(owners))
+
+
 def describe() -> dict[str, object]:
     """Which code sources are reachable, for the CLI and the health check."""
     bitbucket, github = Bitbucket(), GitHub()
     return {
         "bitbucket": "configured" if bitbucket.configured() else "not set",
         "github": "configured" if github.configured() else "not set",
+        "github_owners": list(github_owners_configured()) or ["(none)"],
         "allowlist": (
             list(allowed_repos()) or ["(no allowlist: all reachable)"]
         ),

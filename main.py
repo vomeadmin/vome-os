@@ -49,6 +49,7 @@ from calendly_booking_handler import handle_calendly_event
 from database import init_db
 from field_feedback import handle_field_feedback
 from on_prod_handler import handle_on_prod
+from code_access_monitor import check_code_access as run_code_access_check
 from sentry_handler import (
     handle_webhook as handle_sentry_webhook,
     run_shadow_report as run_sentry_shadow_report,
@@ -299,6 +300,21 @@ _scheduler.add_job(
     check_clickup_webhook_health,
     CronTrigger(minute=30, timezone="America/Montreal"),
     misfire_grace_time=600,
+    coalesce=True,
+    max_instances=1,
+)
+
+# Credential watch, 08:00. Mirrors engineering.code_access. Runs before the
+# Sentry report so a dead token is known about before the report that depends
+# on it goes out. Silent unless something is broken or expiring.
+_scheduler.add_job(
+    run_code_access_check,
+    CronTrigger(
+        hour=int(os.environ.get("CODE_ACCESS_HOUR", "8")),
+        minute=int(os.environ.get("CODE_ACCESS_MINUTE", "0")),
+        timezone="America/Montreal",
+    ),
+    misfire_grace_time=3600,
     coalesce=True,
     max_instances=1,
 )
@@ -1687,6 +1703,10 @@ async def health():
             "SENTRY_ORG",
             "SENTRY_PROJECT_ALLOWLIST",
             "OPS_TOKEN",
+            # Without these the credential alert either never posts or
+            # posts without pinging anyone, both of which are silent.
+            "SLACK_BOT_TOKEN",
+            "SAM_SLACK_USER_ID",
         )
     }
     return {"status": "ok", "env": env_status, "sentry": sentry_status}
@@ -1706,6 +1726,19 @@ async def sentry_status():
     from sentry_handler import describe as describe_sentry
 
     return describe_sentry()
+
+
+@app.get("/sentry/credentials", dependencies=[Depends(verify_ops_token)])
+async def sentry_credentials():
+    """Run the credential checks now rather than waiting for 08:00.
+
+    Its own endpoint rather than part of /sentry/status because it makes
+    three live API calls, and a status page that takes two seconds is one
+    nobody loads.
+    """
+    from code_access_monitor import describe as describe_credentials
+
+    return await asyncio.to_thread(describe_credentials)
 
 
 @app.get("/sentry/recent", dependencies=[Depends(verify_ops_token)])

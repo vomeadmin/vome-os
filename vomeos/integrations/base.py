@@ -53,6 +53,13 @@ class IntegrationResult:
     status_code: int = 0
     error: str = ""
     duration_ms: int = 0
+    # Response headers, lowercased. Empty when the call never got a response.
+    #
+    # Needed because some facts only arrive this way. GitHub reports a
+    # fine-grained token's expiry date in
+    # `github-authentication-token-expiration` and nowhere else, and a token
+    # that silently expires looks exactly like a repository we cannot read.
+    headers: dict = field(default_factory=dict)
 
     def get(self, key: str, default=None):
         if isinstance(self.data, dict):
@@ -96,7 +103,15 @@ class Connector:
         *,
         params: dict | None = None,
         json_body: dict | None = None,
+        headers: dict | None = None,
     ) -> IntegrationResult:
+        """Make the call. `headers` overrides `self.headers()` for one call.
+
+        The override exists because a connector can need more than one
+        credential. GitHub fine-grained tokens are scoped to a single account,
+        so reaching two owners means two tokens and the right one has to be
+        chosen per call rather than per connector.
+        """
         import time
 
         if not self.configured():
@@ -111,7 +126,7 @@ class Connector:
             response = httpx.request(
                 method.upper(),
                 url,
-                headers=self.headers(),
+                headers=headers or self.headers(),
                 params=params,
                 json=json_body,
                 timeout=self.timeout,
@@ -124,12 +139,14 @@ class Connector:
             )
 
         duration = int((time.monotonic() - started) * 1000)
+        headers = {k.lower(): v for k, v in response.headers.items()}
         if response.status_code >= 400:
             return IntegrationResult(
                 self.system, operation, False,
                 status_code=response.status_code,
                 error=f"HTTP {response.status_code}: {response.text[:200]}",
                 duration_ms=duration,
+                headers=headers,
             )
 
         try:
@@ -142,4 +159,5 @@ class Connector:
             data=data,
             status_code=response.status_code,
             duration_ms=duration,
+            headers=headers,
         )
