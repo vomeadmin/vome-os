@@ -134,13 +134,19 @@ and foreground state. Those contexts only exist on a native app.
 Three things follow, and the first two want acting on separately from this
 project:
 
-- **`dev-vome-web` and `prod-vome-web` receive nothing.** Zero issues in 90
-  days on either, checked against the API on 2026-10-01. A project with no
-  events is not an instrumented service, it is an empty box with a name on
-  it, and it reads as coverage on every dashboard. Either the SDK is missing
-  from vome-react or it is not reporting. This is the most valuable thing on
-  this list: vome-react is the interface customers spend their day in, and
-  today a blank schedule page leaves no trace anywhere.
+- **`dev-vome-web` and `prod-vome-web` are instrumented but receive
+  nothing.** vome-react has `@sentry/react`, a sourcemap upload step in its
+  build, and an init in `src/utils/sentry.js`. It is still sending zero
+  errors AND zero spans as of 2026-10-02. Zero spans is the telling part: a
+  browser SDK sends performance transactions whether or not anything breaks,
+  so this is a dormant SDK rather than a quiet fortnight.
+
+  The cause is almost certainly the DSN. `src/utils/sentry.js` reads
+  `process.env.REACT_APP_SENTRY_DSN` and no-ops without it, and Create React
+  App inlines `REACT_APP_*` at BUILD time, so a variable set on the host at
+  runtime never reaches the bundle. It must be present when `craco build`
+  runs. A project with no events reads as coverage on every dashboard, which
+  makes this worth fixing before it is trusted.
 - **`vomedjango-chats-app` and `vomedjango-integrations-app` have no project
   at all.** Same gap, lower stakes.
 - **Two GitHub owners, now handled in code.** `vome-react` is in the

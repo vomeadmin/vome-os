@@ -36,6 +36,9 @@ in one day, three of those four came back still broken. The guards in
 or "and".
 
 **5. An agent may never merge, force push, or write to a default branch.**
+Amended into `org/handbook.md` on 2026-10-02: an agent MAY open a pull
+request against a non-default branch, because a PR is a proposal a person
+approves.
 `code_write.py` has three operations and merge is not one of them, because
 the code does not exist rather than because a charter forbids it. Anything
 under `migrations/` is refused outright with no override: migrations are
@@ -69,7 +72,8 @@ agents/            the staff, one directory each
 main.py            support app: FastAPI webhooks + APScheduler
 support_jobs.py    the 8 scheduled jobs, registered with the OS
 engineering_jobs.py the Sentry event handler + daily report
-sentry_*.py        the Sentry triage pipeline. See SENTRY_TRIAGE.md
+sentry_*.py        the Sentry worker. SENTRY_RUNBOOK.md is how it runs,
+                   SENTRY_TRIAGE.md is why it is built that way
 sprint.py          run a support sprint locally, sends nothing
 clickup_search.py  find the task that already covers a symptom
 product_*.py       product knowledge: navigation, UI strings, guides

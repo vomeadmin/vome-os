@@ -383,8 +383,8 @@ def test_the_web_projects_are_mapped_and_flagged_empty(monkeypatch):
     assert web.qualified_repo == "vomeadmin/vome-react"
     assert web.stack == sentry_projects.FRONTEND
     described = sentry_projects.describe()
-    assert "prod-vome-web" in described["empty_projects"]
-    assert "dev-vome-web" in described["empty_projects"]
+    assert "prod-vome-web" in described["receiving_nothing"]
+    assert "dev-vome-web" in described["receiving_nothing"]
 
 
 def test_the_two_github_owners_are_both_represented(monkeypatch):

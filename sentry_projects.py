@@ -168,17 +168,22 @@ _PROJECTS: tuple[Project, ...] = (
         ref="development",
         notes="Same repo as prod-volunteer-database, different branch.",
     ),
-    # The admin web client, vome-react.
+    # The admin web client, vome-react. Instrumented deliberately: the repo
+    # has @sentry/react, a sourcemap upload step in its build, and an init in
+    # src/utils/sentry.js.
     #
-    # These two were missed on the first pass because the Sentry dashboard was
-    # filtered to "My Teams", which showed 5 of the 7 projects. The API lists
-    # all seven. Worth remembering: a filtered dashboard is not an inventory,
-    # and `find_projects` is.
+    # NOT YET RECEIVING ANYTHING as of 2026-10-02: zero issues and zero spans
+    # in both projects. Zero SPANS is the telling part, because a browser SDK
+    # sends performance transactions whether or not anything breaks, so this
+    # is a dormant SDK rather than a quiet fortnight.
     #
-    # Both are EMPTY: zero issues in 90 days on either. The projects exist and
-    # no events reach them, so the SDK in vome-react is either not installed
-    # or not reporting. They are mapped here so they route correctly the day
-    # that is fixed, and so they are not reported as unmapped forever.
+    # The cause is almost certainly the DSN. `src/utils/sentry.js` reads
+    # `process.env.REACT_APP_SENTRY_DSN` and no-ops without it, and Create
+    # React App inlines REACT_APP_* at BUILD time, so setting it on the host
+    # at runtime never reaches the bundle.
+    #
+    # Mapped and triaged anyway, so the day the DSN lands the routing already
+    # works and nobody has to remember this file exists.
     Project(
         slug="prod-vome-web",
         repo="vome-react",
@@ -193,7 +198,10 @@ _PROJECTS: tuple[Project, ...] = (
         # backend convention, which is the only reason it is the guess.
         # Harmless while the project is empty. Confirm before it has data.
         ref="master",
-        notes="EMPTY: no events in 90 days. Check the SDK in vome-react.",
+        notes=(
+            "No events yet. REACT_APP_SENTRY_DSN is probably missing at "
+            "build time; CRA inlines it, so a runtime variable does nothing."
+        ),
     ),
     Project(
         slug="dev-vome-web",
@@ -207,7 +215,7 @@ _PROJECTS: tuple[Project, ...] = (
         # spelled differently from the backend repos, which is exactly the
         # kind of thing a per-project ref field exists to hold.
         ref="develop",
-        notes="EMPTY: no events in 90 days. Check the SDK in vome-react.",
+        notes="No events yet. Same DSN-at-build-time cause as prod-vome-web.",
     ),
     # The mobile app, React Native.
     #
@@ -323,9 +331,10 @@ def describe() -> dict[str, object]:
             "vomedjango/vomedjango-chats-app",
             "vomedjango/vomedjango-integrations-app",
         ],
-        # Projects that exist but receive nothing. Worse than missing, because
-        # they look like coverage. Checked against Sentry on 2026-10-01.
-        "empty_projects": ["dev-vome-web", "prod-vome-web"],
+        # Instrumented but receiving nothing. Worse than missing, because
+        # they look like coverage on every dashboard. Checked 2026-10-02:
+        # zero errors AND zero spans, which means a dormant SDK.
+        "receiving_nothing": ["dev-vome-web", "prod-vome-web"],
         "github_owners": sorted(
             {p.owner for p in _PROJECTS if p.host == GITHUB}
         ),
