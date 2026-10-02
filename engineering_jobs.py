@@ -50,8 +50,30 @@ def _register_sentry() -> None:
         description="Triage one Sentry issue",
     )
 
-    # The shadow-mode report. One message a day and no interrupts, which is
-    # the whole output of phase 1.
+    # Re-decide issues gated for a reason that has since changed, 08:30.
+    #
+    # Between the credential watch and the report, so a backlog released by
+    # a config change is triaged before the report that would mention it.
+    #
+    # Daily rather than one-off on purpose: it makes "widen the allowlist"
+    # behave the way everyone expects every time, instead of only working
+    # for issues Sentry has never sent before. Usually a no-op.
+    from sentry_handler import run_regate_sweep
+
+    register_job(
+        "engineering.sentry_regate",
+        run_regate_sweep,
+        cron=(
+            f"{os.environ.get('SENTRY_REGATE_MINUTE', '30')} "
+            f"{os.environ.get('SENTRY_REGATE_HOUR', '8')} * * *"
+        ),
+        queue=QUEUE,
+        claim=CLAIM_DAILY,
+        time_limit=900,
+        description="Re-decide issues gated by a rule that has changed",
+    )
+
+    # The daily report. One message a day and no interrupts.
     #
     # 09:00 rather than with the support digest at 17:00: this is a "what
     # happened overnight" report and it is read at the start of the day. It

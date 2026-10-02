@@ -1,0 +1,67 @@
+[identity]
+name = "bug_analyst"
+division = "engineering"
+title = "Bug Analyst"
+reports_to = "sam"
+hired = "2026-10-01"
+
+[model]
+# Senior tier, and the only place in this pipeline worth paying for it.
+#
+# This is the reasoning-heaviest job here: read a traceback, read the real
+# source at the branch that ran, read what changed recently, and say what is
+# actually wrong. Everything downstream inherits its conclusion. An engineer
+# reads its answer instead of reading the code, so a confident wrong root
+# cause costs more than no answer at all, and that is exactly the failure
+# mode a cheaper model produces.
+tier = "senior"
+# 3000 rather than 2000. At 2000 roughly one run in three truncated mid-JSON,
+# which the json_shape guard correctly rejected as unparseable. A blocked run
+# costs a full senior call and produces nothing, so the ceiling has to sit
+# clear of the longest honest answer. The charter also caps each field, which
+# is the real fix; this is the headroom behind it.
+max_tokens = 3000
+
+[job]
+charter = "charter.md"
+skills = []
+requires_context = [
+    "summary",
+    "severity",
+    "title",
+    "exception_type",
+    "culprit",
+    "stack_trace",
+    "source",
+    "recent_commits",
+    "existing_tasks",
+    "repo",
+    "branch",
+]
+output = "json"
+
+[guards]
+# `no_unverified_claims` is the one that matters. This agent is reporting to
+# an engineer who will act on what it says, and the documented number one
+# failure of this operation is asserting a state no record backs.
+output = ["json_shape", "non_empty", "no_unverified_claims"]
+# It writes an internal engineering note. It never writes to a customer, and
+# the code context it holds must never reach one: a file path in a customer
+# reply is the ticket #8945 shape.
+client_facing = false
+
+[limits]
+timeout_seconds = 180
+max_retries = 2
+
+[approval]
+requires_ceo_approval = false
+escalate_to = "#eng-all"
+
+[evals]
+path = "evals/cases.jsonl"
+# Higher than the 0.8 floor, lower than it looks. The key pins the decisions
+# a human would act on (is this diagnosable, is it a safe fix, which file) and
+# deliberately does not pin the prose, because two correct explanations of the
+# same bug rarely use the same words.
+min_agreement = 0.85

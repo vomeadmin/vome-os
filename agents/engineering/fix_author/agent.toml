@@ -1,0 +1,58 @@
+[identity]
+name = "fix_author"
+division = "engineering"
+title = "Fix Author"
+reports_to = "sam"
+hired = "2026-10-01"
+
+[model]
+# Senior tier. It is writing code that a person will read as a proposal and,
+# eventually, merge. A cheaper model producing a plausible-looking diff is
+# worse than no diff, because a diff invites less scrutiny than a description
+# and a reviewer who trusts it has stopped reviewing.
+tier = "senior"
+# Generous because the output carries a unified diff with context lines, and
+# a truncated patch fails the shape check and is thrown away whole. The
+# charter caps the prose; this is the headroom for the diff itself.
+max_tokens = 3000
+
+[job]
+charter = "charter.md"
+skills = []
+requires_context = [
+    "root_cause",
+    "proposed_fix",
+    "files",
+    "source",
+    "repo",
+    "branch",
+]
+output = "json"
+
+[guards]
+# `patch_safety` is the whole point. Everything this agent produces is read
+# by a deterministic check that cannot be reasoned with, because a charter
+# rule is an instruction and this is the one place where an instruction is
+# not enough.
+output = ["json_shape", "non_empty", "patch_safety"]
+client_facing = false
+
+[limits]
+timeout_seconds = 180
+max_retries = 1
+
+[approval]
+# The nearest thing in this system to a write. Even with
+# SENTRY_AUTO_PR_ENABLED on, the output is a pull request against a
+# non-default branch that a human merges. Nothing here reaches a default
+# branch and nothing here deploys.
+requires_ceo_approval = true
+escalate_to = "#eng-all"
+
+[evals]
+path = "evals/cases.jsonl"
+# The highest bar in the fleet, and still not high enough to be trusted
+# alone. The answer key pins whether a diff should be attempted at all and
+# whether what comes back survives the patch guard. It cannot pin whether the
+# fix is correct, which is why a person merges.
+min_agreement = 0.85

@@ -100,6 +100,14 @@ store.register_table(
         -- which is the only way to tell whether the agent is any good.
         triage_summary      TEXT,
         infrastructure      BOOLEAN,
+        -- The analyst's conclusion. Stored because an issue below the
+        -- interrupt bar never reaches Slack in the moment, so without this
+        -- the analysis would exist only in a log line and the work would be
+        -- paid for and then thrown away.
+        root_cause          TEXT,
+        proposed_fix        TEXT,
+        fix_diff            TEXT,
+        fix_reason          TEXT,
         -- Repo and stack come from sentry_projects.py, not from a model.
         -- The mapping is a fixed fact, so it is written on the first sighting
         -- and the agents are told it rather than asked for it.
@@ -324,6 +332,102 @@ def rearm(issue_id: str, reason: str, *, volume_multiple: int = 10) -> bool:
         return False
 
 
+# Gate rules that are a statement about configuration rather than about the
+# issue. If the configuration changes, the decision should change with it.
+# Everything else (level, exception type, culprit, category) is a judgement
+# about the issue itself and does not go stale when a variable moves.
+CONFIG_RULES = ("project_excluded", "project_dev", "project_unmapped")
+
+
+def claim_regate(project_slugs, limit: int = 25) -> list[dict]:
+    """Release issues that were gated for a reason that no longer holds.
+
+    WHY THIS EXISTS
+    ---------------
+    `issue.created` fires once per group, ever. So an issue gated because its
+    project was out of scope stays gated forever, even after the project is
+    switched on, and the ledger will never reconsider it because it has seen
+    that id before.
+
+    That is the anti-bombardment guarantee working correctly and producing a
+    surprising result: widening SENTRY_PROJECT_ALLOWLIST appears to do
+    nothing to the backlog. Four real prod-vome bugs sat in exactly that
+    state on 2026-10-01.
+
+    So the invariant becomes "an issue is triaged once per gate
+    configuration", not "once ever". Only the config-shaped rules qualify. A
+    judgement about the issue itself does not expire.
+
+    ATOMICITY
+    ---------
+    The UPDATE matches only rows that are still `gated`, so a second caller
+    racing this one matches nothing and returns an empty list. That is the
+    same claim mechanism as everywhere else here, just keyed on status.
+
+    The caller MUST re-run the full gate on what comes back. These rows were
+    rejected at the project rule, which is third of seven, so the exception
+    type, title and culprit rules were never evaluated on them.
+    """
+    slugs = [s for s in (project_slugs or []) if s]
+    if not slugs or not _ready():
+        return []
+
+    engine = store.get_engine()
+    if engine is None:
+        return []
+
+    placeholders = ", ".join(f":p{i}" for i in range(len(slugs)))
+    rules = ", ".join(f":r{i}" for i in range(len(CONFIG_RULES)))
+    params = {f"p{i}": slug for i, slug in enumerate(slugs)}
+    params.update({f"r{i}": rule for i, rule in enumerate(CONFIG_RULES)})
+    params["limit"] = int(limit)
+
+    try:
+        from sqlalchemy import text as sql_text
+
+        with engine.begin() as conn:
+            rows = conn.execute(
+                sql_text(
+                    f"UPDATE {TABLE} SET status = '{STATUS_SEEN}',"
+                    " rearm_count = rearm_count + 1,"
+                    " rearm_reason = 'regate'"
+                    " WHERE issue_id IN ("
+                    f"   SELECT issue_id FROM {TABLE}"
+                    f"   WHERE status = '{STATUS_GATED}'"
+                    f"     AND gate_rule IN ({rules})"
+                    f"     AND project IN ({placeholders})"
+                    "    ORDER BY last_seen_at DESC LIMIT :limit"
+                    " )"
+                    " RETURNING issue_id, project, title, culprit, level,"
+                    " exception_type, environment, platform, repo, stack,"
+                    " permalink, times_seen, users_affected"
+                ),
+                params,
+            ).mappings().all()
+        return [dict(r) for r in rows]
+    except Exception as exc:
+        print(f"[SENTRY] regate claim failed: {exc}")
+        return []
+
+
+def regate_candidates(project_slugs) -> int:
+    """How many rows a sweep would release. For the report, no side effects."""
+    slugs = [s for s in (project_slugs or []) if s]
+    if not slugs or not _ready():
+        return 0
+    placeholders = ", ".join(f":p{i}" for i in range(len(slugs)))
+    rules = ", ".join(f":r{i}" for i in range(len(CONFIG_RULES)))
+    params = {f"p{i}": slug for i, slug in enumerate(slugs)}
+    params.update({f"r{i}": rule for i, rule in enumerate(CONFIG_RULES)})
+    rows = store.query(
+        f"SELECT COUNT(*) AS n FROM {TABLE}"
+        f" WHERE status = '{STATUS_GATED}' AND gate_rule IN ({rules})"
+        f"   AND project IN ({placeholders})",
+        params,
+    )
+    return rows[0]["n"] if rows else 0
+
+
 def update(issue_id: str, **fields) -> bool:
     """Write named columns on one row. Used by the later phases.
 
@@ -332,7 +436,9 @@ def update(issue_id: str, **fields) -> bool:
     string reaching an SQL statement.
     """
     writable = {
-        "status", "verdict", "severity", "triage_summary", "infrastructure",
+        "status", "gate_rule", "gate_detail",
+        "verdict", "severity", "triage_summary", "infrastructure",
+        "root_cause", "proposed_fix", "fix_diff", "fix_reason",
         "repo", "clickup_task_id", "slack_channel", "slack_ts", "pr_url",
         "analysed_at", "analysed_sha", "analysed_times_seen",
         "suppressed_until", "run_ids",
@@ -414,7 +520,9 @@ def summary(days: int = 1) -> dict:
     # comparison is the entire point of the evaluation period.
     actionable = store.query(
         "SELECT issue_id, project, repo, severity, infrastructure,"
-        f" triage_summary, title, permalink FROM {TABLE}"
+        " triage_summary, title, permalink, root_cause, proposed_fix,"
+        " fix_diff, fix_reason, slack_ts, pr_url, clickup_task_id"
+        f" FROM {TABLE}"
         f" WHERE {window} AND verdict = 'actionable'"
         " ORDER BY CASE severity WHEN 's1' THEN 1 WHEN 's2' THEN 2"
         " ELSE 3 END, last_seen_at DESC LIMIT 25"

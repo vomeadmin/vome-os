@@ -104,6 +104,7 @@ class Connector:
         params: dict | None = None,
         json_body: dict | None = None,
         headers: dict | None = None,
+        form: dict | None = None,
     ) -> IntegrationResult:
         """Make the call. `headers` overrides `self.headers()` for one call.
 
@@ -111,6 +112,10 @@ class Connector:
         credential. GitHub fine-grained tokens are scoped to a single account,
         so reaching two owners means two tokens and the right one has to be
         chosen per call rather than per connector.
+
+        `form` sends an application/x-www-form-urlencoded body instead of
+        JSON. Bitbucket's file-commit endpoint takes the path as a form FIELD
+        NAME and the content as its value, which no JSON body can express.
         """
         import time
 
@@ -128,7 +133,8 @@ class Connector:
                 url,
                 headers=headers or self.headers(),
                 params=params,
-                json=json_body,
+                json=json_body if form is None else None,
+                data=form,
                 timeout=self.timeout,
             )
         except Exception as exc:

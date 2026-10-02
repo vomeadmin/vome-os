@@ -52,6 +52,13 @@ def wired(monkeypatch):
     )
     monkeypatch.setattr(sentry_event, "fetch_trace", lambda issue_id: "TRACE")
     monkeypatch.setattr(handler, "sentry_event", sentry_event)
+    # Stop at the end of triage. Everything after it (code reading, the
+    # analyst, Slack, the patch) is phases 3 to 5 and has its own tests; what
+    # is under test here is the triage hop itself.
+    monkeypatch.setattr(
+        handler, "_investigate",
+        lambda signal, message, triage: {"status": "analysed"},
+    )
     return updates
 
 
@@ -95,7 +102,6 @@ def test_a_verdict_is_recorded(monkeypatch, wired):
         "summary": "Reserving a shift fails when the role has no site.",
     }))
     result = handler.handle_sentry_issue(_message())
-    assert result["status"] == "triaged"
     assert result["verdict"] == "actionable"
     assert result["severity"] == "s2"
 
@@ -139,7 +145,37 @@ def test_infrastructure_is_carried_through(monkeypatch, wired):
         "summary": "Database connections exhausted.",
     }))
     handler.handle_sentry_issue(_message())
-    assert wired[-1][1]["infrastructure"] is True
+    triage_write = [f for _, f in wired if "infrastructure" in f][-1]
+    assert triage_write["infrastructure"] is True
+
+
+def test_noise_never_reaches_the_analyst(monkeypatch, wired):
+    # The whole economic argument for a cheap triage pass. Spending a
+    # senior-tier call on something just called noise would undo it.
+    reached = []
+    monkeypatch.setattr(
+        handler, "_investigate",
+        lambda s, m, t: reached.append(s.issue_id) or {"status": "analysed"},
+    )
+    _agent(monkeypatch, _Result(data={
+        "verdict": "noise", "severity": "s3", "summary": "Handset offline.",
+    }))
+    result = handler.handle_sentry_issue(_message())
+    assert reached == []
+    assert result["status"] == "triaged"
+
+
+def test_an_actionable_verdict_does_reach_the_analyst(monkeypatch, wired):
+    reached = []
+    monkeypatch.setattr(
+        handler, "_investigate",
+        lambda s, m, t: reached.append(s.issue_id) or {"status": "analysed"},
+    )
+    _agent(monkeypatch, _Result(data={
+        "verdict": "actionable", "severity": "s2", "summary": "Broken.",
+    }))
+    handler.handle_sentry_issue(_message())
+    assert reached == ["900"]
 
 
 # ---------------------------------------------------------------------------

@@ -5,8 +5,10 @@ becomes an issue, every issue that survives the funnel gets diagnosed against
 the real code, and the outcome is either a pull request or one Slack message
 that a person can act on.
 
-Written 2026-09-30. **Phases 1 and 2 are built, deployed and running.
-Phases 3 to 5 are not.** See "Build order" at the end.
+Written 2026-09-30, finished 2026-10-01. **All five phases are built and
+tested.** Phases 1 and 2 are deployed. Phases 3 to 5 ship switched off:
+`SENTRY_SLACK_ENABLED` and `SENTRY_AUTO_PR_ENABLED` both default to false, so
+nothing interrupts anyone and nothing is pushed until somebody decides.
 
 ---
 
@@ -413,8 +415,9 @@ Kernel, in `vomeos/`:
 | `worker/events.py` | **New kernel capability.** The event handler registry: `schedule.py` for things that happen rather than things that run at a time. The OS could previously run a cron job or an agent off the queue, and had no way to route a webhook to a worker at all. | built |
 | `worker/tasks.py` | Gains `vomeos.run_event`, the third generic task. | built |
 | `integrations/sentry.py` | Read connector (issue, latest event, events, tags), plus signature verification and payload normalisation. No write operations. | built |
-| `integrations/code_write.py` | Three operations only: create branch, commit to it, open PR. Separate token from the read connectors. | phase 5 |
-| `guards/patch.py` | Deterministic guard on a proposed diff. Detailed below. | phase 4 |
+| `integrations/code_write.py` | Three operations only: create branch, commit to it, open PR. Separate token. No merge, no force push, no delete: the code does not exist. | built |
+| `guards/patch.py` | Deterministic guard on a proposed diff. Detailed below. | built |
+| `diff.py` | Apply a unified diff and refuse when it no longer fits. | built |
 
 Application, at the repository root, alongside the other handlers:
 
@@ -424,7 +427,10 @@ Application, at the repository root, alongside the other handlers:
 | `sentry_redact.py` | PII scrubbing. Runs before a payload is stored, prompted or posted. | built |
 | `sentry_gate.py` | Stage 2. The rules and the ignore lists, as data at the top of the file. | built |
 | `sentry_ledger.py` | Stage 3. `vomeos_sentry_issues`, the claim, the re-arm, the report queries. | built |
-| `sentry_handler.py` | The orchestration. Web half and worker half. | phase 2 built |
+| `sentry_handler.py` | The orchestration. Web half and worker half. | built |
+| `sentry_code.py` | Read the files a traceback names, at the branch that ran. | built |
+| `sentry_slack.py` | One thread per issue, severity bar, daily cap. | built |
+| `sentry_fix.py` | Propose a patch, apply it, open a PR. | built |
 | `sentry_event.py` | Fetch one real occurrence and render its stack trace, redacted. | built |
 | `sentry_notify.py` | Which channel, and who gets tagged. Used from phase 3. | built |
 | `code_access_monitor.py` | Daily credential watch. Silent unless broken or expiring. | built |
@@ -436,8 +442,8 @@ Content, found through `VOMEOS_HOME`:
 |---|---|---|
 | `org/divisions/engineering.md` | Division handbook. The validator blocks an agent whose division has none. | built |
 | `agents/engineering/sentry_triage/` | Manifest, charter, 17 answer-key cases. Scores 94%. | built |
-| `agents/engineering/bug_analyst/` | Same. | phase 3 |
-| `agents/engineering/fix_author/` | Same, and the one that needs the most cases. | phase 4 |
+| `agents/engineering/bug_analyst/` | Senior tier, reads real source. 13 cases, scores 92%. | built |
+| `agents/engineering/fix_author/` | Senior tier, writes diffs. 12 cases, scores 100%. | built |
 
 Wiring:
 
@@ -704,18 +710,58 @@ how an answer key stops measuring anything.
 is not evidence about live traffic. Every disagreement becomes a new case
 first and a charter edit second, per the rule in `VOMEOS.md`.
 
-**Phase 3, analysis.** Add `engineering.bug_analyst`, the code connectors, the
-ClickUp dedup, threading, and `s1` interrupts. This is the phase that delivers
-most of the value, and it is complete and useful on its own. It is a
-reasonable place to stop for a while.
+**Phase 3, analysis. BUILT.** `engineering.bug_analyst` reads the real source
+at the branch that ran, the commits that recently touched it, and whether
+ClickUp already has a task. It scores 92% on 13 cases. Two of those keys were
+corrected rather than defended: the model was right about a non-null violation
+being a caller bug rather than a migration, and right that "add a null check"
+is not low risk when the source does not say what the code should do instead.
+
+Slack posting is built with one thread per issue, a severity bar at `s1`, and
+a hard cap of five top-level posts a day. `SENTRY_SLACK_ENABLED` defaults to
+**false**.
+
+**Phase 4, patches. BUILT.** `engineering.fix_author` writes a unified diff or
+refuses, and refuses more often than not. It scores 100% on 12 cases, 8 of
+which expect a refusal.
+
+One finding worth keeping: the first run scored 67% by refusing every single
+case, including the four that should have been attempted. The cause was not
+the charter, it was that the answer key hand-wrote source snippets with gaps
+in the line numbers while `sentry_code._window()` emits contiguous lines. A
+unified diff cannot be written against non-contiguous context, so the agent
+was right and the test data was wrong. Worth remembering whenever an agent
+refuses everything: check what you actually handed it.
+
+**Phase 5, pull requests. BUILT, switched off.** `code_write.py` can create a
+branch, commit to it, and open a pull request. It cannot merge, force push or
+delete, because no code for those exists.
+
+Before anything is pushed the diff is applied to the real file in memory and
+every context line verified. A patch that no longer fits is refused rather
+than applied at an offset, because applying at a shifted offset silently
+deletes the wrong lines and produces a commit that looks deliberate.
 
 **Phase 4, dry-run fixes.** Add `engineering.fix_author` and the patch guard
 with `SENTRY_AUTO_PR_ENABLED=false`. Diffs appear in Slack threads. Judge them
 for a month. If the diffs are not obviously correct on sight, do not proceed.
 
-**Phase 5, real PRs.** Flip the switch on a narrow path allowlist, with branch
-protection and required review in place, after the handbook amendment is
-merged.
+**Turning phase 5 on**, when the evidence supports it:
+
+1. The handbook amendment, which is the real gate and is a decision rather
+   than a configuration.
+2. Server-side branch protection on `master`, `development` and `staging`.
+3. Write tokens: `VOMEOS_BITBUCKET_WRITE_TOKEN`, and GitHub per account.
+4. `VOMEOS_CODE_WRITE_REPOS`, which is empty by default and empty means
+   nothing is writable. That is the reverse of the read allowlist and it is
+   deliberate: forgetting a read allowlist costs some extra reading;
+   forgetting a write allowlist would make every repository writable.
+5. `VOMEOS_PR_ALLOW_PROTECTED_TARGET=true`, because a PR into `development`
+   targets a protected branch and that is refused by default.
+6. `SENTRY_AUTO_PR_ENABLED=true`.
+
+Six deliberate steps, none of which happen by accident, and the first is a
+conversation rather than a variable.
 
 ---
 
@@ -791,13 +837,26 @@ Later phases, not yet read by any code:
 SENTRY_SLACK_MAX_POSTS_PER_DAY   default 5
 SENTRY_S1_MENTION                Slack user id to ping on s1
 
-SENTRY_AUTO_PR_ENABLED           default false. The kill switch.
+SENTRY_SLACK_ENABLED             default FALSE. Per-issue Slack posting.
+SENTRY_SLACK_MAX_POSTS_PER_DAY   default 5
+SENTRY_SLACK_INTERRUPT_AT        default s1
+
+SENTRY_CODE_MAX_FILES            default 4, files read per issue
+SENTRY_CODE_WINDOW               default 60, lines either side of the frame
+SENTRY_CODE_MAX_CHARS            default 24000, total source budget
+
+SENTRY_AUTO_PR_ENABLED           default FALSE. The kill switch.
 SENTRY_PATCH_MAX_FILES           default 3
 SENTRY_PATCH_MAX_LINES           default 60
-SENTRY_PATCH_PATH_ALLOWLIST      comma separated path prefixes
+SENTRY_PATCH_PATH_ALLOWLIST      optional, narrows further
 
-VOMEOS_BITBUCKET_WRITE_TOKEN     contents + PR scope, backend repos only
-VOMEOS_GITHUB_WRITE_TOKEN        contents + PR scope, frontend repos only
+VOMEOS_CODE_WRITE_REPOS          EMPTY MEANS NOTHING IS WRITABLE. The
+                                 opposite of VOMEOS_CODE_REPOS, on purpose.
+VOMEOS_PR_ALLOW_PROTECTED_TARGET default false. A PR into `development`
+                                 targets a protected branch, so this has to
+                                 be on for the normal case to work at all.
+VOMEOS_BITBUCKET_WRITE_TOKEN     contents + pullrequest write
+VOMEOS_GITHUB_WRITE_TOKEN_<OWNER> per account, same rule as reading
 ```
 
 The read side (`VOMEOS_BITBUCKET_TOKEN`, `VOMEOS_GITHUB_TOKEN`,

@@ -11,7 +11,7 @@ how to hire an agent.
 
 ---
 
-## The four rules
+## The five rules
 
 **1. The kernel imports nothing from the application.**
 `vomeos/` may import the standard library, the packages in
@@ -34,6 +34,12 @@ in one day, three of those four came back still broken. The guards in
 
 **4. No em dashes, anywhere, in any output.** Periods, commas, parentheses,
 or "and".
+
+**5. An agent may never merge, force push, or write to a default branch.**
+`code_write.py` has three operations and merge is not one of them, because
+the code does not exist rather than because a charter forbids it. Anything
+under `migrations/` is refused outright with no override: migrations are
+generated on deploy here, so a hand-written one is an incident.
 
 ---
 
@@ -177,9 +183,12 @@ before acting; a handler with no such key is a bug, not a style choice.
 **Built and working:**
 - Kernel: manifests, prompt composition, tiers, guards, trace, onboarding gate
 - 8 guards. 4 generic, 4 from documented incidents
-- 3 agents. `support.duplicate_reply_check` (live, 12/12 on its key),
-  `customer_success.triage_director` (15/16, read-only, not yet wired to a
-  trigger), `engineering.sentry_triage` (16/17, live on the Sentry pipeline)
+- 5 agents. `support.duplicate_reply_check` (live, 12/12),
+  `customer_success.triage_director` (15/16, not wired to a trigger),
+  `engineering.sentry_triage` (16/17, live), `engineering.bug_analyst`
+  (12/13), `engineering.fix_author` (12/12)
+- 9 guards. `patch_safety` is the newest and the only one standing between an
+  agent and somebody else's repository
 - `sprint.py`, proven against the live queue (61 open tickets)
 - Product knowledge: frontend routes (379 mapped), UI strings (13.8k), Setup
   Guide, feature catalog
@@ -196,9 +205,15 @@ before acting; a handler with no such key is a bug, not a style choice.
 - Sentry triage, phases 1 and 2. `POST /webhook/sentry` verifies, redacts,
   gates and claims into `vomeos_sentry_issues`, then `engineering.sentry_triage`
   reads a real stack trace and records a verdict. Reports at 09:00, credential
-  watch at 08:00. **No per-issue Slack post and nobody tagged yet**: that is
-  phase 3, after a week of reading verdicts. See
-  [SENTRY_TRIAGE.md](SENTRY_TRIAGE.md).
+  watch at 08:00, re-gate sweep at 08:30.
+
+**Built, tested, and switched OFF:**
+- Sentry triage phases 3 to 5: `bug_analyst` reading real source at the right
+  branch, ClickUp dedup, Slack with one thread per issue and a five-a-day cap,
+  `fix_author` writing diffs, and `code_write.py` opening pull requests.
+  `SENTRY_SLACK_ENABLED` and `SENTRY_AUTO_PR_ENABLED` both default to false.
+  **Phase 5 also needs the handbook amendment**, which is a decision and not a
+  variable. See [SENTRY_TRIAGE.md](SENTRY_TRIAGE.md).
 - Triaging currently happens inside the web request, because no broker is
   configured. It works and it is slow enough to risk Sentry delivery timeouts
   under a burst, which makes the Redis cutover the next infrastructure job.

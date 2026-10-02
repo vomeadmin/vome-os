@@ -59,13 +59,17 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import asdict, replace
+from datetime import datetime, timezone
 
+import sentry_code
 import sentry_event
+import sentry_fix
 import sentry_gate
 import sentry_ledger
 import sentry_notify
 import sentry_projects
 import sentry_redact
+import sentry_slack
 from vomeos.integrations import sentry as sentry_api
 
 # The queued handler's address, registered in engineering_jobs.py.
@@ -277,7 +281,7 @@ def handle_sentry_issue(message: dict) -> dict:
 
     triage = _triage(signal, repo)
 
-    return {
+    outcome = {
         "status": "triaged" if triage else "recorded",
         "issue_id": signal.issue_id,
         "acted": True,
@@ -287,6 +291,213 @@ def handle_sentry_issue(message: dict) -> dict:
         "verdict": (triage or {}).get("verdict", ""),
         "severity": (triage or {}).get("severity", ""),
     }
+
+    # Noise stops here, which is most of what gets this far. Spending a
+    # senior-tier call on something a cheap model just called noise would
+    # undo the entire point of having a cheap model first.
+    if not triage or triage.get("verdict") != "actionable":
+        return outcome
+
+    outcome.update(_investigate(signal, message or {}, triage))
+    return outcome
+
+
+def _investigate(signal, message: dict, triage: dict) -> dict:
+    """Phases 3 to 5 for one actionable issue.
+
+    Analyse against the real code, check whether ClickUp already has it,
+    report to Slack, and propose a patch when the analyst says the fix is
+    small and certain.
+
+    Every step degrades rather than raising. An issue that reaches here has
+    already been claimed, so an exception would lose it permanently, and a
+    partial result (a diagnosis with no patch, or a patch with no PR) is
+    worth more than nothing.
+    """
+    issue_id = signal.issue_id
+    repo = message.get("repo", "")
+    ref = message.get("repo_ref", "")
+    host = message.get("repo_host", "bitbucket")
+    owner = message.get("repo_owner", "")
+
+    trace = sentry_event.fetch_trace(issue_id)
+    code = sentry_code.gather(trace, repo, ref, host=host, owner=owner)
+    existing = _existing_tasks(signal)
+
+    analysis = _analyse(signal, triage, trace, code, existing, repo, ref)
+
+    issue = {
+        "issue_id": issue_id,
+        "project": signal.project,
+        "title": signal.title,
+        "culprit": signal.culprit,
+        "exception_type": signal.exception_type,
+        "permalink": signal.permalink,
+        "severity": triage.get("severity", ""),
+        "triage_summary": triage.get("summary", ""),
+        "infrastructure": triage.get("infrastructure", False),
+        "repo": repo,
+        "ref": ref,
+        "stack": message.get("stack", ""),
+    }
+
+    posted = sentry_slack.report_issue(issue, analysis)
+
+    proposal = {"attempted": False, "reason": "no analysis"}
+    pull_request = {"opened": False, "reason": "no patch"}
+    if analysis:
+        proposal = sentry_fix.propose(analysis, {
+            "source": code.get("files", ""),
+            "repo": repo, "branch": ref, "issue_id": issue_id,
+        })
+        if proposal.get("diff"):
+            issue.update(posted_thread(issue, posted))
+            pull_request = sentry_fix.open_pull_request(issue, proposal, {
+                "repo": repo, "branch": ref, "host": host, "owner": owner,
+                "root_cause": analysis.get("root_cause", ""),
+            })
+        # Stored whatever happened. An issue below the interrupt bar never
+        # reaches Slack in the moment, so without this the diff would be
+        # paid for and then thrown away.
+        sentry_ledger.update(
+            issue_id,
+            fix_diff=(proposal.get("diff") or "")[:12000] or None,
+            fix_reason=(proposal.get("reason") or "")[:500] or None,
+        )
+        _report_proposal(issue, posted, proposal, pull_request)
+
+    return {
+        "status": "analysed",
+        "analysed": bool(analysis),
+        "risk": (analysis or {}).get("risk", ""),
+        "duplicate_of": (analysis or {}).get("duplicate_of", ""),
+        "slack": posted,
+        "fix": {"attempted": proposal.get("attempted"),
+                "reason": proposal.get("reason")},
+        "pull_request": pull_request,
+    }
+
+
+def posted_thread(issue: dict, posted: dict) -> dict:
+    """Carry a freshly created thread id onto the issue dict."""
+    if posted.get("thread_ts"):
+        return {"slack_ts": posted["thread_ts"],
+                "slack_channel": posted.get("channel", "")}
+    row = sentry_ledger.get(issue["issue_id"]) or {}
+    return {"slack_ts": row.get("slack_ts", ""),
+            "slack_channel": row.get("slack_channel", "")}
+
+
+def _existing_tasks(signal) -> str:
+    """Has ClickUp already got this?
+
+    Never lets a failed search look like an empty one. `clickup_search`
+    returns prose that says which it was, and the analyst's charter tells it
+    to treat an unavailable search as unknown rather than as none.
+    """
+    try:
+        from clickup_search import describe_matches
+
+        query = f"{signal.exception_type} {signal.title}".strip()
+        return describe_matches(query, limit=4)
+    except Exception as exc:
+        return (
+            f"Existing-task search FAILED ({exc}). Treat existing work as "
+            "UNKNOWN, not as none."
+        )
+
+
+def _analyse(signal, triage: dict, trace: str, code: dict, existing: str,
+             repo: str, ref: str) -> dict | None:
+    """Run `engineering.bug_analyst`. None when it could not answer."""
+    try:
+        from vomeos import run_agent
+
+        result = run_agent(
+            "engineering.bug_analyst",
+            context={
+                "summary": triage.get("summary", ""),
+                "severity": triage.get("severity", ""),
+                "title": signal.title,
+                "exception_type": signal.exception_type,
+                "culprit": signal.culprit,
+                "stack_trace": trace or "(no stack trace available)",
+                "source": code.get("files", ""),
+                "recent_commits": code.get("commits", ""),
+                "existing_tasks": existing,
+                "repo": repo,
+                "branch": ref,
+            },
+            subject_type="sentry_issue",
+            subject_id=signal.issue_id,
+        )
+    except Exception as exc:
+        print(f"[SENTRY] analysis failed for {signal.issue_id}: {exc}")
+        return None
+
+    if not result.ok:
+        print(
+            f"[SENTRY] analysis {result.status} for {signal.issue_id}: "
+            f"{result.why()}"
+        )
+        return None
+
+    analysis = {
+        "root_cause": result.get("root_cause", ""),
+        "evidence": result.get("evidence", ""),
+        "proposed_fix": result.get("proposed_fix", ""),
+        "risk": str(result.get("risk", "")).lower(),
+        "confidence": str(result.get("confidence", "")).lower(),
+        "needs_migration": bool(result.get("needs_migration", False)),
+        "duplicate_of": str(result.get("duplicate_of", "") or ""),
+        "files": result.get("files") or [],
+    }
+    sentry_ledger.update(
+        signal.issue_id,
+        status=sentry_ledger.STATUS_ANALYSED,
+        clickup_task_id=analysis["duplicate_of"] or None,
+        root_cause=analysis["root_cause"][:2000],
+        proposed_fix=analysis["proposed_fix"][:2000],
+        analysed_at=datetime.now(timezone.utc),
+        analysed_times_seen=int(signal.times_seen or 0),
+    )
+    print(
+        f"[SENTRY] analysed {signal.issue_id}: risk={analysis['risk']} "
+        f"confidence={analysis['confidence']} "
+        f"migration={analysis['needs_migration']}"
+    )
+    return analysis
+
+
+def _report_proposal(issue: dict, posted: dict, proposal: dict,
+                     pull_request: dict) -> None:
+    """Put the diff, or the reason there is not one, in the issue's thread.
+
+    In the thread rather than as a new message, because a proposed fix is an
+    update about an issue somebody has already been told about. Without a
+    thread it says nothing at all rather than starting a second alert.
+    """
+    if not issue.get("slack_ts"):
+        return
+
+    if pull_request.get("opened"):
+        text = (
+            f"Pull request opened: {pull_request['url']}\n"
+            f"_Not reviewed by a person. Branch `{pull_request['branch']}`._"
+        )
+    elif proposal.get("diff"):
+        why = pull_request.get("reason", "")
+        text = (
+            "A fix was written but not pushed"
+            + (f" ({why})" if why else "")
+            + f".\n\n*Why* {proposal.get('rationale', '')}\n"
+            + f"*Unsure about* {proposal.get('risks', '')}\n"
+            + "```\n" + proposal["diff"][:2500] + "\n```"
+        )
+    else:
+        text = f"No automated fix attempted: {proposal.get('reason', '')}"
+
+    sentry_slack.reply_in_thread(issue, text)
 
 
 def _triage(signal, repo: str) -> dict | None:
@@ -412,17 +623,43 @@ def _format_report(data: dict) -> str:
                 label = f"actionable {row['severity']}"
             lines.append(f"  {label}: {row['n']}")
 
+    # The actionable issues, in full. This is where the analysis lands for
+    # everything below the interrupt bar, which is most of it: an s2 never
+    # posts to Slack in the moment, so without this section the analyst's
+    # work would be paid for and then seen by nobody.
     actionable = data.get("actionable") or []
     if actionable:
         lines.append("")
-        lines.append("*Called actionable:*")
+        lines.append("*Actionable:*")
         for row in actionable:
             sev = (row.get("severity") or "?").upper()
             infra = " [infra]" if row.get("infrastructure") else ""
             summary = row.get("triage_summary") or row.get("title") or ""
-            lines.append(f"  {sev}{infra} {summary[:150]}")
+            lines.append("")
+            lines.append(f"*{sev}*{infra} {summary[:200]}")
+
+            if row.get("root_cause"):
+                lines.append(f"  _Cause_ {row['root_cause'][:300]}")
+            if row.get("proposed_fix"):
+                lines.append(f"  _Fix_ {row['proposed_fix'][:300]}")
+            if row.get("clickup_task_id"):
+                lines.append(
+                    f"  _Possibly already ClickUp task "
+                    f"{row['clickup_task_id']}_"
+                )
+            if row.get("pr_url"):
+                lines.append(f"  _Pull request_ {row['pr_url']}")
+            elif row.get("fix_diff"):
+                lines.append(
+                    "  _A patch was written and not pushed. "
+                    "`/sentry/recent` has it._"
+                )
+            elif row.get("fix_reason"):
+                lines.append(f"  _No patch_ {row['fix_reason'][:160]}")
+            if row.get("slack_ts"):
+                lines.append("  _Already has a thread above._")
             if row.get("permalink"):
-                lines.append(f"       {row['permalink']}")
+                lines.append(f"  {row['permalink']}")
 
     drops = data.get("gate_drops_by_rule") or {}
     if drops:
@@ -511,15 +748,108 @@ def run_shadow_report() -> dict:
     return {"status": "ok", "summary": data}
 
 
+def run_regate_sweep(limit: int = 25) -> dict:
+    """Re-decide issues that were gated for a reason that has since changed.
+
+    Widening `SENTRY_PROJECT_ALLOWLIST` does nothing to the backlog on its
+    own, because `issue.created` fires once per group and the ledger never
+    reconsiders an id it has seen. This closes that gap: an issue is triaged
+    once per gate configuration rather than once ever.
+
+    THE PART THAT IS EASY TO GET WRONG
+    ----------------------------------
+    These rows were rejected at the project rule, which is third of seven.
+    The exception type, title and culprit rules never ran on them. So the
+    gate is re-run in full, and anything that fails a different rule goes
+    back to gated carrying the NEW reason, rather than being let through on
+    the strength of having once been excluded for an unrelated reason.
+
+    Capped per run so that switching on a noisy project does not trigger a
+    hundred model calls in one job.
+    """
+    triaged = sentry_projects.triaged_slugs()
+    rows = sentry_ledger.claim_regate(triaged, limit=limit)
+    if not rows:
+        return {"status": "nothing_to_do", "released": 0}
+
+    passed, regated, failed = 0, 0, 0
+    for row in rows:
+        # `category` is not a ledger column, so it rebuilds as the default
+        # "error". That is safe only because of rule ORDER: issue_category
+        # is rule 1 and project is rule 3, so anything gated at project had
+        # already passed the category rule and genuinely was an error. If
+        # those two are ever reordered, this stops being true.
+        signal = sentry_api.IssueSignal(
+            issue_id=str(row.get("issue_id") or ""),
+            project=row.get("project") or "",
+            title=row.get("title") or "",
+            culprit=row.get("culprit") or "",
+            level=row.get("level") or "",
+            environment=row.get("environment") or "",
+            platform=row.get("platform") or "",
+            exception_type=row.get("exception_type") or "",
+            times_seen=int(row.get("times_seen") or 0),
+            users_affected=int(row.get("users_affected") or 0),
+            permalink=row.get("permalink") or "",
+            reason="regate",
+        )
+
+        decision = sentry_gate.check(signal)
+        if decision.blocked:
+            # Still gated, by a rule that was never reached the first time.
+            #
+            # update() rather than record(): the row already exists, and
+            # record()'s second branch only bumps counters. It deliberately
+            # never rewrites status or a verdict, so a later sighting cannot
+            # undo a decision, which means it is the wrong tool here.
+            sentry_ledger.update(
+                signal.issue_id,
+                status=sentry_ledger.STATUS_GATED,
+                gate_rule=decision.rule,
+                gate_detail=decision.detail,
+            )
+            regated += 1
+            print(
+                f"[SENTRY] regate kept {signal.issue_id} gated "
+                f"({decision.rule})"
+            )
+            continue
+
+        project = sentry_projects.route(signal.project)
+        repo = row.get("repo") or (project.repo if project else "")
+        if _triage(signal, repo):
+            passed += 1
+        else:
+            failed += 1
+
+    print(
+        f"[SENTRY] regate: {len(rows)} released, {passed} triaged, "
+        f"{regated} still gated, {failed} could not be triaged"
+    )
+    return {
+        "status": "ok",
+        "released": len(rows),
+        "triaged": passed,
+        "still_gated": regated,
+        "failed": failed,
+    }
+
+
 def describe() -> dict:
     """Pipeline health, for /health and the CLI."""
     return {
         "enabled": _enabled(),
-        "phase": "2 (triage verdicts recorded, nothing acted on)",
+        "phase": (
+            "5 (triage, analysis, Slack, patch proposal; PRs gated by "
+            "SENTRY_AUTO_PR_ENABLED)"
+        ),
         "handler": HANDLER_KEY,
         "queue": QUEUE,
         "gate": sentry_gate.describe(),
         "routing": sentry_projects.describe(),
         "notify": sentry_notify.describe(),
+        "slack": sentry_slack.describe(),
+        "code": sentry_code.describe(),
+        "fix": sentry_fix.describe(),
         "sentry": sentry_api.describe(),
     }

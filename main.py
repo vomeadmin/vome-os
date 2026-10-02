@@ -52,6 +52,7 @@ from on_prod_handler import handle_on_prod
 from code_access_monitor import check_code_access as run_code_access_check
 from sentry_handler import (
     handle_webhook as handle_sentry_webhook,
+    run_regate_sweep as run_sentry_regate_sweep,
     run_shadow_report as run_sentry_shadow_report,
 )
 from slack_agent_mention_handler import handle_agent_mention
@@ -170,7 +171,7 @@ app = FastAPI(title="Vome Support Agent")
 app.include_router(ops_router, prefix="/ops")
 
 # ---------------------------------------------------------------------------
-# APScheduler — daily digest at 17:00 ET (America/Montreal)
+# APScheduler - daily digest at 17:00 ET (America/Montreal)
 # ---------------------------------------------------------------------------
 
 def _run_weekly_knowledge_refresh():
@@ -319,6 +320,19 @@ _scheduler.add_job(
     max_instances=1,
 )
 
+# Re-gate sweep, 08:30. Mirrors engineering.sentry_regate. Usually a no-op.
+_scheduler.add_job(
+    run_sentry_regate_sweep,
+    CronTrigger(
+        hour=int(os.environ.get("SENTRY_REGATE_HOUR", "8")),
+        minute=int(os.environ.get("SENTRY_REGATE_MINUTE", "30")),
+        timezone="America/Montreal",
+    ),
+    misfire_grace_time=3600,
+    coalesce=True,
+    max_instances=1,
+)
+
 # Sentry pipeline report, 09:00. Mirrors engineering.sentry_report in
 # engineering_jobs.py, the same way every job above mirrors support_jobs.py,
 # so the schedule is identical whichever side owns it.
@@ -441,12 +455,12 @@ async def slack_events_webhook(request: Request):
     if event.get("bot_id") or event.get("subtype"):
         return {"status": "ok"}
 
-    # app_mention — @Agent was mentioned in a channel
+    # app_mention - @Agent was mentioned in a channel
     if event_type == "app_mention":
         handle_agent_mention(event)
         return {"status": "ok"}
 
-    # file_shared — attach file data to event and route as a reply
+    # file_shared - attach file data to event and route as a reply
     if event_type == "file_shared":
         file_id = event.get("file_id")
         if file_id and channel == SLACK_TICKETS_CHANNEL:
@@ -467,7 +481,7 @@ async def slack_events_webhook(request: Request):
                 print(f"file_shared handling failed: {e}")
         return {"status": "ok"}
 
-    # message event — route by channel
+    # message event - route by channel
     if event_type == "message":
         thread_ts = event.get("thread_ts")
         user = event.get("user")
@@ -503,7 +517,7 @@ async def slack_events_webhook(request: Request):
             })
 
         elif event.get("channel_type") == "im":
-            # DM to the bot — treat as @mention
+            # DM to the bot - treat as @mention
             handle_agent_mention({
                 "type": "app_mention",
                 "user": user,
@@ -641,7 +655,7 @@ async def clickup_status_webhook(request: Request):
         if _clickup_dedup_check(dedup_key):
             print(
                 f"[{timestamp}] Duplicate ClickUp status"
-                f" webhook — {dedup_key} — skipping"
+                f" webhook - {dedup_key} - skipping"
             )
             break
 
@@ -649,7 +663,7 @@ async def clickup_status_webhook(request: Request):
 
         if norm_status == CU_ON_PROD:
             print(
-                f"[{timestamp}] ON PROD detected — "
+                f"[{timestamp}] ON PROD detected - "
                 f"task {task_id} by {engineer_name}"
             )
             handle_on_prod(task_id, engineer_name)
@@ -657,7 +671,7 @@ async def clickup_status_webhook(request: Request):
 
         if norm_status == CU_NEEDS_CLIENT_INFO:
             print(
-                f"[{timestamp}] NEEDS CLIENT INFO detected — "
+                f"[{timestamp}] NEEDS CLIENT INFO detected - "
                 f"task {task_id} by {engineer_name}"
             )
             handle_needs_client_info(task_id, engineer_name)
@@ -665,7 +679,7 @@ async def clickup_status_webhook(request: Request):
 
         if norm_status == CU_USER_EDUCATION:
             print(
-                f"[{timestamp}] USER EDUCATION detected — "
+                f"[{timestamp}] USER EDUCATION detected - "
                 f"task {task_id} by {engineer_name}"
             )
             handle_user_education(task_id, engineer_name)
@@ -673,7 +687,7 @@ async def clickup_status_webhook(request: Request):
 
         if norm_status == CU_ESCALATED:
             print(
-                f"[{timestamp}] ESCALATED detected — "
+                f"[{timestamp}] ESCALATED detected - "
                 f"task {task_id} by {engineer_name}"
             )
             handle_escalated(task_id, engineer_name)
@@ -1728,6 +1742,18 @@ async def sentry_status():
     return describe_sentry()
 
 
+@app.post("/sentry/regate", dependencies=[Depends(verify_ops_token)])
+async def sentry_regate(limit: int = 25):
+    """Re-decide gated issues now rather than waiting for 08:30.
+
+    For the moment just after you widen SENTRY_PROJECT_ALLOWLIST, when the
+    backlog is the thing you actually want to see.
+    """
+    from sentry_handler import run_regate_sweep
+
+    return await asyncio.to_thread(run_regate_sweep, min(limit, 100))
+
+
 @app.get("/sentry/credentials", dependencies=[Depends(verify_ops_token)])
 async def sentry_credentials():
     """Run the credential checks now rather than waiting for 08:00.
@@ -1760,7 +1786,7 @@ async def sentry_recent(limit: int = 30, status: str = ""):
 
 # ---------------------------------------------------------------------------
 # Serve Command Center frontend (React SPA)
-# Must be LAST — catches all unmatched routes and serves index.html
+# Must be LAST - catches all unmatched routes and serves index.html
 # ---------------------------------------------------------------------------
 import pathlib as _pathlib
 

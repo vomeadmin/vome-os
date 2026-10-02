@@ -75,6 +75,7 @@ def run_guards(
 from vomeos.guards import builtin as _builtin  # noqa: E402,F401
 from vomeos.guards import claims as _claims  # noqa: E402,F401
 from vomeos.guards import client as _client  # noqa: E402,F401
+from vomeos.guards import patch as _patch  # noqa: E402,F401
 
 __all__ = [
     "GuardResult",
