@@ -1704,24 +1704,47 @@ async def health():
     env_status = {v: bool(os.environ.get(v)) for v in REQUIRED_ENV}
     # Booleans only, never values. Same contract as the block above.
     #
-    # Here rather than only on /sentry/status because that endpoint needs
-    # OPS_TOKEN, and "is the pipeline configured" is exactly the question you
-    # cannot answer when a token is the thing that is missing. A webhook
-    # endpoint that rejects every delivery for a missing secret is invisible
-    # from the outside: it fails closed, so it looks identical to a quiet day.
+    # Every variable the Sentry worker reads, grouped by what it switches on.
+    # Here rather than only behind the ops token because "which variables
+    # actually reached this process" is the question that has cost the most
+    # time on this project: a Railway shared variable that a service does not
+    # reference is absent in a way nothing reports. One unauthenticated curl
+    # should answer it.
+    def _present(*names):
+        return {name: bool(os.environ.get(name)) for name in names}
+
     sentry_status = {
-        v: bool(os.environ.get(v))
-        for v in (
-            "SENTRY_WEBHOOK_SECRET",
-            "SENTRY_AUTH_TOKEN",
-            "SENTRY_ORG",
-            "SENTRY_PROJECT_ALLOWLIST",
-            "OPS_TOKEN",
-            # Without these the credential alert either never posts or
-            # posts without pinging anyone, both of which are silent.
-            "SLACK_BOT_TOKEN",
-            "SAM_SLACK_USER_ID",
-        )
+        "pipeline": _present(
+            "SENTRY_WEBHOOK_SECRET", "SENTRY_AUTH_TOKEN", "SENTRY_ORG",
+            "SENTRY_PROJECT_ALLOWLIST", "OPS_TOKEN",
+        ),
+        "slack": _present(
+            "SLACK_BOT_TOKEN", "SAM_SLACK_USER_ID", "SENTRY_SLACK_ENABLED",
+        ),
+        "code_read": _present(
+            "VOMEOS_BITBUCKET_TOKEN", "VOMEOS_BITBUCKET_WORKSPACE",
+            "VOMEOS_CODE_REPOS",
+            "VOMEOS_GITHUB_TOKEN_VOMEADMIN",
+            "VOMEOS_GITHUB_TOKEN_SAMFAGEN15",
+        ),
+        "code_write": _present(
+            "VOMEOS_BITBUCKET_WRITE_TOKEN",
+            "VOMEOS_GITHUB_WRITE_TOKEN_VOMEADMIN",
+            "VOMEOS_GITHUB_WRITE_TOKEN_SAMFAGEN15",
+            "VOMEOS_CODE_WRITE_REPOS", "VOMEOS_PR_ALLOW_PROTECTED_TARGET",
+            "SENTRY_AUTO_PR_ENABLED",
+        ),
+    }
+    # The two switches that actually decide behaviour, as booleans rather
+    # than as "is the variable present", because the string has to say
+    # exactly "true" and a typo reads as present but behaves as off.
+    sentry_status["switches"] = {
+        "slack_posting": (
+            os.environ.get("SENTRY_SLACK_ENABLED", "").lower() == "true"
+        ),
+        "auto_pull_requests": (
+            os.environ.get("SENTRY_AUTO_PR_ENABLED", "").lower() == "true"
+        ),
     }
     return {"status": "ok", "env": env_status, "sentry": sentry_status}
 

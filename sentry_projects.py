@@ -192,11 +192,12 @@ _PROJECTS: tuple[Project, ...] = (
         stack=FRONTEND,
         production=True,
         channel_env="SLACK_CHANNEL_ENG_FRONTEND",
-        # UNCONFIRMED. vome-react's branch naming is the messiest of the
-        # three repos: its default is `develop`, and it also carries
-        # `master`, `ProductionEnv` and `RealProdEnv`. `master` matches the
-        # backend convention, which is the only reason it is the guess.
-        # Harmless while the project is empty. Confirm before it has data.
+        # CONFIRMED by Sam on 2026-10-02. Worth having asked: this repo
+        # carries `develop` as its DEFAULT branch plus `master`,
+        # `ProductionEnv` and `RealProdEnv`, so the deployed branch and the
+        # default branch are different and only the deployed one is useful
+        # here. Reading the default would have produced confident analysis
+        # of code nobody is running.
         ref="master",
         notes=(
             "No events yet. REACT_APP_SENTRY_DSN is probably missing at "
