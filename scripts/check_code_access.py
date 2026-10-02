@@ -36,14 +36,17 @@ Usage:
 Reading what comes back:
 
     all four OK          the token is right. Put it on Railway.
-    401 everywhere       wrong auth shape. On Bitbucket, try setting
-                         VOMEOS_BITBUCKET_EMAIL to switch to Basic.
+    401 everywhere       on Bitbucket, this script then tries the other auth
+                         shape and tells you which half was wrong. Bitbucket's
+                         own message names neither, which is the trap.
     403 everywhere       the token authenticated but lacks the read scope.
     404 on read_file     usually the wrong branch, or the wrong owner on
                          GitHub, rather than a missing file.
-    search_code fails    some Bitbucket token types cannot search across a
-                         workspace even when they can read a repo. Not fatal:
-                         the analyst degrades to reading named files.
+    search_code fails    not fatal: the analyst degrades to reading the files
+                         named in the stack trace. Note that workspace code
+                         search DOES work on read:repository:bitbucket alone,
+                         verified 2026-10-01, so a failure here is not a
+                         missing workspace scope.
 """
 
 from __future__ import annotations
@@ -80,6 +83,48 @@ def _show(label: str, result) -> bool:
     code = result.status_code or "-"
     print(f"  [FAIL] {label:16} HTTP {code}  {result.error[:88]}")
     return False
+
+
+def _disambiguate_bitbucket(repo: str, path: str, ref: str) -> None:
+    """Work out which half of a Bitbucket 401 was actually wrong.
+
+    Bitbucket answers every credential problem with "Token is invalid,
+    expired, or not supported for this endpoint", which names neither the
+    half that was wrong nor the shape it wanted. On 2026-10-01 that message
+    cost an afternoon: the token was fine, the scope was fine, and the Basic
+    email belonged to a different Atlassian account.
+
+    So when everything fails, try the other shape and say which one works.
+    One extra request turns a generic string into an answer.
+    """
+    import os as _os
+
+    email = _os.environ.get("VOMEOS_BITBUCKET_EMAIL", "")
+    print()
+    print("  All four failed. Trying the other auth shape...")
+
+    if email:
+        # Currently Basic. Does Bearer work without the account?
+        _os.environ.pop("VOMEOS_BITBUCKET_EMAIL", None)
+        probe = code_search.Bitbucket().read_file(repo, path, ref=ref)
+        _os.environ["VOMEOS_BITBUCKET_EMAIL"] = email
+        if probe.ok:
+            print("  -> BEARER WORKS. The token and the scope are both fine.")
+            print(f"     {email!r} is not the Atlassian account that owns it.")
+            print("     Unset VOMEOS_BITBUCKET_EMAIL and use Bearer: it does")
+            print("     not depend on which account owns the token.")
+            return
+        print("  -> Bearer fails too, so the email is not the problem.")
+        print("     The token is expired, revoked, or lacks"
+              " read:repository:bitbucket.")
+        return
+
+    # Currently Bearer, and it failed. Basic needs an email we do not have.
+    print("  -> Bearer failed, and the account plays no part in Bearer auth,")
+    print("     so the token is expired, revoked, or lacks")
+    print("     read:repository:bitbucket.")
+    print("     If it is an app password or an unscoped token it wants Basic:")
+    print("     set VOMEOS_BITBUCKET_EMAIL to the account that OWNS it.")
 
 
 def main() -> int:
@@ -155,6 +200,10 @@ def main() -> int:
     ]
 
     passed = sum(1 for r in results if r)
+
+    if passed == 0 and args.host == "bitbucket":
+        _disambiguate_bitbucket(repo, path, ref)
+
     print()
     print(f"{passed}/4 operations succeeded.")
     if passed == 4:

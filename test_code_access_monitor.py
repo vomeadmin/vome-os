@@ -143,6 +143,28 @@ def test_healthy_credentials_are_still_listed_in_a_problem_report(monkeypatch):
     assert "Still fine: github, sentry" in posts[0]
 
 
+def test_a_repo_outside_the_allowlist_is_skipped_not_failed(monkeypatch):
+    # The allowlist refusing a repo is a deliberate choice. Reporting it as
+    # a broken credential would page someone every morning about a decision
+    # they made on purpose, and that is how a monitor gets muted.
+    monkeypatch.setenv("VOMEOS_GITHUB_TOKEN_SAMFAGEN15", "tok")
+    monkeypatch.setenv("VOMEOS_CODE_REPOS", "vomedjango-restored-core-app")
+    check = mon.check_github_owner("samfagen15")
+    assert check.status == mon.SKIPPED
+    assert "VOMEOS_CODE_REPOS" in check.detail
+
+
+def test_an_out_of_scope_repo_says_nothing_in_slack(monkeypatch):
+    posts = _patch(
+        monkeypatch,
+        mon.Check("bitbucket", mon.SKIPPED, "not in VOMEOS_CODE_REPOS"),
+        mon.Check("github:samfagen15", mon.SKIPPED, "not in scope"),
+        mon.Check("sentry", mon.OK),
+    )
+    assert mon.check_code_access()["status"] == "healthy"
+    assert posts == []
+
+
 # ---------------------------------------------------------------------------
 # Expiry arithmetic
 # ---------------------------------------------------------------------------

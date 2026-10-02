@@ -94,6 +94,12 @@ store.register_table(
         users_affected      INTEGER DEFAULT 0,
         verdict             VARCHAR,
         severity            VARCHAR,
+        -- The triage agent's one-sentence summary, and whether it judged the
+        -- fix to be a setting rather than a line of code. Stored so the daily
+        -- report can show the verdict next to the issue that produced it,
+        -- which is the only way to tell whether the agent is any good.
+        triage_summary      TEXT,
+        infrastructure      BOOLEAN,
         -- Repo and stack come from sentry_projects.py, not from a model.
         -- The mapping is a fixed fact, so it is written on the first sighting
         -- and the agents are told it rather than asked for it.
@@ -326,9 +332,10 @@ def update(issue_id: str, **fields) -> bool:
     string reaching an SQL statement.
     """
     writable = {
-        "status", "verdict", "severity", "repo", "clickup_task_id",
-        "slack_channel", "slack_ts", "pr_url", "analysed_at", "analysed_sha",
-        "analysed_times_seen", "suppressed_until", "run_ids",
+        "status", "verdict", "severity", "triage_summary", "infrastructure",
+        "repo", "clickup_task_id", "slack_channel", "slack_ts", "pr_url",
+        "analysed_at", "analysed_sha", "analysed_times_seen",
+        "suppressed_until", "run_ids",
     }
     unknown = set(fields) - writable
     if unknown:
@@ -396,6 +403,22 @@ def summary(days: int = 1) -> dict:
         f" WHERE first_seen_at > NOW() - INTERVAL '{int(days)} days'"
         f"   AND status <> '{STATUS_GATED}'"
     )
+    by_verdict = store.query(
+        f"SELECT COALESCE(verdict, '(untriaged)') AS verdict,"
+        f" COALESCE(severity, '-') AS severity, COUNT(*) AS n"
+        f" FROM {TABLE} WHERE {window} AND status <> '{STATUS_GATED}'"
+        " GROUP BY 1, 2 ORDER BY n DESC"
+    )
+    # The actionable ones, with the agent's own summary, so a human reading
+    # the report is grading the verdict and the issue side by side. That
+    # comparison is the entire point of the evaluation period.
+    actionable = store.query(
+        "SELECT issue_id, project, repo, severity, infrastructure,"
+        f" triage_summary, title, permalink FROM {TABLE}"
+        f" WHERE {window} AND verdict = 'actionable'"
+        " ORDER BY CASE severity WHEN 's1' THEN 1 WHEN 's2' THEN 2"
+        " ELSE 3 END, last_seen_at DESC LIMIT 25"
+    )
     environments = store.query(
         f"SELECT COALESCE(NULLIF(environment, ''), '(unknown)') AS environment,"
         f" COUNT(*) AS n FROM {TABLE} WHERE {window}"
@@ -423,6 +446,11 @@ def summary(days: int = 1) -> dict:
         },
         "environments": {r["environment"]: r["n"] for r in environments},
         "new_surviving_issues": new_issues[0]["n"] if new_issues else 0,
+        "by_verdict": [
+            {"verdict": r["verdict"], "severity": r["severity"], "n": r["n"]}
+            for r in by_verdict
+        ],
+        "actionable": [dict(r) for r in actionable],
     }
 
 

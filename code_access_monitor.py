@@ -62,6 +62,12 @@ SKIPPED = "skipped"
 WARNING = "warning"
 FAILING = "failing"
 
+# The allowlist refusing a repo is a deliberate configuration, not a broken
+# credential. Reporting it as a failure would page somebody every morning
+# about a choice they made on purpose, which is the fastest way to teach
+# everyone to ignore this monitor.
+_NOT_IN_SCOPE = "not in VOMEOS_CODE_REPOS"
+
 
 @dataclass
 class Check:
@@ -140,12 +146,33 @@ def check_bitbucket() -> Check:
         os.environ.get("VOMEOS_BITBUCKET_TOKEN_EXPIRES", "")
     )
     if not result.ok:
+        if _NOT_IN_SCOPE in (result.error or ""):
+            return Check(
+                "bitbucket", SKIPPED,
+                f"{repo} is not in VOMEOS_CODE_REPOS, so not checked",
+            )
         hint = ""
         if result.status_code == 401:
-            hint = (
-                " Try VOMEOS_BITBUCKET_EMAIL to switch to Basic auth, or the"
-                " token has expired."
-            )
+            # Bitbucket answers "Token is invalid, expired, or not supported
+            # for this endpoint" to every credential problem, naming neither
+            # which half was wrong nor which shape it wanted. On 2026-10-01
+            # that message cost an afternoon, and the cause was none of the
+            # three things it lists: the token was fine and the Basic email
+            # belonged to a different Atlassian account.
+            if os.environ.get("VOMEOS_BITBUCKET_EMAIL"):
+                hint = (
+                    " VOMEOS_BITBUCKET_EMAIL is set, so this is Basic auth"
+                    " and the email must be the Atlassian account that OWNS"
+                    " the token. A mismatched account gives exactly this"
+                    " message. Unsetting it switches to Bearer, which does"
+                    " not depend on the account at all."
+                )
+            else:
+                hint = (
+                    " This is Bearer auth, so the account does not matter."
+                    " The token is expired, revoked, or missing"
+                    " read:repository:bitbucket."
+                )
         return Check(
             "bitbucket", FAILING,
             f"cannot read {repo}: {result.error[:120]}{hint}",
@@ -199,6 +226,13 @@ def check_github_owner(owner: str) -> Check:
     )
 
     if not result.ok:
+        if _NOT_IN_SCOPE in (result.error or ""):
+            # A token we hold but have deliberately not put in scope yet.
+            # Real, intended, and nothing to say about it.
+            return Check(
+                name, SKIPPED,
+                f"{repo} is not in VOMEOS_CODE_REPOS, so not checked",
+            )
         hint = ""
         if result.status_code == 404:
             hint = (

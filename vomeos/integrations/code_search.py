@@ -42,10 +42,20 @@ see the code" is a reviewable line in a file rather than a convention.
 
 ENVIRONMENT
 -----------
-    VOMEOS_BITBUCKET_TOKEN     read-only app password or access token
+    VOMEOS_BITBUCKET_TOKEN     Atlassian API token with scopes. Only
+                               read:repository:bitbucket is needed, and that
+                               covers workspace code search too (verified
+                               2026-10-01, 148 hits across the workspace).
     VOMEOS_BITBUCKET_WORKSPACE workspace slug (e.g. "vomedjango")
-    VOMEOS_GITHUB_TOKEN        read-only fine-grained token
-    VOMEOS_GITHUB_OWNER        org or user that owns the repos
+    VOMEOS_BITBUCKET_EMAIL     LEAVE UNSET. Only for app passwords and
+                               unscoped tokens, which need Basic. See
+                               Bitbucket.headers() for why Bearer is better.
+    VOMEOS_GITHUB_TOKEN        shared fallback token
+    VOMEOS_GITHUB_TOKEN_<OWNER> per account, e.g.
+                               VOMEOS_GITHUB_TOKEN_SAMFAGEN15. A fine-grained
+                               token is bound to one account, so two accounts
+                               means two tokens.
+    VOMEOS_GITHUB_OWNER        default owner when a caller names none
     VOMEOS_CODE_REPOS          comma separated allowlist of repo slugs.
                                Empty means every repo the token can reach.
 """
@@ -110,10 +120,21 @@ class Bitbucket(Connector):
           * Atlassian API token WITHOUT scopes, and the old app passwords:
             HTTP Basic, with the Atlassian account email as the username.
 
-        Sending Bearer to a credential that wants Basic returns a bare 401
-        with no hint about which of the two it wanted, which is an hour of
-        somebody's afternoon. Setting VOMEOS_BITBUCKET_EMAIL switches to
-        Basic and is the only signal needed.
+        Bearer is the default and should stay the default. It does not
+        care which Atlassian account owns the token, and that is the whole
+        argument: on 2026-10-01 a Basic attempt with an email from a
+        different account produced
+
+            Token is invalid, expired, or not supported for this endpoint.
+
+        every word of which was false. Bitbucket returns that one string for
+        every credential problem, naming neither the half that was wrong nor
+        the shape it wanted, so it sends you auditing scopes while the fault
+        is an email address.
+
+        Setting VOMEOS_BITBUCKET_EMAIL switches to Basic, for app passwords
+        and unscoped tokens that genuinely need it. The email must then be
+        the account that OWNS the token, not whoever is deploying.
         """
         token = os.environ.get("VOMEOS_BITBUCKET_TOKEN", "")
         email = os.environ.get("VOMEOS_BITBUCKET_EMAIL", "")

@@ -1,0 +1,61 @@
+[identity]
+name = "sentry_triage"
+division = "engineering"
+title = "Sentry Triage"
+reports_to = "sam"
+hired = "2026-10-01"
+
+[model]
+# Fast tier. This is a filter, not a diagnosis: it reads a traceback and
+# decides whether a person should ever see this issue. The expensive
+# reasoning belongs to the analyst that runs only on what survives here, so
+# paying senior rates to discard a scanner probe would be backwards.
+#
+# No temperature. The current fast model does not accept the parameter and
+# the runtime would spend a rejected call per run discovering that.
+tier = "fast"
+max_tokens = 500
+
+[job]
+charter = "charter.md"
+# No skills declared on purpose. The four in skills/ are all ticket-shaped
+# (reading a Zoho thread, deciding whether to reply, summarising a ticket for
+# a reviewer) and inheriting one would put customer-conversation guidance in
+# a stack-trace prompt. When a second engineering agent needs the same
+# procedure, that is the moment to extract a skill.
+skills = []
+requires_context = [
+    "title",
+    "exception_type",
+    "culprit",
+    "stack_trace",
+    "project",
+    "repo",
+]
+output = "json"
+
+[guards]
+# Its output is a verdict the handler branches on, never prose anybody reads
+# directly, so the shape matters and the wording does not.
+output = ["json_shape", "non_empty"]
+# It cannot write to a customer. It cannot write anywhere at all: the handler
+# records its verdict and decides what to do. The outbound guards do not
+# apply and claiming they do would be theatre.
+client_facing = false
+
+[limits]
+timeout_seconds = 60
+max_retries = 2
+
+[approval]
+requires_ceo_approval = false
+escalate_to = "#eng-all"
+
+[evals]
+path = "evals/cases.jsonl"
+# Held at the 0.8 floor rather than higher. The decision this agent gets most
+# wrong is severity, where reasonable engineers disagree, and a threshold set
+# where the answer key itself is arguable would force charter edits that chase
+# the key instead of improving the agent. The verdict (noise or actionable) is
+# the call that has to be right, and the cases weight it accordingly.
+min_agreement = 0.8

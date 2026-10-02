@@ -5,8 +5,8 @@ becomes an issue, every issue that survives the funnel gets diagnosed against
 the real code, and the outcome is either a pull request or one Slack message
 that a person can act on.
 
-Written 2026-09-30. **Phase 1 is built and tested. Phases 2 to 5 are not.**
-See "Build order" at the end for what that means and what is next.
+Written 2026-09-30. **Phases 1 and 2 are built, deployed and running.
+Phases 3 to 5 are not.** See "Build order" at the end.
 
 ---
 
@@ -29,6 +29,44 @@ rule already written into `org/handbook.md` and `CLAUDE.md`. That is resolved
 explicitly in "The auto-PR decision" below, not quietly worked around.
 
 ---
+
+## Bitbucket auth, and the afternoon it cost
+
+Verified 2026-10-01 against the real repository.
+
+**Use Bearer. Leave `VOMEOS_BITBUCKET_EMAIL` unset.** An Atlassian API token
+with scopes takes `Authorization: Bearer <token>` happily. Basic also works,
+but only if the email is the Atlassian account that **owns** the token, and
+the account that owns ours is not the one you would guess from the company
+domain.
+
+That mismatch is what produced a 401 reading:
+
+```
+Token is invalid, expired, or not supported for this endpoint.
+```
+
+Every word of which was wrong. The token was valid, unexpired, and supported.
+Bitbucket returns that one string for every credential problem and names
+neither which half failed nor which shape it wanted, so it sends you auditing
+scopes and regenerating tokens while the actual fault is an email address.
+
+Bearer removes the account from the equation entirely, which is the real
+argument for it.
+
+**`read:repository:bitbucket` is the only scope needed, including for code
+search.** I previously said workspace code search would want a workspace or
+project scope. It does not: `/workspaces/{ws}/search/code` returned 148 hits
+for `OpportunityShift` on the repository scope alone, top hit
+`opportunity_app/models.py`. Do not grant a broader scope for this.
+
+The responses carry real content rather than empty 200s: `manage.py` comes
+back starting `#!/usr/bin/env python`, and `recent_commits` on `development`
+returns the same HEAD as a local clone.
+
+When a 401 does happen, `py scripts/check_code_access.py bitbucket` now tries
+the other auth shape automatically and says which half was wrong, because
+Bitbucket will not.
 
 ## The projects, and the thing that is not obvious about them
 
@@ -386,15 +424,18 @@ Application, at the repository root, alongside the other handlers:
 | `sentry_redact.py` | PII scrubbing. Runs before a payload is stored, prompted or posted. | built |
 | `sentry_gate.py` | Stage 2. The rules and the ignore lists, as data at the top of the file. | built |
 | `sentry_ledger.py` | Stage 3. `vomeos_sentry_issues`, the claim, the re-arm, the report queries. | built |
-| `sentry_handler.py` | The orchestration. Web half and worker half. | phase 1 built |
+| `sentry_handler.py` | The orchestration. Web half and worker half. | phase 2 built |
+| `sentry_event.py` | Fetch one real occurrence and render its stack trace, redacted. | built |
+| `sentry_notify.py` | Which channel, and who gets tagged. Used from phase 3. | built |
+| `code_access_monitor.py` | Daily credential watch. Silent unless broken or expiring. | built |
 | `engineering_jobs.py` | Registers the event handler and the daily report. | built |
 
 Content, found through `VOMEOS_HOME`:
 
 | Path | What it is | Status |
 |---|---|---|
-| `org/divisions/engineering.md` | New division handbook. The validator blocks an agent whose division has none. | phase 2 |
-| `agents/engineering/sentry_triage/` | Manifest, charter, 10+ answer-key cases. | phase 2 |
+| `org/divisions/engineering.md` | Division handbook. The validator blocks an agent whose division has none. | built |
+| `agents/engineering/sentry_triage/` | Manifest, charter, 17 answer-key cases. Scores 94%. | built |
 | `agents/engineering/bug_analyst/` | Same. | phase 3 |
 | `agents/engineering/fix_author/` | Same, and the one that needs the most cases. | phase 4 |
 
@@ -589,7 +630,7 @@ gate is badly wrong, you find out on the project where being wrong is free.
 
 ```
 SENTRY_ORG=vome-2j
-SENTRY_PROJECT_ALLOWLIST=dev-vome-app
+SENTRY_PROJECT_ALLOWLIST=dev-vome-app,prod-vome
 SENTRY_WEBHOOK_SECRET=<the Sentry app client secret>
 SENTRY_AUTH_TOKEN=<the Sentry app auth token>
 
@@ -605,6 +646,10 @@ VOMEOS_JOB_MODULES=support_jobs,engineering_jobs
 `SENTRY_TRIAGE_DEV_PROJECTS` is not needed as well. Everything else, including
 `prod-vome`, gates out. Widening later is one edit to that variable, with no
 deploy.
+
+Leave `VOMEOS_BITBUCKET_EMAIL` **unset**. Bearer is the right default, and
+not because Basic fails: Bearer simply does not care which Atlassian account
+owns the token, which removes a whole class of failure. See below.
 
 The Bitbucket variables are not needed for phase 1, which never reads code.
 They are listed because phase 3 is the first thing that will want them and
@@ -638,10 +683,26 @@ What to look for in the first week, in order:
   `issue.created` payloads. If it is empty on everything, the alert rule is
   not sending events and `SENTRY_REQUIRE_ENVIRONMENT` must stay off.
 
-**Phase 2, triage only.** Add `engineering.sentry_triage` and the daily digest.
-One Slack message a day, no interrupts. Check the verdicts by hand for a week.
-Every wrong verdict becomes an answer-key case before it becomes a charter
-edit, per the rule in `VOMEOS.md`.
+**Phase 2, triage only. BUILT.** `engineering.sentry_triage` runs on every new
+issue that survives the gate, reads a real stack trace fetched from Sentry and
+redacted, and records a verdict, a severity and an infrastructure flag in the
+ledger. The daily report prints those verdicts next to the issues that
+produced them. Nothing is posted per issue and nobody is tagged.
+
+It scores 94% on a 17 case answer key. That number came from one honest
+round: the first run scored 67%, and the misses were a real contradiction in
+the charter, which told the agent to call an infrastructure failure `noise`
+while also asking it to flag infrastructure. Two of the keys were also wrong
+and were corrected rather than defended, which is noted in the case files.
+
+The remaining known miss is `tri-15`: a Django `EmptyResultSet` escaping to a
+500. The agent calls it noise, the key calls it actionable. Left as an honest
+miss rather than chased, because overfitting a charter to one arguable case is
+how an answer key stops measuring anything.
+
+**Read the verdicts for a week before phase 3.** 94% on cases somebody wrote
+is not evidence about live traffic. Every disagreement becomes a new case
+first and a charter edit second, per the rule in `VOMEOS.md`.
 
 **Phase 3, analysis.** Add `engineering.bug_analyst`, the code connectors, the
 ClickUp dedup, threading, and `s1` interrupts. This is the phase that delivers
@@ -707,9 +768,18 @@ SENTRY_DIGEST_HOUR               default 9
 SENTRY_DIGEST_MINUTE             default 0
 SENTRY_HASH_SALT                 salt for pseudonymised user and device ids.
                                  Falls back to SENTRY_WEBHOOK_SECRET.
-VOMEOS_GITHUB_OWNER              samfagen15 (VomeApp). NOT vomeadmin.
-VOMEOS_CODE_REPOS                VomeApp,vomedjango-database-app,
-                                 vomedjango-restored-core-app
+VOMEOS_BITBUCKET_WORKSPACE       vomedjango
+VOMEOS_BITBUCKET_TOKEN           Atlassian API token, scope
+                                 read:repository:bitbucket only
+VOMEOS_BITBUCKET_EMAIL           LEAVE UNSET. Bearer does not need it, and a
+                                 wrong account here is a 401 that blames the
+                                 token.
+VOMEOS_BITBUCKET_TOKEN_EXPIRES   YYYY-MM-DD. Bitbucket never tells us, so the
+                                 monitor cannot warn without this.
+VOMEOS_GITHUB_TOKEN_SAMFAGEN15   VomeApp
+VOMEOS_GITHUB_TOKEN_VOMEADMIN    vome-react
+VOMEOS_CODE_REPOS                the repos the analyst may read, which is
+                                 narrower than the repos you hold tokens for
 SENTRY_QUEUE_MAX_BYTES           default 65536
 SENTRY_REDACT_MAX_STRING         default 2000
 VOMEOS_JOB_MODULES               support_jobs,engineering_jobs

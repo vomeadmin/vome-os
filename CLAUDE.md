@@ -177,9 +177,9 @@ before acting; a handler with no such key is a bug, not a style choice.
 **Built and working:**
 - Kernel: manifests, prompt composition, tiers, guards, trace, onboarding gate
 - 8 guards. 4 generic, 4 from documented incidents
-- 2 agents. `support.duplicate_reply_check` (live, 12/12 on its key),
+- 3 agents. `support.duplicate_reply_check` (live, 12/12 on its key),
   `customer_success.triage_director` (15/16, read-only, not yet wired to a
-  trigger)
+  trigger), `engineering.sentry_triage` (16/17, live on the Sentry pipeline)
 - `sprint.py`, proven against the live queue (61 open tickets)
 - Product knowledge: frontend routes (379 mapped), UI strings (13.8k), Setup
   Guide, feature catalog
@@ -192,11 +192,16 @@ before acting; a handler with no such key is a bug, not a style choice.
   `main.py` still owns the schedule exactly as before. Setting
   `VOMEOS_BROKER_URL` is the cutover, and unsetting it is the rollback.
   **Only ever run one beat process.**
-- Sentry triage, phase 1. `POST /webhook/sentry` verifies, redacts, gates and
-  claims into `vomeos_sentry_issues`, and reports at 09:00. It does nothing
-  else on purpose: no model call, no Slack alert, no pull request. It is inert
-  until `SENTRY_WEBHOOK_SECRET` is set, because the endpoint fails closed and
-  403s every unsigned request. See [SENTRY_TRIAGE.md](SENTRY_TRIAGE.md).
+**Running in production:**
+- Sentry triage, phases 1 and 2. `POST /webhook/sentry` verifies, redacts,
+  gates and claims into `vomeos_sentry_issues`, then `engineering.sentry_triage`
+  reads a real stack trace and records a verdict. Reports at 09:00, credential
+  watch at 08:00. **No per-issue Slack post and nobody tagged yet**: that is
+  phase 3, after a week of reading verdicts. See
+  [SENTRY_TRIAGE.md](SENTRY_TRIAGE.md).
+- Triaging currently happens inside the web request, because no broker is
+  configured. It works and it is slow enough to risk Sentry delivery timeouts
+  under a burst, which makes the Redis cutover the next infrastructure job.
 
 **Not built:**
 - Vision. `composer.render_context` builds a text-only message, so agents are

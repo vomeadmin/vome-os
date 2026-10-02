@@ -1,8 +1,9 @@
 """
 sentry_handler.py
 
-The Sentry pipeline's orchestration. Phase 1: ingress, gate, redaction and
-ledger. No model call, no Slack, no pull request.
+The Sentry pipeline's orchestration. Phase 2: ingress, gate, redaction,
+ledger, and one triage verdict per new issue. No per-issue Slack post, nobody
+tagged, no pull request.
 
 THE SPLIT, AND WHY IT IS WHERE IT IS
 ------------------------------------
@@ -15,15 +16,35 @@ touches a model or a third party, and it is over in microseconds. An issue the
 gate drops is recorded and never reaches the queue at all, which is what makes
 stage 2 of the funnel genuinely free.
 
-**On the worker** (`handle_sentry_issue`): claim the issue in the ledger and,
-from phase 2, everything expensive. It is here rather than in the request so
+**On the worker** (`handle_sentry_issue`): claim the issue in the ledger,
+fetch one real event for its stack trace, and ask `engineering.sentry_triage`
+whether a person should ever see it. It is here rather than in the request so
 that a deploy, a slow Sentry API or a model call cannot take the endpoint down
 with it, and so that a flood lands in a queue instead of in the web dyno.
 
-Note the consequence of eager mode: with no `VOMEOS_BROKER_URL` set, the
-enqueue runs inline in the web request. That is survivable for phase 1, where
-the queued half is one INSERT, and it is exactly why the Redis cutover is a
-prerequisite for phase 2.
+WHY THE VERDICT GOES NOWHERE YET
+--------------------------------
+Phase 2 records what the agent decided and stops. The only place a verdict
+surfaces is the daily report, printed next to the issue that produced it.
+
+That is the evaluation period, and skipping it would be the expensive
+mistake. The agent scores 94% on its answer key, which is a number from
+seventeen cases somebody wrote; it is not evidence about live traffic. A week
+of reading real verdicts next to real issues is what tells you whether to let
+it interrupt anyone, and that has to happen before it can.
+
+EAGER MODE NOW COSTS SOMETHING
+------------------------------
+With no `VOMEOS_BROKER_URL` set, the enqueue runs inline, so the Sentry API
+fetch and the model call both happen inside the webhook request. In phase 1
+that was one INSERT and did not matter. It is now a few seconds, which is
+close enough to Sentry's delivery timeout to start failing under a burst.
+
+A timeout is survivable rather than harmful: Sentry retries, the redelivery
+hits the ledger claim, `first_seen` is False and nothing runs twice. That is
+exactly what the claim is for. But it shows up as failed deliveries in
+Sentry's log and it serialises triage behind one web worker, so the Redis
+cutover has stopped being advisable and started being the next thing to do.
 
 ALWAYS ANSWER 2xx
 -----------------
@@ -39,6 +60,7 @@ import json
 import os
 from dataclasses import asdict, replace
 
+import sentry_event
 import sentry_gate
 import sentry_ledger
 import sentry_notify
@@ -253,16 +275,100 @@ def handle_sentry_issue(message: dict) -> dict:
         f"({signal.level or 'no level'}, {signal.reason}) in {where}"
     )
 
-    # Phase 2 continues from here: run_agent("engineering.sentry_triage"),
-    # then the ClickUp check, then the analyst. Deliberately not stubbed with
-    # a half-implementation: shadow mode means shadow mode.
+    triage = _triage(signal, repo)
+
     return {
-        "status": "recorded",
+        "status": "triaged" if triage else "recorded",
         "issue_id": signal.issue_id,
         "acted": True,
         "ledger": claim.recorded,
         "repo": (message or {}).get("repo", ""),
         "ref": (message or {}).get("repo_ref", ""),
+        "verdict": (triage or {}).get("verdict", ""),
+        "severity": (triage or {}).get("severity", ""),
+    }
+
+
+def _triage(signal, repo: str) -> dict | None:
+    """Ask `engineering.sentry_triage` whether a person should see this.
+
+    Phase 2 records the verdict and stops. Nothing is posted, nobody is
+    tagged, and the daily report is the only place the verdicts surface. That
+    is deliberate: a week of reading verdicts next to the issues that produced
+    them is how you find out whether this agent is any good, and that has to
+    happen before anything acts on what it says.
+
+    Returns None when the agent could not be run or its answer was rejected.
+    The issue stays in the ledger either way, so nothing is lost: it simply
+    has no verdict, and the report counts it as untriaged rather than quietly
+    treating it as noise.
+    """
+    if not os.environ.get("VOMEOS_BROKER_URL"):
+        # Not a refusal, just a warning. See EAGER MODE above: this is
+        # correct but slow, and slow here means Sentry retries.
+        print(
+            "[SENTRY] triaging inside the web request (no broker configured)"
+        )
+
+    trace = sentry_event.fetch_trace(signal.issue_id)
+
+    try:
+        from vomeos import run_agent
+
+        result = run_agent(
+            "engineering.sentry_triage",
+            context={
+                "title": signal.title,
+                "exception_type": signal.exception_type,
+                "culprit": signal.culprit,
+                "stack_trace": trace or "(no stack trace available)",
+                "project": signal.project,
+                "repo": repo,
+            },
+            subject_type="sentry_issue",
+            subject_id=signal.issue_id,
+        )
+    except Exception as exc:
+        # A model outage must not lose the issue. It is already claimed.
+        print(f"[SENTRY] triage failed for {signal.issue_id}: {exc}")
+        return None
+
+    if not result.ok:
+        # `blocked` means a guard rejected the answer and `error` means it
+        # never produced one. Both are a human's problem, not a verdict.
+        print(
+            f"[SENTRY] triage {result.status} for {signal.issue_id}: "
+            f"{result.why()}"
+        )
+        sentry_ledger.update(
+            signal.issue_id,
+            status=sentry_ledger.STATUS_SEEN,
+            run_ids=[result.run_id] if result.run_id else [],
+        )
+        return None
+
+    verdict = str(result.get("verdict", "") or "").lower()
+    severity = str(result.get("severity", "") or "").lower()
+    summary = str(result.get("summary", "") or "")
+
+    sentry_ledger.update(
+        signal.issue_id,
+        status=sentry_ledger.STATUS_TRIAGED,
+        verdict=verdict,
+        severity=severity,
+        triage_summary=summary[:500],
+        infrastructure=bool(result.get("infrastructure", False)),
+        run_ids=[result.run_id] if result.run_id else [],
+    )
+    print(
+        f"[SENTRY] triage {signal.issue_id}: {verdict}/{severity} "
+        f"{'(infra) ' if result.get('infrastructure') else ''}{summary[:80]}"
+    )
+    return {
+        "verdict": verdict,
+        "severity": severity,
+        "summary": summary,
+        "infrastructure": bool(result.get("infrastructure", False)),
     }
 
 
@@ -283,7 +389,7 @@ def _format_report(data: dict) -> str:
     total_hits = sum(hits.values())
 
     lines = [
-        "*Sentry shadow report* (last 24h, no action taken)",
+        "*Sentry triage report* (last 24h, nothing acted on)",
         "",
         f"Deliveries: {total_hits}",
         f"Distinct issues: {surviving + gated}",
@@ -291,6 +397,32 @@ def _format_report(data: dict) -> str:
         f"New and surviving: {data.get('new_surviving_issues', 0)}",
         f"Dropped by the gate: {gated}",
     ]
+
+    # The verdicts, and then the actionable issues with the agent's own
+    # summary. Printed together on purpose: this report exists so a person
+    # can grade the agent by reading its verdict next to the issue, and a
+    # count on its own cannot be graded.
+    verdicts = data.get("by_verdict") or []
+    if verdicts:
+        lines.append("")
+        lines.append("Triage verdicts:")
+        for row in verdicts:
+            label = row["verdict"]
+            if label == "actionable":
+                label = f"actionable {row['severity']}"
+            lines.append(f"  {label}: {row['n']}")
+
+    actionable = data.get("actionable") or []
+    if actionable:
+        lines.append("")
+        lines.append("*Called actionable:*")
+        for row in actionable:
+            sev = (row.get("severity") or "?").upper()
+            infra = " [infra]" if row.get("infrastructure") else ""
+            summary = row.get("triage_summary") or row.get("title") or ""
+            lines.append(f"  {sev}{infra} {summary[:150]}")
+            if row.get("permalink"):
+                lines.append(f"       {row['permalink']}")
 
     drops = data.get("gate_drops_by_rule") or {}
     if drops:
@@ -344,14 +476,21 @@ def _format_report(data: dict) -> str:
 
     lines.append("")
     lines.append(
-        "Phase 1. Nothing was triaged, posted or fixed. These are the"
-        " numbers the phase 2 thresholds should be set from."
+        "Phase 2. Verdicts are recorded and nothing is acted on. Read a few"
+        " of these against the real issue and tell me where the agent is"
+        " wrong: a disagreement becomes an answer-key case, which is the"
+        " only thing that makes it better."
     )
     return "\n".join(lines)
 
 
 def run_shadow_report() -> dict:
-    """Post yesterday's figures to Slack. One message a day, no interrupts."""
+    """Post yesterday's figures to Slack. One message a day, no interrupts.
+
+    Still one message and still nobody tagged, even now that there are
+    verdicts in it. Per-issue posts and mentions are phase 3, after a human
+    has read a week of these and decided the verdicts are worth acting on.
+    """
     data = sentry_ledger.summary(days=1)
     text = _format_report(data)
 
@@ -376,7 +515,7 @@ def describe() -> dict:
     """Pipeline health, for /health and the CLI."""
     return {
         "enabled": _enabled(),
-        "phase": "1 (shadow: gate and ledger only)",
+        "phase": "2 (triage verdicts recorded, nothing acted on)",
         "handler": HANDLER_KEY,
         "queue": QUEUE,
         "gate": sentry_gate.describe(),
