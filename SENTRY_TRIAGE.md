@@ -837,15 +837,19 @@ SENTRY_REDACT_MAX_STRING         default 2000
 VOMEOS_JOB_MODULES               support_jobs,engineering_jobs
 ```
 
-Later phases, not yet read by any code:
+Phases 3 to 5. Every variable below is read by code today. The phases are
+held closed by `SENTRY_SLACK_ENABLED` and `SENTRY_AUTO_PR_ENABLED`, not by
+missing support:
 
 ```
-SENTRY_SLACK_MAX_POSTS_PER_DAY   default 5
-SENTRY_S1_MENTION                Slack user id to ping on s1
-
 SENTRY_SLACK_ENABLED             default FALSE. Per-issue Slack posting.
 SENTRY_SLACK_MAX_POSTS_PER_DAY   default 5
 SENTRY_SLACK_INTERRUPT_AT        default s1
+SENTRY_SLACK_CHANNEL             overrides #eng-all
+SLACK_USER_ONLYG                 override the routing table in
+SLACK_USER_SANJAY                sentry_notify.py. The member ids are
+SLACK_USER_SIRAJ                 hardcoded fallbacks, so these are only
+                                 needed when somebody changes or is away.
 
 SENTRY_CODE_MAX_FILES            default 4, files read per issue
 SENTRY_CODE_WINDOW               default 60, lines either side of the frame

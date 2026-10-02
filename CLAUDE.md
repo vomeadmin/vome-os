@@ -216,8 +216,10 @@ before acting; a handler with no such key is a bug, not a style choice.
   branch, ClickUp dedup, Slack with one thread per issue and a five-a-day cap,
   `fix_author` writing diffs, and `code_write.py` opening pull requests.
   `SENTRY_SLACK_ENABLED` and `SENTRY_AUTO_PR_ENABLED` both default to false.
-  **Phase 5 also needs the handbook amendment**, which is a decision and not a
-  variable. See [SENTRY_TRIAGE.md](SENTRY_TRIAGE.md).
+  **The handbook amendment phase 5 required was made on 2026-10-02**, so what
+  remains is operational rather than a decision: the Redis cutover, a write
+  token, server-side branch protection and the two switches. The ordered
+  sequence is in [SENTRY_RUNBOOK.md](SENTRY_RUNBOOK.md).
 - Triaging currently happens inside the web request, because no broker is
   configured. It works and it is slow enough to risk Sentry delivery timeouts
   under a burst, which makes the Redis cutover the next infrastructure job.
@@ -229,11 +231,6 @@ before acting; a handler with no such key is a bug, not a style choice.
   (`integrations/code_search.py`, read-only, no write methods) but no agent is
   granted them.
 - The reply drafter and the feature-request analyst.
-- Sentry triage phases 2 to 5: the three engineering agents, the Slack budget,
-  the patch guard and `code_write.py`. **Phase 5 (opening a pull request)
-  needs an explicit amendment to the handbook rule "commit code, merge a
-  branch, or deploy" before it ships.** The argument is in SENTRY_TRIAGE.md,
-  under "The auto-PR decision". Do not build it before that is agreed.
 
 **Known open items:**
 - The triage answer key was written by Claude, not reviewed by Sam.
