@@ -731,9 +731,12 @@ def run_shadow_report() -> dict:
     data = sentry_ledger.summary(days=1)
     text = _format_report(data)
 
-    channel = os.environ.get("SLACK_CHANNEL_ENG_ALERTS", "")
+    # Same resolver as the per-issue posts, so the report and the issues it
+    # describes can never end up in two different channels. See
+    # sentry_notify.channel().
+    channel = sentry_notify.channel()
     if not channel:
-        print("[SENTRY] no SLACK_CHANNEL_ENG_ALERTS set, report not posted")
+        print("[SENTRY] no SENTRY_AUTOMATIONS set, report not posted")
         print(text)
         return {"status": "no_channel", "summary": data}
 

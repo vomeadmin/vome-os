@@ -63,8 +63,21 @@ _PEOPLE = {
 
 
 def channel() -> str:
-    """The one channel every Sentry issue posts to."""
-    return os.environ.get("SENTRY_SLACK_CHANNEL") or DEFAULT_CHANNEL
+    """The one channel every Sentry issue posts to.
+
+    `SENTRY_AUTOMATIONS` is the name to set. It is read first because the
+    whole point of #sentry-automations is that one variable moves everything
+    this pipeline says, the daily report included, rather than three
+    variables that can disagree and leave half the output somewhere else.
+
+    The two older names still work so that setting this is not a flag day.
+    """
+    return (
+        os.environ.get("SENTRY_AUTOMATIONS")
+        or os.environ.get("SENTRY_SLACK_CHANNEL")
+        or os.environ.get("SLACK_CHANNEL_ENG_ALERTS")
+        or DEFAULT_CHANNEL
+    )
 
 
 def user_id(name: str) -> str:

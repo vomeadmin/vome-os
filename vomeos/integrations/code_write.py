@@ -73,6 +73,23 @@ PROTECTED = tuple(
 
 BRANCH_PREFIX = os.environ.get("VOMEOS_BRANCH_PREFIX", "agent/sentry")
 
+# Deployment-specific names for the same tokens.
+#
+# The canonical name encodes the GitHub ACCOUNT, because a fine-grained token
+# is bound to one account at creation and the owner is how the code knows
+# which token can reach which repository. The names below encode the platform
+# instead, which is how they were created in Railway, and renaming a live
+# variable is a deploy nobody wanted. So they are aliases rather than a
+# rename: the canonical name still wins, and these are only consulted when it
+# is absent.
+#
+# If a third GitHub account ever appears, add the canonical name rather than
+# another alias. This table is a bridge, not a pattern to follow.
+OWNER_TOKEN_ALIASES = {
+    "VOMEADMIN": ("vome-os-sentry-write-web",),
+    "SAMFAGEN15": ("vome-os-sentry-write-mobile",),
+}
+
 
 def writable_repos() -> tuple[str, ...]:
     """Repositories an agent may write to.
@@ -231,6 +248,10 @@ class GitHubWriter(Connector):
             scoped = os.environ.get(f"VOMEOS_GITHUB_WRITE_TOKEN_{slug}", "")
             if scoped:
                 return scoped
+            for alias in OWNER_TOKEN_ALIASES.get(slug, ()):
+                aliased = os.environ.get(alias, "")
+                if aliased:
+                    return aliased
         return os.environ.get("VOMEOS_GITHUB_WRITE_TOKEN", "")
 
     def configured(self, owner: str = "") -> bool:
