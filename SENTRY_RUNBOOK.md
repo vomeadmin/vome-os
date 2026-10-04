@@ -148,17 +148,42 @@ and a deterministic heuristic backs it up.
 |---|---|---|---|
 | `SENTRY_PIPELINE_ENABLED` | true | webhook answers 200 and does nothing | normal |
 | `SENTRY_PROJECT_ALLOWLIST` | production projects | which Sentry projects enter at all | |
-| `SENTRY_SLACK_ENABLED` | **false** | verdicts recorded, nobody told | posts to #eng-all |
+| `SENTRY_AUTOMATIONS` | #eng-all | where every Sentry message goes, report included | |
+| `SENTRY_SLACK_ENABLED` | **false** | verdicts recorded, nobody told | posts to `SENTRY_AUTOMATIONS` |
 | `SENTRY_SLACK_INTERRUPT_AT` | `s1` | which severities may interrupt | |
 | `SENTRY_SLACK_MAX_POSTS_PER_DAY` | 5 | hard cap on top-level posts | |
 | `SENTRY_AUTO_PR_ENABLED` | **false** | diffs go in Slack only | branches and PRs are created |
 | `VOMEOS_CODE_REPOS` | empty = all reachable | which repos may be READ | |
 | `VOMEOS_CODE_WRITE_REPOS` | **empty = NONE** | which repos may be WRITTEN | |
 | `VOMEOS_PR_ALLOW_PROTECTED_TARGET` | false | a PR into `development` is refused | permitted |
+| `VOMEOS_PR_TARGETS` | the table in `sentry_projects.py` | `repo:branch,repo:branch`. A repo with no target can open no PR | |
 
 The two allowlists are deliberately opposite. Forgetting the read one costs
 some extra reading. Forgetting the write one would make every repository
 writable, so empty means nothing.
+
+## A fix never targets a production branch
+
+The analyst reads the branch that produced the traceback, because that is the
+code which ran. The pull request does not go there. Every fix targets the
+integration branch for its repository, so a production bug in `prod-vome` is
+diagnosed against `master` and proposed against `development`.
+
+| Repo | Error read from | PR opens against |
+|---|---|---|
+| `vomedjango-restored-core-app` | `master` or `development` | `development` |
+| `vomedjango-database-app` | `master` or `development` | `development` |
+| `vome-react` | `master` or `develop` | `develop` |
+| `VomeApp` | `master` | **nothing. Refused** |
+
+VomeApp has no integration branch, only `master`, so there is nowhere safe to
+aim a fix and the pull request is refused rather than defaulted. Create one
+and add it with `VOMEOS_PR_TARGETS=VomeApp:development` to switch it on.
+
+A patch written against `master` may not apply to `development`. That is
+expected: the context lines are verified against the target before anything
+is pushed, and a patch that no longer fits is refused rather than applied at
+an offset.
 
 ---
 

@@ -308,6 +308,46 @@ def repos_in_scope() -> tuple[str, ...]:
     )
 
 
+# ---------------------------------------------------------------------------
+# Where a fix belongs, which is not where the error came from
+# ---------------------------------------------------------------------------
+
+# A production error is diagnosed against the branch that produced it, because
+# that is the code which actually ran. The FIX does not belong there. Opening
+# a pull request against `master` puts a proposal one click away from
+# production and skips development and staging entirely, so every fix targets
+# the integration branch instead, whatever project reported the bug.
+#
+# Per repository because the name is not consistent: the Django repos use
+# `development`, vome-react uses `develop`.
+#
+# VomeApp is deliberately absent. It has no integration branch at all, only
+# `master`, so there is nowhere safe to aim a fix. Absent means refused rather
+# than defaulted: falling back to the error's own branch is exactly the
+# behaviour this table exists to prevent, and it would be silent.
+_FIX_TARGETS = {
+    "vomedjango-restored-core-app": "development",
+    "vomedjango-database-app": "development",
+    "vome-react": "develop",
+}
+
+
+def fix_target(repo: str) -> str:
+    """The branch a pull request for `repo` must target, or "" if none.
+
+    `VOMEOS_PR_TARGETS=repo:branch,repo:branch` overrides the table, so a
+    repository that grows an integration branch can be wired up without a
+    deploy. An empty string means no pull request may be opened for this
+    repository at all.
+    """
+    raw = os.environ.get("VOMEOS_PR_TARGETS", "")
+    for pair in raw.split(","):
+        name, _, branch = pair.partition(":")
+        if name.strip() == repo and branch.strip():
+            return branch.strip()
+    return _FIX_TARGETS.get(repo, "")
+
+
 def describe() -> dict[str, object]:
     """The routing table, for the health check and the CLI."""
     triaged = triaged_slugs()

@@ -14,6 +14,7 @@ import os
 import pytest
 
 import sentry_fix
+import sentry_projects
 from vomeos import diff as diff_tools
 from vomeos.guards import patch as patch_guard
 from vomeos.integrations import code_write
@@ -366,3 +367,63 @@ def test_read_and_write_use_different_environment_variables():
     source = inspect.getsource(code_write)
     assert "VOMEOS_BITBUCKET_WRITE_TOKEN" in source
     assert "VOMEOS_GITHUB_WRITE_TOKEN" in source
+
+
+# ---------------------------------------------------------------------------
+# A fix never targets a production branch
+# ---------------------------------------------------------------------------
+
+def test_no_repo_targets_master_or_main():
+    # The whole point of the fix-target table. A pull request into master is
+    # one click from production and skips development and staging.
+    for repo in sentry_projects.repos_in_scope():
+        target = sentry_projects.fix_target(repo)
+        assert target.lower() not in ("master", "main", "prod", "production")
+
+
+def test_production_projects_still_aim_their_fix_at_development():
+    # prod-vome's traceback comes from master. The fix must not.
+    project = sentry_projects.route("prod-vome")
+    assert project.ref == "master"
+    assert sentry_projects.fix_target(project.repo) == "development"
+
+
+def test_both_projects_for_one_repo_agree_on_the_target():
+    # dev and prod are the same codebase, so a fix for either belongs on the
+    # same branch. The target is per repository precisely so they cannot drift.
+    assert (
+        sentry_projects.fix_target("vomedjango-restored-core-app")
+        == sentry_projects.fix_target("vomedjango-restored-core-app")
+    )
+    for slug in ("prod-vome", "dev-vome-app"):
+        project = sentry_projects.route(slug)
+        assert sentry_projects.fix_target(project.repo) == "development"
+
+
+def test_a_repo_with_no_integration_branch_is_refused_not_defaulted(
+    monkeypatch,
+):
+    # VomeApp has only master. Falling back to the error's ref would open a
+    # pull request into master, which is the exact thing this prevents.
+    assert sentry_projects.fix_target("VomeApp") == ""
+
+    # The kill switch is checked before the target and would otherwise be the
+    # reason returned, which would make this test pass for the wrong reason.
+    monkeypatch.setenv("SENTRY_AUTO_PR_ENABLED", "true")
+    monkeypatch.delenv("VOMEOS_PR_TARGETS", raising=False)
+
+    out = sentry_fix.open_pull_request(
+        {"issue_id": "T-1", "triage_summary": "x"},
+        {"attempted": True, "diff": "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"},
+        {"repo": "VomeApp", "branch": "master", "host": "github",
+         "owner": "samfagen15"},
+    )
+    assert out["opened"] is False
+    assert "no integration branch" in out["reason"]
+
+
+def test_pr_targets_can_be_overridden_without_a_deploy(monkeypatch):
+    monkeypatch.setenv("VOMEOS_PR_TARGETS", "VomeApp:development")
+    assert sentry_projects.fix_target("VomeApp") == "development"
+    # The override must not leak into repositories it does not name.
+    assert sentry_projects.fix_target("vome-react") == "develop"

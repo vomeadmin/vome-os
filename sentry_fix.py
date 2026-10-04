@@ -37,6 +37,7 @@ from __future__ import annotations
 import os
 
 import sentry_ledger
+import sentry_projects
 from vomeos import diff as diff_tools
 from vomeos.guards import patch as patch_guard
 from vomeos.integrations import code_search, code_write
@@ -155,9 +156,24 @@ def _apply_to_repo(repo: str, ref: str, host: str, owner: str,
 def open_pull_request(issue: dict, proposal: dict, context: dict) -> dict:
     """Branch, commit, PR. Only when the switch is on and the patch applies.
 
-    Never merges, because no code here can. The pull request targets the
-    branch the error came from, so a dev-project fix lands as a proposal
-    against `development` and a human merges it or does not.
+    Never merges, because no code here can.
+
+    THE FIX DOES NOT GO WHERE THE ERROR CAME FROM
+    ---------------------------------------------
+    The analyst reads the branch that produced the traceback, because that is
+    the code which actually ran. A fix for it belongs on the integration
+    branch, never on `master`: a pull request into a production branch is one
+    click from production and skips development and staging on the way.
+
+    So the error's ref is used for diagnosis and plays no part below. The
+    branch is cut from the target, the patch is applied to the target's copy
+    of the file, and the pull request goes back into the target. A repository
+    with no integration branch is refused rather than defaulted, because the
+    default would be `master`.
+
+    A patch written against `master` may not fit `development`. That is fine
+    and is why the context lines are verified: a patch that no longer fits is
+    refused rather than applied at an offset.
     """
     if not proposal.get("attempted") or not proposal.get("diff"):
         return {"opened": False, "reason": "no patch to open"}
@@ -166,10 +182,20 @@ def open_pull_request(issue: dict, proposal: dict, context: dict) -> dict:
                 "reason": "SENTRY_AUTO_PR_ENABLED is off (dry run)"}
 
     repo = context.get("repo", "")
-    ref = context.get("branch", "")
     host = context.get("host", "bitbucket")
     owner = context.get("owner", "")
     issue_id = str(issue.get("issue_id") or "")
+
+    ref = sentry_projects.fix_target(repo)
+    if not ref:
+        return {
+            "opened": False,
+            "reason": (
+                f"no integration branch configured for {repo!r}, so there is "
+                "nowhere to open a pull request that is not a production "
+                "branch. Set VOMEOS_PR_TARGETS."
+            ),
+        }
 
     contents, error = _apply_to_repo(
         repo, ref, host, owner, proposal["diff"]
