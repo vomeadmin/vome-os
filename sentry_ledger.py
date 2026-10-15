@@ -461,6 +461,73 @@ def update(issue_id: str, **fields) -> bool:
     )
 
 
+def backfill_from_runs() -> dict:
+    """Copy verdicts the ledger failed to store back from the run trace.
+
+    Every agent run is recorded in vomeos_agent_runs with its parsed output,
+    independently of this table. So when a ledger write fails, the verdict
+    still exists; it is just in the wrong place. This puts it back.
+
+    It exists because of 2026-10-15: this table was missing triage_summary,
+    root_cause and fix_diff, every verdict write failed, and the first real
+    backlog of issues was triaged and analysed with nothing stored. Run by
+    the daily report before it counts anything, so a failed write costs one
+    report's delay rather than the verdict.
+
+    Only fills rows that have no verdict or no root cause yet, and only from
+    runs that passed their guards (`status = 'ok'`). Never overwrites.
+    """
+    if not _ready() or not store.ensure_table("vomeos_agent_runs"):
+        return {"triaged": 0, "analysed": 0, "available": False}
+
+    latest = (
+        "SELECT DISTINCT ON (subject_id) subject_id, output, created_at"
+        "  FROM vomeos_agent_runs"
+        " WHERE agent = :agent AND subject_type = 'sentry_issue'"
+        "   AND status = 'ok'"
+        " ORDER BY subject_id, created_at DESC"
+    )
+
+    triaged = store.query(
+        f"UPDATE {TABLE} s SET"
+        f"   status = '{STATUS_TRIAGED}',"
+        "    verdict = lower(r.output->>'verdict'),"
+        "    severity = lower(r.output->>'severity'),"
+        "    triage_summary = left(r.output->>'summary', 500),"
+        "    infrastructure = COALESCE((r.output->>'infrastructure')::boolean,"
+        "                              false)"
+        f"  FROM ({latest}) r"
+        " WHERE s.issue_id = r.subject_id"
+        "   AND s.verdict IS NULL"
+        f"  AND s.status = '{STATUS_SEEN}'"
+        " RETURNING s.issue_id",
+        {"agent": "engineering.sentry_triage"},
+        write=True,
+    )
+    analysed = store.query(
+        f"UPDATE {TABLE} s SET"
+        f"   status = '{STATUS_ANALYSED}',"
+        "    root_cause = left(r.output->>'root_cause', 2000),"
+        "    proposed_fix = left(r.output->>'proposed_fix', 2000),"
+        "    clickup_task_id = NULLIF(r.output->>'duplicate_of', ''),"
+        "    analysed_at = r.created_at"
+        f"  FROM ({latest}) r"
+        " WHERE s.issue_id = r.subject_id"
+        "   AND s.root_cause IS NULL"
+        f"  AND s.status IN ('{STATUS_SEEN}', '{STATUS_TRIAGED}')"
+        " RETURNING s.issue_id",
+        {"agent": "engineering.bug_analyst"},
+        write=True,
+    )
+    if triaged or analysed:
+        print(
+            f"[SENTRY] backfilled {len(triaged)} verdict(s) and "
+            f"{len(analysed)} analysis(es) from the run trace"
+        )
+    return {"triaged": len(triaged), "analysed": len(analysed),
+            "available": True}
+
+
 # ---------------------------------------------------------------------------
 # Reporting. What shadow mode exists to produce.
 # ---------------------------------------------------------------------------

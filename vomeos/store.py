@@ -103,8 +103,86 @@ def get_engine() -> Engine | None:
             return None
 
 
+_CONSTRAINT_WORDS = {"PRIMARY", "UNIQUE", "CONSTRAINT", "FOREIGN", "CHECK",
+                     "EXCLUDE"}
+
+
+def column_definitions(create_sql: str) -> list[tuple[str, str]]:
+    """(name, definition) for each column a CREATE TABLE declares.
+
+    One column per line, which is how every OS table is written. Table
+    constraints and the primary key column are left out: the key exists on
+    any table that exists, and a constraint is not something to bolt on
+    unannounced.
+    """
+    body = create_sql[create_sql.index("(") + 1:create_sql.rindex(")")]
+    columns = []
+    for raw in body.splitlines():
+        line = raw.split("--", 1)[0].strip().rstrip(",").strip()
+        if not line:
+            continue
+        first = line.split()[0]
+        if first.upper() in _CONSTRAINT_WORDS or "PRIMARY KEY" in line.upper():
+            continue
+        columns.append((first, line))
+    return columns
+
+
+def _add_missing_columns(engine: Engine, name: str, create_sql: str) -> None:
+    """Bring an existing table up to its registered columns.
+
+    WHY
+    ---
+    `CREATE TABLE IF NOT EXISTS` does nothing to a table that exists, so a
+    column added to a registered schema never reaches a database where an
+    older version already created the table. That is how
+    vomeos_sentry_issues ran without triage_summary, root_cause and fix_diff
+    until 2026-10-15: every verdict write failed with UndefinedColumn, the
+    pipeline carried on, and the results existed only in log lines.
+
+    Add-only, by design. A column is never dropped, renamed or retyped here;
+    that is a decision for a person, not a startup hook. Each column is its
+    own transaction so one that cannot be added (NOT NULL with no default on
+    a table with rows) is named loudly without blocking the rest.
+    """
+    try:
+        with engine.begin() as conn:
+            existing = {
+                row[0]
+                for row in conn.execute(
+                    sql_text(
+                        "SELECT column_name FROM information_schema.columns"
+                        " WHERE table_schema = current_schema()"
+                        " AND table_name = :t"
+                    ),
+                    {"t": name},
+                )
+            }
+    except Exception as exc:
+        print(f"[VOMEOS] could not inspect {name} columns: {exc}")
+        return
+
+    for column, definition in column_definitions(create_sql):
+        if column in existing:
+            continue
+        try:
+            with engine.begin() as conn:
+                conn.execute(sql_text(
+                    f"ALTER TABLE {name} ADD COLUMN IF NOT EXISTS {definition}"
+                ))
+            print(f"[VOMEOS] added missing column {name}.{column}")
+        except Exception as exc:
+            print(
+                f"[VOMEOS] WARNING: {name}.{column} is missing and could not "
+                f"be added, so every write naming it will fail: {exc}"
+            )
+
+
 def ensure_table(name: str) -> bool:
-    """Create one registered table and its indexes. Idempotent, cached."""
+    """Create one registered table, add any missing columns, then indexes.
+
+    Idempotent, cached per process.
+    """
     if name in _created:
         return True
     if name not in _SCHEMA:
@@ -119,6 +197,9 @@ def ensure_table(name: str) -> bool:
         try:
             with engine.begin() as conn:
                 conn.execute(sql_text(create_sql))
+            # Before the indexes, which may name a column that is new.
+            _add_missing_columns(engine, name, create_sql)
+            with engine.begin() as conn:
                 for stmt in index_sql:
                     conn.execute(sql_text(stmt))
             _created.add(name)
@@ -142,19 +223,27 @@ def execute(statement: str, params: dict | None = None) -> bool:
         return False
 
 
-def query(statement: str, params: dict | None = None) -> list[dict]:
-    """Run a read. Empty list when it could not run."""
+def query(
+    statement: str, params: dict | None = None, *, write: bool = False
+) -> list[dict]:
+    """Run a statement that returns rows. Empty list when it could not run.
+
+    `write=True` commits, for an `UPDATE ... RETURNING`. Without it the
+    connection rolls back on close, so a write sent through here would look
+    like it worked, return its rows, and then not exist.
+    """
     engine = get_engine()
     if engine is None:
         return []
     try:
-        with engine.connect() as conn:
+        opener = engine.begin if write else engine.connect
+        with opener() as conn:
             rows = conn.execute(
                 sql_text(statement), params or {}
             ).mappings().all()
         return [dict(r) for r in rows]
     except Exception as exc:
-        print(f"[VOMEOS] read failed: {exc}")
+        print(f"[VOMEOS] {'write' if write else 'read'} failed: {exc}")
         return []
 
 

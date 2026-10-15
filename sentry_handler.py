@@ -728,6 +728,9 @@ def run_shadow_report() -> dict:
     verdicts in it. Per-issue posts and mentions are phase 3, after a human
     has read a week of these and decided the verdicts are worth acting on.
     """
+    # Before counting: any verdict whose ledger write failed is copied back
+    # from the run trace, so the report shows what the agents decided.
+    sentry_ledger.backfill_from_runs()
     data = sentry_ledger.summary(days=1)
     text = _format_report(data)
 
