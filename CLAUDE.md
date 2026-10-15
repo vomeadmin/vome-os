@@ -77,6 +77,8 @@ sentry_*.py        the Sentry worker. SENTRY_RUNBOOK.md is how it runs,
 sprint.py          run a support sprint locally, sends nothing
 clickup_search.py  find the task that already covers a symptom
 product_*.py       product knowledge: navigation, UI strings, guides
+mcp_connector/     Vome OS as a claude.ai connector (MCP + Google OAuth).
+                   App side, never imported by vomeos/. See CONNECTOR.md
 ```
 
 ---

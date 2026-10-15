@@ -13,3 +13,6 @@ psycopg2-binary
 sqlalchemy>=2.0,<2.1
 celery
 redis
+# The claude.ai connector (mcp_connector/). 2.x renamed FastMCP to MCPServer;
+# pinned below 3 because 3.0 changes token-resource validation defaults.
+mcp>=2.3,<3

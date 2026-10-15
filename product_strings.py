@@ -69,8 +69,14 @@ _VOME = _HERE.parent
 DEFAULT_WEB = _VOME / "web-app" / "vome-react" / "src" / "translations"
 DEFAULT_MOBILE = _VOME / "mobile-app" / "VomeApp" / "src" / "translations"
 
-# key: "value" at any indentation. Values may contain escaped quotes.
-_ENTRY = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*"((?:[^"\\]|\\.)*)"')
+# key: "value" or key: 'value' at any indentation. Values may contain escaped
+# quotes. Both quote styles matter: the double-quote-only version of this
+# pattern silently skipped 5,632 English strings (27% of them, "Approve all"
+# among them), and a feature whose label is single-quoted read as missing.
+_ENTRY = re.compile(
+    r"""^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*"""
+    r"""(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')"""
+)
 
 # Where the French block begins. Everything after it is a translation of
 # something already captured, so parsing stops there.
@@ -127,7 +133,10 @@ def _strings() -> list[tuple[str, str, str]]:
                         break  # French mirrors English; stop here
                     match = _ENTRY.match(line)
                     if match:
-                        key, value = match.group(1), match.group(2)
+                        key = match.group(1)
+                        value = match.group(2)
+                        if value is None:
+                            value = match.group(3)
                         if len(value) >= 3:
                             entries.append((label, key, value))
         except OSError as exc:

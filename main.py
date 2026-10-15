@@ -163,7 +163,15 @@ def _build_ticket_data(ticket: dict) -> dict:
 _check_env()
 init_db()
 
-app = FastAPI(title="Vome Support Agent")
+from mcp_connector import server as mcp_connector
+
+app = FastAPI(title="Vome Support Agent", lifespan=mcp_connector.lifespan)
+
+# ---------------------------------------------------------------------------
+# Vome OS as a claude.ai connector (MCP + OAuth). Off until MCP_PUBLIC_URL and
+# the Google client are set. See mcp_connector/__init__.py and CONNECTOR.md.
+# ---------------------------------------------------------------------------
+mcp_connector.attach(app)
 
 # ---------------------------------------------------------------------------
 # Ticket Command Center (ops/) router
@@ -1746,7 +1754,40 @@ async def health():
             os.environ.get("SENTRY_AUTO_PR_ENABLED", "").lower() == "true"
         ),
     }
-    return {"status": "ok", "env": env_status, "sentry": sentry_status}
+    connector_status = _present(
+        "MCP_PUBLIC_URL", "MCP_GOOGLE_CLIENT_ID", "MCP_GOOGLE_CLIENT_SECRET",
+        "CLICKUP_TEAM_ID", "DATABASE_URL",
+    )
+    connector_status["on"] = mcp_connector.config.enabled()
+    return {
+        "status": "ok",
+        "env": env_status,
+        "sentry": sentry_status,
+        "mcp_connector": connector_status,
+    }
+
+
+@app.get("/mcp-admin/calls", dependencies=[Depends(verify_ops_token)])
+async def mcp_admin_calls(limit: int = 50):
+    """Who asked the connector what, newest first."""
+    from mcp_connector import store
+
+    return await asyncio.to_thread(store.recent_calls, min(limit, 500))
+
+
+@app.post("/mcp-admin/revoke", dependencies=[Depends(verify_ops_token)])
+async def mcp_admin_revoke(email: str):
+    """Sign one person out of the connector everywhere, now.
+
+    Needed at offboarding even though access is checked by email domain on
+    every call: a refresh token outlives the Google account it came from,
+    so deleting someone's Google account alone leaves them connected for up
+    to MCP_REFRESH_TOKEN_TTL.
+    """
+    from mcp_connector import store
+
+    revoked = await asyncio.to_thread(store.revoke_subject, email)
+    return {"email": email.lower(), "tokens_revoked": revoked}
 
 
 @app.get("/sentry/status", dependencies=[Depends(verify_ops_token)])
