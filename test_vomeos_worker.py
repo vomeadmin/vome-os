@@ -281,6 +281,97 @@ def test_empty_registry_produces_an_empty_schedule():
 
 
 # ---------------------------------------------------------------------------
+# What beat actually sends
+# ---------------------------------------------------------------------------
+#
+# The tests above prove the schedule can be BUILT. None of them proved beat
+# ever used it, and it did not: from the 2026-09-28 cutover to 2026-10-15 beat
+# sent only celery.backend_cleanup, because the schedule was read before the
+# beat_init handler filled it. These go through Celery's own beat.Service and
+# read the live scheduler, which is the thing that decides what is sent.
+
+def _live_beat_schedule(tmp_path, monkeypatch) -> set[str]:
+    from celery import beat
+
+    from vomeos.worker.app import app
+
+    # The registry is already populated by the test; no modules to import.
+    monkeypatch.setenv("VOMEOS_JOB_MODULES", "")
+    service = beat.Service(
+        app=app,
+        schedule_filename=str(tmp_path / "beat-schedule"),
+        scheduler_cls=app.conf.beat_scheduler,
+    )
+    try:
+        # Exactly what Service.start() does before it sends beat_init.
+        return set(service.scheduler.schedule)
+    finally:
+        service.scheduler.close()
+
+
+def test_beat_is_configured_to_use_the_registry_scheduler():
+    from vomeos.worker.app import app
+
+    assert app.conf.beat_scheduler == "vomeos.worker.app:RegistryScheduler"
+
+
+def test_beat_sends_the_registered_jobs(tmp_path, monkeypatch):
+    register_job("support.a", _noop, cron="30 7 * * *", queue="support")
+    register_job("engineering.b", _noop, cron="0 9 * * *", queue="engineering")
+
+    live = _live_beat_schedule(tmp_path, monkeypatch)
+    assert {"support.a", "engineering.b"} <= live
+
+
+def test_beat_sends_every_production_job(tmp_path, monkeypatch):
+    """Both modules production loads, end to end through beat."""
+    import engineering_jobs
+    import support_jobs
+
+    support_jobs.register_all()
+    engineering_jobs.register_all()
+
+    live = _live_beat_schedule(tmp_path, monkeypatch)
+    expected = set(EXPECTED) | set(ADDED_SINCE) | {
+        "engineering.code_access",
+        "engineering.sentry_regate",
+        "engineering.sentry_report",
+    }
+    assert expected <= live, f"beat would never send: {expected - live}"
+
+
+def test_a_removed_job_stops_being_scheduled(tmp_path, monkeypatch):
+    """The schedule file persists across restarts. It must not keep a ghost."""
+    register_job("support.old", _noop, cron="0 1 * * *")
+    assert "support.old" in _live_beat_schedule(tmp_path, monkeypatch)
+
+    job_schedule.clear()
+    register_job("support.new", _noop, cron="0 2 * * *")
+    live = _live_beat_schedule(tmp_path, monkeypatch)
+    assert "support.new" in live
+    assert "support.old" not in live
+
+
+def test_a_queue_with_no_consumer_is_named():
+    from vomeos.worker import events as job_events
+    from vomeos.worker.app import unconsumed_queues
+
+    job_events.clear()
+    try:
+        register_job("support.a", _noop, cron="0 1 * * *", queue="support")
+        job_events.register_event_handler(
+            "engineering.issue", _noop, queue="engineering"
+        )
+        # The production worker's -Q before 2026-10-15.
+        assert unconsumed_queues({"support", "default"}) == ["engineering"]
+        assert unconsumed_queues({"support", "engineering", "default"}) == []
+        # No -Q at all means the worker reads every declared queue.
+        assert unconsumed_queues(None) == []
+    finally:
+        job_events.clear()
+
+
+# ---------------------------------------------------------------------------
 # Migration fidelity: same jobs, same times
 # ---------------------------------------------------------------------------
 

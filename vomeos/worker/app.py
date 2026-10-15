@@ -17,7 +17,7 @@ the task's subject, so a marketing batch of two thousand drafts cannot starve
 the support queue that a customer is waiting on. Divisions are cheap: a queue
 is a name, and a worker can serve several.
 
-    celery -A vomeos.worker worker -Q support,default -c 4
+    celery -A vomeos.worker worker -Q support,engineering,default -c 4
     celery -A vomeos.worker worker -Q marketing -c 2
     celery -A vomeos.worker beat
 
@@ -42,8 +42,9 @@ from __future__ import annotations
 import os
 
 from celery import Celery
+from celery.beat import PersistentScheduler
 from celery.schedules import crontab
-from celery.signals import beat_init, worker_init
+from celery.signals import beat_init, celeryd_after_setup, worker_init
 from kombu import Queue
 
 from vomeos.worker import events as job_events
@@ -129,6 +130,9 @@ app.conf.update(
     # vomeos.run_job and vomeos.run_agent. Without it a worker starts with an
     # empty task registry and rejects everything beat sends it.
     imports=("vomeos.worker.tasks",),
+    # Beat must build its schedule from the job registry. See
+    # RegistryScheduler for why this cannot be done from a signal.
+    beat_scheduler="vomeos.worker.app:RegistryScheduler",
 )
 
 
@@ -164,6 +168,36 @@ def refresh_beat_schedule() -> dict:
     return app.conf.beat_schedule
 
 
+class RegistryScheduler(PersistentScheduler):
+    """Celery's default scheduler, fed from the job registry.
+
+    WHY NOT THE beat_init SIGNAL
+    ----------------------------
+    The first version built the schedule in a `beat_init` handler. That never
+    worked. `beat.Service.start()` touches `self.scheduler` on the line BEFORE
+    it sends `beat_init`, and touching it is what constructs the scheduler and
+    reads `beat_schedule`. So the schedule was fixed while the registry was
+    still empty, the handler filled `beat_schedule` a moment too late, and
+    beat sent nothing but `celery.backend_cleanup` from the day of the Redis
+    cutover (2026-09-28) until 2026-10-15. Every scheduled job was dead and
+    the log line saying "beat scheduling 9 job(s)" said otherwise.
+
+    `setup_schedule` is the method that reads `beat_schedule`, so loading the
+    registry at the top of it is the only place that is guaranteed to be in
+    time. `merge_inplace` also drops entries no longer registered, so the
+    persisted schedule file cannot keep firing a removed job.
+    """
+
+    def setup_schedule(self):
+        refresh_beat_schedule()
+        super().setup_schedule()
+        names = sorted(self.schedule)
+        print(
+            f"[VOMEOS] beat scheduling {len(names)} entries in "
+            f"{TIMEZONE}: {', '.join(names)}"
+        )
+
+
 @worker_init.connect
 def _on_worker_start(**_kwargs) -> None:
     """Populate the job registry before the worker takes any task.
@@ -174,17 +208,59 @@ def _on_worker_start(**_kwargs) -> None:
     job_schedule.load_job_modules()
 
 
+def unconsumed_queues(consumed) -> list[str]:
+    """Queues that registered work routes to but this worker does not read.
+
+    `consumed` is the set the worker was started with (`-Q`). None means no
+    restriction, so nothing is missing.
+    """
+    if consumed is None:
+        return []
+    wanted = set(job_schedule.queues()) | set(job_events.queues())
+    return sorted(wanted - set(consumed))
+
+
+@celeryd_after_setup.connect
+def _warn_on_unconsumed_queues(sender=None, instance=None, **_kwargs) -> None:
+    """Say so, loudly, when work is routed to a queue nobody reads.
+
+    The worker was started with `-Q support,default` while the Sentry handler
+    routes to `engineering`, so every queued issue sat in Redis and the worker
+    logged nothing at all. A message on a queue with no consumer is the most
+    silent failure this layer has, so it is named at startup.
+    """
+    try:
+        consumed = instance.app.amqp.queues.consume_from
+        names = None if consumed is None else set(consumed)
+    except Exception:
+        return
+    for queue in unconsumed_queues(names):
+        print(
+            f"[VOMEOS] WARNING: registered work routes to queue {queue!r} but "
+            f"this worker does not consume it (-Q {','.join(sorted(names))}). "
+            "Those messages will wait in Redis until a worker reads that queue."
+        )
+
+
 @beat_init.connect
 def _on_beat_start(**_kwargs) -> None:
-    """Load the jobs, then generate the schedule from them.
+    """Report what beat is actually going to send.
 
-    Beat reads `beat_schedule` once at startup. Building it here rather than
-    at import time is what lets the schedule come from the registry, which is
-    only populated after the application's modules are imported.
+    Read back from the live scheduler rather than from `beat_schedule`, which
+    is what the old log line did and why it reported nine jobs while beat was
+    sending none of them.
     """
-    refresh_beat_schedule()
-    entries = len(app.conf.beat_schedule or {})
-    print(f"[VOMEOS] beat scheduling {entries} job(s) in {TIMEZONE}")
+    service = _kwargs.get("sender")
+    try:
+        live = sorted(service.scheduler.schedule)
+    except Exception:
+        return
+    missing = sorted(set(app.conf.beat_schedule or {}) - set(live))
+    if missing:
+        print(
+            "[VOMEOS] WARNING: registered but NOT scheduled by beat: "
+            + ", ".join(missing)
+        )
 
 
 def describe() -> dict:

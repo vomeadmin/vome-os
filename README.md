@@ -69,7 +69,7 @@ intentions.
 
 ```
 web:    uvicorn main:app --host 0.0.0.0 --port $PORT
-worker: celery -A vomeos.worker worker -Q support,default --concurrency 4
+worker: celery -A vomeos.worker worker -Q support,engineering,default --concurrency 4
 beat:   celery -A vomeos.worker beat
 ```
 
@@ -94,9 +94,9 @@ To cut over, **in this order**:
 2. Create a `worker` service from this repo. Give it every variable the `web`
    service has (it runs the actual jobs, so it needs Anthropic, Zoho,
    ClickUp, Slack and the database), plus `VOMEOS_BROKER_URL` and
-   `VOMEOS_JOB_MODULES=support_jobs`.
+   `VOMEOS_JOB_MODULES=support_jobs,engineering_jobs`.
 3. Create a `beat` service the same way. Confirm its log says
-   `beat scheduling 8 job(s)`.
+   `beat scheduling 13 entries`, listing every job by name.
 4. Only now set `VOMEOS_BROKER_URL` on `web`. That is the moment APScheduler
    stands down and beat takes over.
 

@@ -4,7 +4,7 @@ vomeos/worker/
 Durable execution for Vome OS: its own broker, its own queues, its own
 workers.
 
-    celery -A vomeos.worker worker -Q support,default -c 4
+    celery -A vomeos.worker worker -Q support,engineering,default -c 4
     celery -A vomeos.worker beat
 
 `-A vomeos.worker` resolves to the `app` exported here. Both entrypoints load

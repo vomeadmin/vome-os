@@ -56,14 +56,14 @@ New service, **same repository**, `main` branch.
 Custom start command:
 
 ```
-celery -A vomeos.worker worker -Q support,default --concurrency 4 --loglevel info
+celery -A vomeos.worker worker -Q support,engineering,default --concurrency 4 --loglevel info
 ```
 
 Variables: **every variable the web service has**, plus:
 
 ```
 VOMEOS_BROKER_URL  = ${{Redis.REDIS_PRIVATE_URL}}
-VOMEOS_JOB_MODULES = support_jobs
+VOMEOS_JOB_MODULES = support_jobs,engineering_jobs
 ```
 
 The worker runs the actual job bodies, so it needs `ANTHROPIC_API_KEY`, the
@@ -89,11 +89,20 @@ Same variables as the worker.
 **Verify before moving on.** The log must contain:
 
 ```
-[VOMEOS] beat scheduling 9 job(s) in America/Montreal
+[VOMEOS] beat scheduling 13 entries in America/Montreal: celery.backend_cleanup, engineering.code_access, ...
 ```
 
-If it says 0 jobs, `VOMEOS_JOB_MODULES` is wrong and beat will schedule
-nothing. Fix that before step 4.
+That line is read back from the live scheduler, so it lists what beat will
+actually send. 13 is the 12 registered jobs plus Celery's own cleanup task.
+If it lists only `celery.backend_cleanup`, `VOMEOS_JOB_MODULES` is wrong and
+beat will schedule nothing. Fix that before step 4. A line starting
+`[VOMEOS] WARNING: registered but NOT scheduled` means beat is ignoring the
+registry, which is the 2026-09-28 to 2026-10-15 outage; see
+`RegistryScheduler` in `vomeos/worker/app.py`.
+
+The worker log must NOT contain `[VOMEOS] WARNING: registered work routes to
+queue`. If it does, its `-Q` list is missing a queue and that work is piling
+up in Redis unread.
 
 **One beat service, one replica, forever.** Two beats is two of every job,
 which is the same bug as two web dynos. Workers scale freely. Beat does not.
@@ -137,7 +146,7 @@ status, duration and result.
 
 | Symptom | Cause |
 |---|---|
-| Beat logs `0 job(s)` | `VOMEOS_JOB_MODULES` not set, or set on the wrong service |
+| Beat lists only `celery.backend_cleanup` | `VOMEOS_JOB_MODULES` not set, or set on the wrong service |
 | Worker takes a task and returns `unknown_job` | Same, on the worker |
 | Jobs run twice | Two beat services, or two replicas of one |
 | Jobs stop entirely, no errors | `VOMEOS_BROKER_URL` set on web before beat was running |
