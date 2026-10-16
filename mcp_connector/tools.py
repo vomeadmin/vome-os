@@ -423,14 +423,40 @@ def _connector_for(repo: repos.Repo):
     return GitHub(allowlist=allowlist)
 
 
-def _bitbucket_hits(data) -> list[dict]:
+_BITBUCKET_SRC = re.compile(r"/repositories/[^/]+/([^/]+)/src/[^/]+/(.+)$")
+
+
+def _bitbucket_hits(data, searched_repo: str = "") -> list[dict]:
+    """Parse Bitbucket's code search response.
+
+    Bitbucket names the repository in exactly one place,
+    `file.links.self.href`
+    (`.../repositories/<workspace>/<repo>/src/<commit>/<path>`). The first
+    version read `file.commit.repository`, which this endpoint does not
+    return, so every hit arrived with no repo, the allowlist filter dropped
+    all of them, and a search reporting "6 files" returned none. Found by
+    the first real use, 2026-10-15.
+    """
     hits = []
     values = data.get("values", []) if isinstance(data, dict) else []
     for value in values:
         file = value.get("file") or {}
+        href = ((file.get("links") or {}).get("self") or {}).get("href", "")
+        linked = _BITBUCKET_SRC.search(href)
         repo_name = (
-            ((file.get("commit") or {}).get("repository") or {})
-            .get("full_name") or ""
+            (linked.group(1) if linked else "")
+            or (
+                ((file.get("commit") or {}).get("repository") or {})
+                .get("full_name", "").split("/")[-1]
+            )
+            or searched_repo
+        )
+        path = (
+            file.get("path")
+            or (linked.group(2) if linked else "")
+            or "".join(
+                m.get("text", "") for m in value.get("path_matches") or []
+            )
         )
         lines = []
         for match in value.get("content_matches") or []:
@@ -440,8 +466,8 @@ def _bitbucket_hits(data) -> list[dict]:
                 )
                 lines.append({"line": line.get("line"), "text": text[:300]})
         hits.append({
-            "repo": repo_name.split("/")[-1] or None,
-            "path": file.get("path"),
+            "repo": repo_name or None,
+            "path": path or None,
             "lines": lines[:6],
         })
     return hits
@@ -489,7 +515,10 @@ def search_code(query: str, repo: str = "") -> dict:
             result = connector.search_code(query, repo=target.slug if repo
                                            else "")
             label = target.slug if repo else "bitbucket (all backend repos)"
-            parsed = _bitbucket_hits(result.data) if result.ok else []
+            parsed = (
+                _bitbucket_hits(result.data, target.slug if repo else "")
+                if result.ok else []
+            )
         else:
             result = connector.search_code(
                 query, repo=target.slug, owner=target.owner,
@@ -504,8 +533,16 @@ def search_code(query: str, repo: str = "") -> dict:
 
     # A workspace-wide Bitbucket search reaches every repo in the workspace,
     # not only the ones this connector may read. Drop the rest.
+    # Never silently: a hit dropped here is reported, so "6 files" with an
+    # empty list can only mean the allowlist, and says so.
     permitted = {slug.lower() for slug in config.code_repos()}
-    hits = [h for h in hits if (h["repo"] or "").lower() in permitted]
+    kept = [h for h in hits if (h["repo"] or "").lower() in permitted]
+    dropped = len(hits) - len(kept)
+    if dropped:
+        sources["not_returned"] = (
+            f"{dropped} hits in repositories outside MCP_CODE_REPOS"
+        )
+    hits = kept
     return {
         "query": query,
         "files": hits[:30],
@@ -545,10 +582,21 @@ def read_code_file(
             found.slug, path, ref=ref, owner=found.owner,
         )
     if not result.ok:
-        return {
+        failure = {
             "repo": found.slug, "path": path, "branch": ref,
             "error": result.error[:300],
         }
+        if result.status_code == 404 and ref == found.live_ref:
+            # Search indexes the default branch, so a path it found can be
+            # missing from production. That is an answer, not a dead end.
+            failure["meaning"] = (
+                f"Not on {ref}, the branch production runs. If search_code "
+                "found this path, it exists on another branch (often "
+                "development/develop): the code is not released yet. Read "
+                "it with ref='development' (or 'develop' for vome-react and "
+                "the landing page) to see the unreleased version."
+            )
+        return failure
 
     data = result.data
     # A directory: Bitbucket pages {"values": [...]}, GitHub returns a list.

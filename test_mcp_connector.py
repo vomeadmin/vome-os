@@ -678,3 +678,60 @@ def test_single_quoted_strings_are_read(tmp_path, monkeypatch):
         # engine, and "It\'s" reads fine.
         "it_s": r"It\'s here",
     }
+
+
+def _bitbucket_result(repo, path):
+    """The shape Bitbucket's code search really returns: the repository is
+    named only inside file.links.self.href, never under file.commit."""
+    return {
+        "type": "code_search_result",
+        "content_match_count": 1,
+        "content_matches": [{"lines": [{"line": 12, "segments": [
+            {"text": "def "}, {"text": "guest_submission", "match": True},
+            {"text": "(request):"},
+        ]}]}],
+        "path_matches": [{"text": path}],
+        "file": {
+            "path": path,
+            "type": "commit_file",
+            "links": {"self": {"href": (
+                "https://api.bitbucket.org/2.0/repositories/vomedjango/"
+                f"{repo}/src/ad6964b5fe2880dbd9ddcad1c89000f1dbcbc24b/{path}"
+            )}},
+        },
+    }
+
+
+def test_real_bitbucket_hits_keep_their_repo_and_path(monkeypatch):
+    """Regression: first real use returned "6 files" and no paths."""
+    from vomeos.integrations.base import IntegrationResult
+    from vomeos.integrations.code_search import Bitbucket
+
+    monkeypatch.delenv("MCP_CODE_REPOS", raising=False)
+    monkeypatch.setattr(
+        Bitbucket, "search_code",
+        lambda self, q, repo="": IntegrationResult(
+            "bitbucket", "search_code", True, data={"values": [
+                _bitbucket_result("vomedjango-restored-core-app",
+                                  "forms_app/views/guest.py"),
+                _bitbucket_result("some-other-repo", "x.py"),
+            ]},
+        ),
+    )
+    found = tools.search_code("guest_submission", repo="core")
+    assert found["files"] == [{
+        "repo": "vomedjango-restored-core-app",
+        "path": "forms_app/views/guest.py",
+        "lines": [{"line": 12, "text": "def guest_submission(request):"}],
+    }]
+    assert "1 hits in repositories outside" in found["sources"][
+        "not_returned"
+    ]
+
+
+def test_hit_with_no_repo_anywhere_falls_back_to_the_searched_repo():
+    hit = _bitbucket_result("vomedjango-chats-app", "a.py")
+    hit["file"] = {"path": "a.py"}
+    parsed = tools._bitbucket_hits({"values": [hit]}, "vomedjango-chats-app")
+    assert parsed[0]["repo"] == "vomedjango-chats-app"
+    assert parsed[0]["path"] == "a.py"
