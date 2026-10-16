@@ -312,6 +312,8 @@ def test_full_sign_in_then_tools(client):
         "search_code", "read_code_file", "list_repositories",
         "log_feature_request", "add_request_to_existing",
         "triage_feature_request", "connector_status",
+        "run_faq", "faq_job_status", "publish_faq_draft", "save_faq_draft",
+        "get_kb_article", "list_kb_categories",
     } <= names
 
     status = _rpc(client, tokens["access_token"], "tools/call", {

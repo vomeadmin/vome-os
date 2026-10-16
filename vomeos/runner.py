@@ -64,6 +64,11 @@ STATUS_OK = "ok"
 STATUS_BLOCKED = "blocked"
 STATUS_ERROR = "error"
 
+# Above this the request streams. The SDK refuses (or times out) a
+# non-streaming call with a large max_tokens, and an agent that writes two
+# full help centre articles needs more than this. Below it nothing changes.
+STREAM_ABOVE_TOKENS = 16000
+
 
 @dataclass
 class AgentResult:
@@ -140,7 +145,19 @@ def _call_model(
             }
             if send_temperature:
                 kwargs["temperature"] = manifest.model.temperature
-            response = _client.messages.create(**kwargs)
+            if manifest.model.max_tokens > STREAM_ABOVE_TOKENS:
+                with _client.messages.stream(**kwargs) as stream:
+                    response = stream.get_final_message()
+            else:
+                response = _client.messages.create(**kwargs)
+            if getattr(response, "stop_reason", "") == "max_tokens":
+                # The output was cut off. json_shape will reject it, but
+                # "not valid JSON" alone sent the first reader hunting for
+                # an escaping bug; this names the real cause.
+                print(
+                    f"[VOMEOS] {manifest.qualified} hit max_tokens "
+                    f"({manifest.model.max_tokens}); output truncated"
+                )
             text = "".join(
                 block.text for block in response.content
                 if getattr(block, "type", "") == "text"

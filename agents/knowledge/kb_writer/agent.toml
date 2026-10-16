@@ -1,0 +1,60 @@
+[identity]
+name = "kb_writer"
+division = "knowledge"
+title = "Help Centre Writer"
+reports_to = "sam"
+hired = "2026-10-16"
+
+[model]
+# Senior tier. What it writes is published under the company's name, read
+# by customers and searched by every other agent before it answers anyone.
+# A plausible wrong article is worse than none.
+tier = "senior"
+# Two complete HTML articles (English and French) inside one JSON object, and
+# every HTML attribute quote is escaped, which roughly doubles their token
+# cost. 14000 truncated both updates of a 25,000-character article in the
+# first eval. Above 16000 the runner streams. This is headroom, not a target.
+max_tokens = 32000
+
+[job]
+charter = "charter.md"
+skills = ["writing-a-help-centre-article"]
+requires_context = [
+    "request",
+    "developer_notes",
+    "existing_article",
+    "related_articles",
+    "product_facts",
+    "ui_labels",
+    "categories",
+    "revision",
+]
+output = "json"
+
+[guards]
+# The deterministic rule check (em dashes, banners inside <p>, entities in
+# titles, terminology, support links) runs in mcp_connector/kb_rules.py
+# before anything can publish, with the categories and article ids it needs.
+# These two make sure there is a draft to check.
+output = ["json_shape", "non_empty"]
+client_facing = false
+
+[limits]
+# Long by design: two full articles. It runs as a background job, never
+# inside a request a person is waiting on.
+timeout_seconds = 480
+max_retries = 1
+
+[approval]
+# Drafts only. Publishing is a separate, deterministic step a person
+# triggers (publish_faq_draft), which re-checks the rules and reads both
+# languages back from Zoho before reporting anything.
+requires_ceo_approval = false
+escalate_to = "sam"
+
+[evals]
+path = "evals/cases.jsonl"
+# The key pins the decisions that can be checked: create, update or ask;
+# which category; whether a plan banner is owed. It cannot pin prose
+# quality, which is what the human review before publishing is for.
+min_agreement = 0.8

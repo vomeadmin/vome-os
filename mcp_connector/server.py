@@ -62,6 +62,11 @@ planned. Only a shipped status means fixed.
 settle it. read_code_file reads the branch production runs.
 5. If the customer wants something Vome does not do: log_feature_request. \
 It checks for duplicates first and never creates one silently over a match.
+6. Help centre articles (the /faq workflow): run_faq hands the article to \
+the Vome OS writer, faq_job_status returns its English and French draft, \
+and publish_faq_draft publishes it. Show the draft and wait for an \
+explicit go-ahead before publishing. Report the portal URLs exactly as \
+publish_faq_draft returns them.
 
 Rules for anything that will reach a customer:
 - Never include a file path, component or function name, translation key, \
@@ -340,6 +345,123 @@ def build() -> MCPServer:
             task_id=task_id, decision=decision, priority=priority,
             assign_to_me=assign_to_me, note=note, caller=caller(),
         )
+
+    # -- help centre (the /faq workflow) -----------------------------------
+
+    @server.tool(annotations=WRITE)
+    async def run_faq(
+        request: Annotated[str, Field(
+            description="What the article should cover, e.g. 'new guest "
+            "form submissions toggle' or 'update the kiosk PIN article for "
+            "the new reset flow'"
+        )] = "",
+        developer_notes: Annotated[str, Field(
+            description="Raw notes on what shipped: behaviour, limits, "
+            "defaults, plan, who can do it. Also where to put answers to "
+            "the writer's questions."
+        )] = "",
+        article: Annotated[str, Field(
+            description="To update an existing article: its id, portal URL "
+            "or permalink. Empty lets the writer decide create or update."
+        )] = "",
+        revise_job_id: Annotated[str, Field(
+            description="To revise a previous draft instead: its job_id"
+        )] = "",
+        feedback: Annotated[str, Field(
+            description="With revise_job_id: what to change"
+        )] = "",
+    ) -> dict:
+        """Hand a help centre article to the Vome OS writer (the /faq
+        workflow): it gathers the product facts, checks what already
+        exists, and drafts English and French for review. Returns a job_id;
+        nothing is published until publish_faq_draft."""
+        return await _run(
+            "run_faq", tools.run_faq, request=request,
+            developer_notes=developer_notes, article=article,
+            revise_job_id=revise_job_id, feedback=feedback, caller=caller(),
+        )
+
+    @server.tool(annotations=READ)
+    async def faq_job_status(
+        job_id: Annotated[str, Field(
+            description="From run_faq. Empty lists recent jobs."
+        )] = "",
+    ) -> dict:
+        """The state of a help centre job: still drafting, the writer's
+        questions, or the full English and French draft with the rule
+        check, ready for review."""
+        return await _run("faq_job_status", tools.faq_job_status,
+                          job_id=job_id)
+
+    @server.tool(annotations=WRITE)
+    async def publish_faq_draft(
+        job_id: Annotated[str, Field(description="A ready draft's job_id")],
+        as_draft: Annotated[bool, Field(
+            description="True saves it in Zoho as a Draft (not public) "
+            "instead of publishing"
+        )] = False,
+    ) -> dict:
+        """Publish a reviewed draft to the help centre: English article and
+        French translation, permission ALL, then read both back from Zoho
+        and return the live portal URLs. Refuses anything that fails the
+        rule check."""
+        return await _run(
+            "publish_faq_draft", tools.publish_faq_draft, job_id=job_id,
+            as_draft=as_draft, caller=caller(),
+        )
+
+    @server.tool(annotations=WRITE)
+    async def save_faq_draft(
+        en_title: str,
+        en_permalink: str,
+        en_html: str,
+        fr_title: str,
+        fr_permalink: str,
+        fr_html: str,
+        article_id: Annotated[str, Field(
+            description="Set to update that article; empty creates a new one"
+        )] = "",
+        category_id: Annotated[str, Field(
+            description="Required for a new article; from list_kb_categories"
+        )] = "",
+        en_seo_title: str = "",
+        en_seo_description: str = "",
+        fr_seo_title: str = "",
+        fr_seo_description: str = "",
+        based_on_job: str = "",
+        note: str = "",
+    ) -> dict:
+        """Save an edited or hand-written article (raw HTML, both
+        languages) as a reviewable draft. It goes through the same rule
+        check and the same publish_faq_draft step as a writer's draft."""
+        fields = {
+            "article_id": article_id, "category_id": category_id,
+            "based_on_job": based_on_job, "note": note,
+            "en": {"title": en_title, "permalink": en_permalink,
+                   "answer_html": en_html, "seo_title": en_seo_title,
+                   "seo_description": en_seo_description},
+            "fr": {"title": fr_title, "permalink": fr_permalink,
+                   "answer_html": fr_html, "seo_title": fr_seo_title,
+                   "seo_description": fr_seo_description},
+        }
+        return await _run("save_faq_draft", tools.save_faq_draft,
+                          fields=fields, caller=caller())
+
+    @server.tool(annotations=READ)
+    async def get_kb_article(
+        article: Annotated[str, Field(
+            description="Article id, portal URL or permalink"
+        )],
+    ) -> dict:
+        """One help centre article in English and French exactly as Zoho
+        holds it now (HTML, status, permission, portal URLs)."""
+        return await _run("get_kb_article", tools.get_kb_article,
+                          article=article)
+
+    @server.tool(annotations=READ)
+    async def list_kb_categories() -> dict:
+        """Help centre categories that accept articles, with ids."""
+        return await _run("list_kb_categories", tools.list_kb_categories)
 
     @server.tool(annotations=READ)
     async def connector_status() -> dict:

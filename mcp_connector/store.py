@@ -99,6 +99,24 @@ tool_calls = Table(
     Column("error", Text, nullable=True),
 )
 
+# A piece of help-centre work handed to the kb_writer agent: the request, the
+# draft it produced, the rule check, and what publishing did. One row per
+# hand-off, so "what did we publish, from what, and who asked" has an answer.
+faq_jobs = Table(
+    "mcp_faq_jobs", _metadata,
+    Column("id", String(32), primary_key=True),
+    Column("created_by", String(320), nullable=False),
+    Column("created_at", Float, nullable=False),
+    Column("updated_at", Float, nullable=False),
+    Column("status", String(24), nullable=False),
+    Column("request", Text, nullable=False),
+    Column("draft", Text, nullable=True),
+    Column("lint", Text, nullable=True),
+    Column("result", Text, nullable=True),
+    Column("error", Text, nullable=True),
+    Column("run_id", String(64), nullable=True),
+)
+
 _engine = None
 _engine_lock = threading.Lock()
 _durable = False
@@ -341,3 +359,69 @@ def recent_calls(limit: int = 50) -> list[dict]:
             select(tool_calls).order_by(tool_calls.c.id.desc()).limit(limit)
         ).mappings().all()
     return [dict(row) for row in rows]
+
+
+# -- FAQ jobs --------------------------------------------------------------
+
+_JSON_COLUMNS = ("request", "draft", "lint", "result")
+
+
+def create_faq_job(job_id: str, created_by: str, request: dict,
+                   status: str = "queued", **fields) -> None:
+    now = _now()
+    values = {
+        "id": job_id, "created_by": created_by or "(unknown)",
+        "created_at": now, "updated_at": now, "status": status,
+        "request": json.dumps(request),
+    }
+    for key, value in fields.items():
+        values[key] = json.dumps(value) if key in _JSON_COLUMNS else value
+    with _get_engine().begin() as conn:
+        conn.execute(insert(faq_jobs).values(**values))
+
+
+def update_faq_job(job_id: str, *, expect_status: str | None = None,
+                   **fields) -> bool:
+    """Update a job. With expect_status, only if it is still in that state,
+    which is what stops one draft being published twice."""
+    values = {"updated_at": _now()}
+    for key, value in fields.items():
+        values[key] = json.dumps(value) if key in _JSON_COLUMNS else value
+    statement = update(faq_jobs).where(faq_jobs.c.id == job_id)
+    if expect_status is not None:
+        statement = statement.where(faq_jobs.c.status == expect_status)
+    with _get_engine().begin() as conn:
+        return conn.execute(statement.values(**values)).rowcount == 1
+
+
+def get_faq_job(job_id: str) -> dict | None:
+    with _get_engine().connect() as conn:
+        row = conn.execute(
+            select(faq_jobs).where(faq_jobs.c.id == job_id)
+        ).mappings().first()
+    if not row:
+        return None
+    job = dict(row)
+    for key in _JSON_COLUMNS:
+        if job.get(key):
+            job[key] = json.loads(job[key])
+    return job
+
+
+def recent_faq_jobs(limit: int = 20) -> list[dict]:
+    with _get_engine().connect() as conn:
+        rows = conn.execute(
+            select(
+                faq_jobs.c.id, faq_jobs.c.created_by, faq_jobs.c.status,
+                faq_jobs.c.created_at, faq_jobs.c.request,
+            ).order_by(faq_jobs.c.created_at.desc()).limit(limit)
+        ).mappings().all()
+    out = []
+    for row in rows:
+        request = json.loads(row["request"] or "{}")
+        out.append({
+            "job_id": row["id"], "status": row["status"],
+            "created_by": row["created_by"], "created_at": row["created_at"],
+            "request": (request.get("request") or "")[:160],
+        })
+    return out

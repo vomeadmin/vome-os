@@ -798,3 +798,83 @@ def connector_status(caller: str) -> dict:
         "code": code_describe(),
         "sign_ins_survive_restart": store.durable(),
     }
+
+
+# ---------------------------------------------------------------------------
+# help centre (the /faq workflow)
+# ---------------------------------------------------------------------------
+
+def run_faq(
+    *, request: str, developer_notes: str, article: str,
+    revise_job_id: str, feedback: str, caller: str,
+) -> dict:
+    from mcp_connector import faq
+
+    if revise_job_id:
+        if not feedback.strip():
+            raise feature_requests.RequestError(
+                "say what to change in the draft"
+            )
+        job_id = faq.revise(revise_job_id, feedback, caller)
+    else:
+        job_id = faq.start({
+            "request": request,
+            "developer_notes": developer_notes,
+            "article": article,
+        }, caller)
+    return {
+        "job_id": job_id,
+        "status": "drafting",
+        "next_step": (
+            "The help centre writer is drafting English and French. Call "
+            "faq_job_status with this job_id in about two minutes."
+        ),
+    }
+
+
+def faq_job_status(job_id: str) -> dict:
+    from mcp_connector import faq, store
+
+    if not job_id.strip():
+        return {"recent_jobs": store.recent_faq_jobs()}
+    job = store.get_faq_job(job_id.strip())
+    if not job:
+        raise feature_requests.RequestError(f"no FAQ job {job_id}")
+    return faq.view(job)
+
+
+def publish_faq_draft(*, job_id: str, as_draft: bool, caller: str) -> dict:
+    from mcp_connector import faq
+
+    result = faq.publish(job_id.strip(), caller, as_draft=as_draft)
+    result["how_to_use_this"] = (
+        "Report both portal_url values exactly as returned. Never rebuild "
+        "a URL from the permalink."
+        + (" There were read-back problems: list them."
+           if result.get("problems") else "")
+    )
+    return result
+
+
+def save_faq_draft(*, fields: dict, caller: str) -> dict:
+    from mcp_connector import faq
+
+    return faq.save(fields, caller)
+
+
+def get_kb_article(article: str) -> dict:
+    from mcp_connector import faq
+
+    return faq.read_article(article)
+
+
+def list_kb_categories() -> dict:
+    from mcp_connector import faq
+
+    return {
+        "categories": faq.list_categories(),
+        "how_to_use_this": (
+            "Only categories with no child sections are listed, because a "
+            "parent section rejects new articles."
+        ),
+    }

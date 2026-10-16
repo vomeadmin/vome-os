@@ -21,6 +21,9 @@ Code: [mcp_connector/](mcp_connector/). Tests: `py -m pytest test_mcp_connector.
 | `log_feature_request` | Log a missing capability, after a duplicate check | ClickUp Raw Intake |
 | `add_request_to_existing` | Another customer wants the same thing | +1 comment and Requesting Clients |
 | `triage_feature_request` | Set priority and move a request (Sam only) | ClickUp |
+| `run_faq` / `faq_job_status` | Hand a help centre article to the writer agent; get its EN and FR draft | `knowledge.kb_writer` |
+| `publish_faq_draft` / `save_faq_draft` | Publish a reviewed draft (or your own edit) in both languages, verified | Zoho Desk KB |
+| `get_kb_article` / `list_kb_categories` | Read a live article in both languages; categories that accept articles | Zoho Desk KB |
 | `connector_status` | Which sources are reachable, who you are signed in as | |
 
 Every result says which sources it searched and which it did NOT, so "not
@@ -122,7 +125,56 @@ how Vome works.
 6. A logged request is "logged with the product team", never "on the roadmap".
 7. Never put a file path, function, translation key, branch or task id in a
    customer reply. If a source says NOT searched, the answer is unknown.
+8. When a ticket shows the help centre is missing or wrong, offer to hand it
+   to the help centre writer with run_faq. Show me the draft from
+   faq_job_status and publish only when I say so.
 ```
+
+---
+
+## Help centre articles (the /faq workflow)
+
+The `/faq` command, as a hand-off to a Vome OS agent
+(`knowledge.kb_writer`). Same rules as
+`vome-react/instructions/vome-faq-project-instructions.md`; the parts that
+can be checked by code are enforced by code.
+
+1. **`run_faq`** with what the article should cover, the developer notes,
+   and optionally the article to update. The server gathers the facts
+   (existing and related articles, English and French UI labels from the
+   live branch, help centre and Lessons Log caveats, the live category
+   tree) and the writer drafts English and French. Takes two to four
+   minutes, so it returns a `job_id`.
+2. **`faq_job_status`** shows one of:
+   - `needs_input`: the writer's questions (a plan, a limit, a label it
+     could not confirm). Answer them in `developer_notes` and run again.
+   - `ready`: the full draft in both languages, the category, the plan, any
+     live articles it contradicts, and the rule check.
+   - `needs_revision`: the rule check failed.
+3. Review it. To change it: `run_faq` with `revise_job_id` and `feedback`,
+   or `save_faq_draft` with your own edited HTML.
+4. **`publish_faq_draft`** publishes: English article, French translation
+   attached to it (never a second article), `permission: ALL`, author Vome
+   Support Team. It reads both back from Zoho, repairs status or permission
+   once if Zoho dropped them, refreshes the help centre search index, and
+   returns the portal URLs Zoho reported. `as_draft=true` saves to Zoho as a
+   Draft instead, not public.
+
+What the rule check blocks: em dashes, a banner inside a `<p>`, a banner in
+one language but not the other, entities in titles or SEO fields, Markdown
+bodies, a French article linking an English URL, the wrong support address,
+email offered without the submit-a-ticket link, "see the French version"
+links, the replacement character, a non-slug permalink, a parent category.
+French and English terminology slips (bénévole, attribuer, étiquette,
+volunteer, Opportunity Role) are warnings.
+
+A failed publish never duplicates: once English exists, the job becomes an
+update of that article, so publishing again finishes it. `get_kb_article`
+and `list_kb_categories` read the live help centre.
+
+Every job is recorded in `mcp_faq_jobs` (who asked, the draft, the check,
+what published). It needs no new configuration: it uses the
+`ZOHO_DESK_MCP_URL` the service already has.
 
 ---
 
