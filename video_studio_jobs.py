@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -37,6 +38,9 @@ STUDIO_PY = os.environ.get("VOME_STUDIO_PYTHON", sys.executable)
 
 # A four-format render is minutes, not seconds.
 BUILD_TIMEOUT = int(os.environ.get("VOME_STUDIO_BUILD_TIMEOUT", "1800"))
+
+# A help-centre link in the brief names the exact article to read.
+FAQ_URL = re.compile(r"https?://\S*(?:kb|support|faq)\S*", re.I)
 
 
 def _post(thread_ts: str, message: str) -> None:
@@ -140,20 +144,147 @@ def revise_script(thread_ts: str, note: str) -> None:
     _post_script_for_review(thread_ts, result.get("summary", "Updated."))
 
 
+def _faq_text(row: dict, brief: str) -> tuple[str, str]:
+    """The FAQ this video is about, as (title, body).
+
+    Prefer the article's own permalink from the link someone pasted. Falling
+    back to full-text search is a real fallback, not an equivalent: searching
+    for the feature name can rank a neighbouring article first, and writing a
+    script from the wrong FAQ is an error nobody catches until it is public.
+    """
+    url = (row.get("faq_url") or "")
+    if not url:
+        m = FAQ_URL.search(brief or "")
+        url = m.group(0) if m else ""
+
+    if url:
+        permalink = url.rstrip("/").rsplit("/", 1)[-1]
+        try:
+            from database import get_kb_article_by_permalink
+            article = get_kb_article_by_permalink(permalink)
+        except Exception as exc:
+            print("[VIDEO] KB lookup failed for %s: %s" % (permalink, exc))
+            article = None
+        if article and (article.get("body") or "").strip():
+            return article.get("title", ""), article["body"]
+
+    query = (row.get("feature_name") or brief or "").strip()
+    if not query:
+        return "", ""
+    try:
+        from database import search_kb_articles_db
+        hits = search_kb_articles_db(query, language="en", limit=1,
+                                     body_chars=20000)
+    except Exception as exc:
+        print("[VIDEO] KB search failed for %r: %s" % (query, exc))
+        return "", ""
+    if not hits:
+        return "", ""
+    return hits[0].get("title", ""), hits[0].get("body", "")
+
+
+def _read_storyboard(slug: str) -> dict | None:
+    path = os.path.join(STUDIO_DIR, "storyboards", "%s.json" % slug)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _write_storyboard(sb: dict) -> str:
+    slug = sb.get("id") or "untitled"
+    path = os.path.join(STUDIO_DIR, "storyboards", "%s.json" % slug)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(sb, f, indent=2)
+    return slug
+
+
 def run_content_producer(message: str, row: dict, revise: bool = False) -> dict:
     """Ask the content_producer agent for a storyboard, and write it out.
 
-    NOT YET WIRED. The agent exists (manifest, charter, answer key) and the
-    OS runner exists, but connecting them is the last piece of this workflow.
-    Reporting that plainly is better than a stub that silently produces
-    nothing and leaves someone waiting in a thread.
+    Everything about talking to the agent is here: gathering the FAQ, calling
+    the one OS run path, and persisting what comes back. The caller only has
+    to branch on `ok`.
+
+    On a revision the existing storyboard goes in as context. That is what
+    makes "make the hook a question" an edit rather than a rewrite, which
+    matters because every earlier round of wording was approved by a person.
     """
+    title, body = _faq_text(row, message)
+    if not body.strip() and not revise:
+        return {
+            "ok": False,
+            "error": ("I could not find the FAQ for this one. Paste the help "
+                      "centre link and I will read it."),
+        }
+
+    context = {
+        "feature_name": row.get("feature_name") or title or "",
+        "faq_text": body,
+        "brief": message,
+    }
+    if revise:
+        existing = _read_storyboard(row.get("storyboard") or "")
+        if existing is None:
+            return {"ok": False,
+                    "error": "the storyboard file for this thread is missing"}
+        context["existing_storyboard"] = json.dumps(existing, indent=2)
+        context["change_requested"] = message
+
+    try:
+        from vomeos.runner import run_agent
+    except ImportError as exc:
+        return {"ok": False, "error": "Vome OS runner unavailable: %s" % exc}
+
+    result = run_agent(
+        "content.content_producer",
+        context,
+        subject_type="video_thread",
+        subject_id=row.get("thread_ts", ""),
+    )
+
+    # Three outcomes, and they are not the same thing. `blocked` means the
+    # model answered and a guard rejected it, which is a human's problem, not
+    # something to retry or quietly send anyway.
+    if result.blocked:
+        return {"ok": False,
+                "error": "the draft was blocked by a guard: %s" % result.why()}
+    if not result.ok:
+        return {"ok": False, "error": result.why()}
+
+    storyboard = result.data
+    if not isinstance(storyboard, dict) or not storyboard.get("scenes"):
+        return {"ok": False,
+                "error": "the agent returned no storyboard"}
+
+    # Keep the id stable across revisions. A new id would render into a new
+    # folder and orphan every earlier version of this video.
+    if revise and row.get("storyboard"):
+        storyboard["id"] = row["storyboard"]
+
+    try:
+        slug = _write_storyboard(storyboard)
+    except OSError as exc:
+        return {"ok": False, "error": "could not save the storyboard: %s" % exc}
+
+    # Studio validates it properly: em dashes, duplicate cues, unknown
+    # templates, timings that should not be there. Catching it now costs a
+    # message; catching it at build time costs credits.
+    check = _studio_json(["scripts/produce.py", slug, "--dry-run"])
+    if not check.get("ok"):
+        return {"ok": False,
+                "error": "the draft did not validate:\n%s"
+                         % str(check.get("error", ""))[:800]}
+
     return {
-        "ok": False,
-        "error": ("content_producer is not wired to the runner yet. The "
-                  "storyboard has to be written or edited by hand in "
-                  "vome-studio/storyboards/ for now; everything after that, "
-                  "including review and build, works."),
+        "ok": True,
+        "storyboard": slug,
+        "feature_name": storyboard.get("feature_name", ""),
+        "estimated_runtime": check.get("estimated_runtime"),
+        "summary": ("Updated." if revise else "Here is the first pass.")
+                   + " Estimated %ss."
+                   % round(check.get("estimated_runtime") or 0),
     }
 
 

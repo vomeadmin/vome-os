@@ -923,6 +923,31 @@ def _kb_search_sql(language: str | None) -> str:
     return sql + "ORDER BY match_count DESC, score DESC LIMIT :limit"
 
 
+def get_kb_article_by_permalink(permalink: str) -> dict | None:
+    """One KB article by its permalink, the last segment of its help-centre URL.
+
+    Full-text search is the right tool when you have a question. When you have
+    the article's own URL, searching for words from the feature name can rank
+    a different article first, and silently writing a video script from the
+    wrong FAQ is the kind of error nobody catches until it is public.
+
+    Returns the full body, not a truncated one: the caller is handing it to an
+    agent that has to get the facts right.
+    """
+    if not DATABASE_URL or not permalink or not permalink.strip():
+        return None
+    with _get_engine().connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT zoho_article_id, title, body, url, permalink, "
+                "       category, language, status "
+                "FROM kb_articles WHERE permalink = :p LIMIT 1"
+            ),
+            {"p": permalink.strip()},
+        ).mappings().first()
+    return dict(row) if row else None
+
+
 def search_kb_articles_db(
     query: str,
     language: str | None = None,

@@ -10,19 +10,26 @@ So the cases that matter most are the near misses: messages that contain an
 approving word inside a sentence that is refusing approval.
 """
 
-import sys
-import types
+import os
 
 import pytest
 
 
 @pytest.fixture(scope="module")
 def handler():
-    """Import the handler with Slack stubbed, so no token is needed."""
-    fake = types.ModuleType("slack")
-    fake.CHANNEL_VIDEO_STUDIO = "C0C9P2JMEEN"
-    fake.post_to_video_studio = lambda *a, **k: None
-    sys.modules.setdefault("slack", fake)
+    """Import the handler with a dummy Slack token.
+
+    slack.py builds a WebClient at import time and reads SLACK_BOT_TOKEN
+    directly, so a token has to exist for the import to succeed. A dummy one
+    is enough: constructing the client makes no network call, and every test
+    here either returns before posting or patches the post.
+
+    An earlier version of this fixture installed a FAKE slack module into
+    sys.modules instead. That works in isolation and breaks the suite: the
+    fake outlives this module and the next test that does
+    `from slack import post_to_engineering` gets an ImportError.
+    """
+    os.environ.setdefault("SLACK_BOT_TOKEN", "xoxb-test-token-not-real")
     import slack_video_studio_handler as h
     return h
 
@@ -104,6 +111,7 @@ def test_feature_name_strips_links_and_mentions(handler):
 
 def test_handler_ignores_other_channels(handler, monkeypatch):
     """A message in a different channel must never reach this workflow."""
+    monkeypatch.setattr(handler.slack, "post_to_video_studio", lambda *a, **k: None)
     called = []
     monkeypatch.setattr(handler.video_threads, "get", lambda t: called.append(t))
     handler.handle_video_studio_message(
@@ -113,6 +121,7 @@ def test_handler_ignores_other_channels(handler, monkeypatch):
 
 def test_handler_ignores_bot_messages(handler, monkeypatch):
     """Our own delivery post must not be read as a new video idea."""
+    monkeypatch.setattr(handler.slack, "post_to_video_studio", lambda *a, **k: None)
     called = []
     monkeypatch.setattr(handler.video_threads, "get", lambda t: called.append(t))
     handler.handle_video_studio_message(
