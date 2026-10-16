@@ -1,0 +1,71 @@
+[identity]
+name = "content_producer"
+division = "content"
+title = "Content Producer"
+reports_to = "sam"
+hired = "2026-10-15"
+
+[model]
+# Senior tier. This agent writes copy that will carry the company's name in
+# front of people who did not ask for it, and the hard part is judgment
+# rather than volume: which single pain to open on, which claim is safe to
+# make, what to cut when the script runs long. Those are the decisions a
+# cheaper model gets plausibly wrong in a way nobody catches until the video
+# is public.
+#
+# It also runs rarely. A few scripts a week is not the cost shape of a filter
+# that runs on every production error, so paying junior rates here would save
+# almost nothing and risk the one thing that is expensive to fix.
+tier = "senior"
+max_tokens = 4000
+
+[job]
+charter = "charter.md"
+skills = []
+requires_context = [
+    "feature_name",
+    "faq_text",
+]
+output = "json"
+
+[guards]
+# The output is a storyboard that Vome Studio parses, so the shape has to be
+# right. Studio validates it again on its own side and rejects em dashes,
+# duplicate cues and unknown templates, which makes that the real gate; this
+# is the cheap first pass that stops a malformed payload leaving the OS.
+output = ["json_shape", "non_empty"]
+# False, and deliberately so, on the same reasoning as sentry_triage.
+#
+# The division handbook is emphatic that this work is seen by strangers, and
+# it is. But what THIS AGENT emits is a storyboard JSON that a person reads
+# and approves in a Slack thread before a single frame is rendered. It never
+# writes to a customer, and it cannot publish anything. The #8945 guards
+# check outbound customer messages; declaring them here would be theatre over
+# a human review that already happens and is the actual gate.
+#
+# If this agent is ever wired to publish directly, this flips to true and the
+# client_message guard becomes mandatory. That is the line.
+client_facing = false
+
+[limits]
+# A storyboard is one careful pass over an FAQ, not a conversation.
+timeout_seconds = 180
+max_retries = 2
+
+[approval]
+# Every script is approved by a person in the thread before anything is
+# built. That is the real gate and it is human, so a second CEO approval
+# would sit on top of a review that already happens.
+requires_ceo_approval = false
+escalate_to = "#video-studio"
+
+[evals]
+path = "evals/cases.jsonl"
+# Held at 0.8. What this agent gets most wrong is taste: which pain opens the
+# video, how a benefit is phrased. Reasonable people disagree there and an
+# answer key is arguable, so a higher threshold would force charter edits
+# that chase the key rather than improve the agent. What has to be right
+# every time is structural and factual: no em dashes, no unsourced claim,
+# product labels verbatim, five scenes, no timings, a hook that is one line.
+# The cases weight those.
+min_agreement = 0.8

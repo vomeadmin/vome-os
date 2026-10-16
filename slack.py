@@ -8,6 +8,8 @@ CHANNEL_ENGINEERING = os.environ.get("SLACK_CHANNEL_VOME_SUPPORT_ENGINEERING", "
 CHANNEL_FIELD_FEEDBACK = os.environ.get("SLACK_CHANNEL_VOME_FIELD_FEEDBACK", "")
 CHANNEL_FEATURE_REQUESTS = os.environ.get("SLACK_CHANNEL_VOME_FEATURE_REQUESTS", "")
 CHANNEL_AGENT_LOG = os.environ.get("SLACK_CHANNEL_VOME_AGENT_LOG", "")
+CHANNEL_VIDEO_STUDIO = os.environ.get(
+    "SLACK_CHANNEL_VOME_VIDEO_STUDIO", "C0C9P2JMEEN")
 
 
 def post_to_engineering(message: str) -> dict:
@@ -32,6 +34,22 @@ def post_to_feature_requests(message: str) -> dict:
 def post_to_log(message: str) -> dict:
     """Post to #vome-agent-log for audit trail of all agent actions."""
     return client.chat_postMessage(channel=CHANNEL_AGENT_LOG, text=message)
+
+
+def post_to_video_studio(message: str, thread_ts: str | None = None) -> dict:
+    """Post to the video studio channel.
+
+    This channel is a working thread, not a feed: a video idea starts a
+    thread, the script is posted back into it for review, it is refined there
+    over several rounds, and the finished video is reported in the same
+    thread. So nearly every call here passes thread_ts. Omitting it starts a
+    new conversation, which is almost never what you want.
+    """
+    return client.chat_postMessage(
+        channel=CHANNEL_VIDEO_STUDIO,
+        text=message,
+        thread_ts=thread_ts,
+    )
 
 
 def handle_incoming_message(payload: dict) -> dict | None:
