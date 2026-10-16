@@ -55,8 +55,10 @@ from sentry_handler import (
     run_regate_sweep as run_sentry_regate_sweep,
     run_shadow_report as run_sentry_shadow_report,
 )
+import slack
 from slack_agent_mention_handler import handle_agent_mention
 from slack_reply_handler import handle_reply
+from slack_video_studio_handler import handle_video_studio_message
 from slack_digest import send_daily_digest
 from stale_waiting_client_sweeper import run_stale_waiting_client_sweep
 from weekly_engineering_report import run_friday_report, run_monday_report
@@ -162,6 +164,15 @@ def _build_ticket_data(ticket: dict) -> dict:
 
 _check_env()
 init_db()
+
+# The video studio channel keeps one row per thread: which video it is about
+# and how far through review it has got. Without it, a reply saying "make the
+# hook a question" has no idea which video it means.
+try:
+    import video_threads
+    video_threads.init()
+except Exception as _exc:  # never block boot on an optional workflow
+    print(f"WARNING: video_threads.init() failed: {_exc}")
 
 # ---------------------------------------------------------------------------
 # Vome OS as a claude.ai connector (MCP + OAuth). Off until MCP_PUBLIC_URL and
@@ -537,6 +548,18 @@ async def slack_events_webhook(request: Request):
                 "ts": event.get("ts", ""),
                 "thread_ts": thread_ts,
                 "files": files,
+            })
+
+        elif channel == slack.CHANNEL_VIDEO_STUDIO:
+            # Video studio. Unlike the ticket channels this handles top-level
+            # messages too: a new message IS a new video idea, and a reply is
+            # a note on the script or the greenlight to build it.
+            handle_video_studio_message({
+                "user": user,
+                "text": text,
+                "ts": event.get("ts", ""),
+                "thread_ts": thread_ts,
+                "channel": channel,
             })
 
         elif event.get("channel_type") == "im":
