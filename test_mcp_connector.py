@@ -489,12 +489,81 @@ def test_code_tools_refuse_unknown_repos_and_traversal():
     ]
 
 
-def test_live_branches_come_from_the_confirmed_table():
+def test_every_repo_reads_its_production_branch(monkeypatch):
+    """Verified 2026-10-15 against each repo's CI config and history.
+
+    core, db and chats keep a 2024 "Initial commit" on main; reading it
+    would answer about an empty repository.
+    """
     from mcp_connector import repos
 
-    assert repos.resolve("web").live_ref == "master"
-    assert repos.resolve("core").slug == "vomedjango-restored-core-app"
-    assert repos.resolve("chats").host == "bitbucket"
+    monkeypatch.delenv("MCP_LIVE_BRANCHES", raising=False)
+    assert {r.slug: r.live_ref for r in repos.all_repos()} == {
+        "vomedjango-restored-core-app": "master",
+        "vomedjango-database-app": "master",
+        "vomedjango-chats-app": "master",
+        "vomedjango-integrations-app": "main",
+        "vomesalesforce": "main",
+        "vome-react": "master",
+        "vome-landing-page": "master",
+        "VomeApp": "master",
+    }
+    assert repos.resolve("salesforce").host == "bitbucket"
+    assert repos.resolve("landing").owner == "vomeadmin"
+
+
+def test_a_live_branch_can_be_overridden_without_a_deploy(monkeypatch):
+    from mcp_connector import repos
+
+    monkeypatch.setenv("MCP_LIVE_BRANCHES", "VomeApp=release-3.6.6")
+    mobile = repos.resolve("mobile")
+    assert mobile.live_ref == "release-3.6.6"
+    assert mobile.evidence == "set by MCP_LIVE_BRANCHES"
+
+
+def test_connector_reach_is_separate_from_the_sentry_analyst(monkeypatch):
+    from vomeos.integrations import code_search
+
+    monkeypatch.setenv("VOMEOS_CODE_REPOS", "vomedjango-restored-core-app")
+    monkeypatch.delenv("MCP_CODE_REPOS", raising=False)
+
+    # The analyst, constructed as sentry_code does: still core only.
+    analyst = code_search.Bitbucket()
+    refused = analyst.read_file("vomedjango-chats-app", "x.py")
+    assert not refused.ok
+    assert "not in VOMEOS_CODE_REPOS" in refused.error
+
+    # The connector: every repo in its own table.
+    assert set(config.code_repos()) >= {
+        "vomedjango-chats-app", "vomesalesforce", "vome-landing-page",
+    }
+    monkeypatch.setenv("MCP_CODE_REPOS", "vome-react")
+    assert config.code_repos() == ("vome-react",)
+
+
+def test_workspace_search_drops_repos_the_connector_may_not_read(
+    monkeypatch,
+):
+    from vomeos.integrations.base import IntegrationResult
+    from vomeos.integrations.code_search import Bitbucket, GitHub
+
+    monkeypatch.setenv("MCP_CODE_REPOS", "vomedjango-chats-app")
+
+    def file(repo):
+        return {"file": {"path": "a.py", "commit": {"repository": {
+            "full_name": f"vomedjango/{repo}"}}}, "content_matches": []}
+
+    monkeypatch.setattr(Bitbucket, "search_code", lambda self, q, repo="":
+                        IntegrationResult("bitbucket", "search_code", True,
+                                          data={"values": [
+                                              file("vomedjango-chats-app"),
+                                              file("some-other-repo"),
+                                          ]}))
+    monkeypatch.setattr(GitHub, "search_code",
+                        lambda self, q, repo="", owner="": IntegrationResult(
+                            "github", "search_code", True, data={"items": []}))
+    found = tools.search_code("phone_number")
+    assert [f["repo"] for f in found["files"]] == ["vomedjango-chats-app"]
 
 
 def test_markdown_chunks_keep_their_heading():

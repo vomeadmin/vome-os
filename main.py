@@ -163,15 +163,30 @@ def _build_ticket_data(ticket: dict) -> dict:
 _check_env()
 init_db()
 
-from mcp_connector import server as mcp_connector
-
-app = FastAPI(title="Vome Support Agent", lifespan=mcp_connector.lifespan)
-
 # ---------------------------------------------------------------------------
 # Vome OS as a claude.ai connector (MCP + OAuth). Off until MCP_PUBLIC_URL and
 # the Google client are set. See mcp_connector/__init__.py and CONNECTOR.md.
+#
+# Guarded: the connector is an add-on to this service, and a broken import
+# or bad configuration in it must never take down the webhooks and the
+# scheduler that the support operation runs on.
 # ---------------------------------------------------------------------------
-mcp_connector.attach(app)
+try:
+    from mcp_connector import server as mcp_connector
+except Exception as _mcp_import_error:
+    print(f"[MCP] connector unavailable, import failed: {_mcp_import_error}")
+    mcp_connector = None
+
+app = FastAPI(
+    title="Vome Support Agent",
+    lifespan=mcp_connector.lifespan if mcp_connector else None,
+)
+
+if mcp_connector:
+    try:
+        mcp_connector.attach(app)
+    except Exception as _mcp_attach_error:
+        print(f"[MCP] connector OFF, attach failed: {_mcp_attach_error}")
 
 # ---------------------------------------------------------------------------
 # Ticket Command Center (ops/) router
@@ -1758,7 +1773,9 @@ async def health():
         "MCP_PUBLIC_URL", "MCP_GOOGLE_CLIENT_ID", "MCP_GOOGLE_CLIENT_SECRET",
         "CLICKUP_TEAM_ID", "DATABASE_URL",
     )
-    connector_status["on"] = mcp_connector.config.enabled()
+    connector_status["on"] = bool(
+        mcp_connector and mcp_connector._server is not None
+    )
     return {
         "status": "ok",
         "env": env_status,

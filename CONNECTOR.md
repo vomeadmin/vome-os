@@ -26,6 +26,33 @@ Code: [mcp_connector/](mcp_connector/). Tests: `py -m pytest test_mcp_connector.
 Every result says which sources it searched and which it did NOT, so "not
 checked" never reads as "does not exist".
 
+### Repositories and the branch each one reads
+
+Verified 2026-10-15 against each repo's CI config and history. Defined in
+[mcp_connector/repos.py](mcp_connector/repos.py); override any branch with
+`MCP_LIVE_BRANCHES=repo=branch,...` without a deploy.
+
+| Repo | Host | Branch read | Why |
+|---|---|---|---|
+| vomedjango-restored-core-app (core) | Bitbucket | `master` | pipeline deploys master; `main` is a 2024 stub |
+| vomedjango-database-app (db) | Bitbucket | `master` | pipeline deploys master; `main` is a 2024 stub |
+| vomedjango-chats-app | Bitbucket | `master` | PRs merge to master; `main` is a 2024 stub |
+| vomedjango-integrations-app | Bitbucket | `main` | its only release branch |
+| vomesalesforce | Bitbucket | `main` | its only long-lived branch |
+| vome-react | GitHub, vomeadmin | `master` | `cicd-prod.yml` deploys master |
+| vome-landing-page | GitHub, vomeadmin | `master` | `cicd-prod.yml` deploys master |
+| VomeApp | GitHub, samfagen15 | `master` | store build (`sanjay_expo_upgrade`, v3.6.6) promoted to master 2026-10-15 |
+
+Code search itself indexes each repo's default branch; `read_code_file`
+then reads the branch above. The code tools use their own allowlist,
+`MCP_CODE_REPOS` (default: all of the above), so they never widen what the
+autonomous Sentry analyst can read through `VOMEOS_CODE_REPOS`.
+
+Token reach: the Bitbucket token is workspace-wide, so all five Bitbucket
+repos are covered. The two GitHub tokens are fine-grained and list their
+repositories explicitly: the vomeadmin token must include
+`vome-landing-page` as well as `vome-react`.
+
 ---
 
 ## One-time setup

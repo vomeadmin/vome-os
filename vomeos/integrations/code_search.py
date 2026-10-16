@@ -80,9 +80,28 @@ def allowed_repos() -> tuple[str, ...]:
     return tuple(r.strip() for r in raw.split(",") if r.strip())
 
 
-def _repo_permitted(repo: str) -> bool:
-    allowed = allowed_repos()
+def _repo_permitted(
+    repo: str, allowlist: tuple[str, ...] | None = None
+) -> bool:
+    """`allowlist` is a caller's own list; None means VOMEOS_CODE_REPOS.
+
+    Two callers want different reach. The Sentry bug analyst is autonomous
+    and stays narrow on VOMEOS_CODE_REPOS. The claude.ai connector is people
+    asking questions and passes its own list, so widening one never widens
+    the other.
+    """
+    allowed = allowed_repos() if allowlist is None else allowlist
     return not allowed or repo in allowed
+
+
+def _denial(repo: str, allowlist: tuple[str, ...] | None) -> str:
+    # code_access_monitor matches "not in VOMEOS_CODE_REPOS" to tell a
+    # deliberate refusal from a broken token, so that wording is a contract.
+    source = "VOMEOS_CODE_REPOS" if allowlist is None else "MCP_CODE_REPOS"
+    return (
+        f"repository {repo!r} is not in {source}; add it deliberately to "
+        "make it reachable"
+    )
 
 
 @dataclass
@@ -96,6 +115,7 @@ class Bitbucket(Connector):
     system: str = "bitbucket"
     base_url: str = "https://api.bitbucket.org/2.0"
     timeout: int = field(default=config.INTEGRATION_TIMEOUT_SECONDS)
+    allowlist: tuple[str, ...] | None = None
 
     @property
     def workspace(self) -> str:
@@ -155,7 +175,7 @@ class Bitbucket(Connector):
 
     def search_code(self, query: str, repo: str = "") -> IntegrationResult:
         """Find where a symbol, string or error message appears."""
-        if repo and not _repo_permitted(repo):
+        if repo and not _repo_permitted(repo, self.allowlist):
             return self._denied("search_code", repo)
         search = f"{query} repo:{repo}" if repo else query
         return self._call(
@@ -169,7 +189,7 @@ class Bitbucket(Connector):
         self, repo: str, path: str, ref: str = "HEAD"
     ) -> IntegrationResult:
         """One file at one ref. Truncated to MAX_FILE_BYTES."""
-        if not _repo_permitted(repo):
+        if not _repo_permitted(repo, self.allowlist):
             return self._denied("read_file", repo)
         result = self._call(
             "read_file",
@@ -193,7 +213,7 @@ class Bitbucket(Connector):
         `/commits/{ref}`, and `path` becomes a query filter rather than a
         path segment, because the two cannot both be path segments.
         """
-        if not _repo_permitted(repo):
+        if not _repo_permitted(repo, self.allowlist):
             return self._denied("recent_commits", repo)
         params: dict = {"pagelen": min(int(limit), 50)}
         if path:
@@ -209,10 +229,7 @@ class Bitbucket(Connector):
     def _denied(self, operation: str, repo: str) -> IntegrationResult:
         return IntegrationResult(
             self.system, operation, False,
-            error=(
-                f"repository {repo!r} is not in VOMEOS_CODE_REPOS; add it "
-                "deliberately to make it reachable"
-            ),
+            error=_denial(repo, self.allowlist),
         )
 
 
@@ -223,6 +240,7 @@ class GitHub(Connector):
     system: str = "github"
     base_url: str = "https://api.github.com"
     timeout: int = field(default=config.INTEGRATION_TIMEOUT_SECONDS)
+    allowlist: tuple[str, ...] | None = None
 
     @property
     def owner(self) -> str:
@@ -290,7 +308,7 @@ class GitHub(Connector):
     def search_code(
         self, query: str, repo: str = "", owner: str = ""
     ) -> IntegrationResult:
-        if repo and not _repo_permitted(repo):
+        if repo and not _repo_permitted(repo, self.allowlist):
             return self._denied("search_code", repo)
         who = owner or self.owner
         scope = f"repo:{who}/{repo}" if repo else f"user:{who}"
@@ -305,7 +323,7 @@ class GitHub(Connector):
     def read_file(
         self, repo: str, path: str, ref: str = "", owner: str = ""
     ) -> IntegrationResult:
-        if not _repo_permitted(repo):
+        if not _repo_permitted(repo, self.allowlist):
             return self._denied("read_file", repo)
         who = owner or self.owner
         params = {"ref": ref} if ref else None
@@ -333,7 +351,7 @@ class GitHub(Connector):
         branch: an error from the dev deployment was caused by something on
         `development`, not by whatever last landed on the default branch.
         """
-        if not _repo_permitted(repo):
+        if not _repo_permitted(repo, self.allowlist):
             return self._denied("recent_commits", repo)
         params = {"per_page": min(int(limit), 50)}
         if path:
@@ -352,10 +370,7 @@ class GitHub(Connector):
     def _denied(self, operation: str, repo: str) -> IntegrationResult:
         return IntegrationResult(
             self.system, operation, False,
-            error=(
-                f"repository {repo!r} is not in VOMEOS_CODE_REPOS; add it "
-                "deliberately to make it reachable"
-            ),
+            error=_denial(repo, self.allowlist),
         )
 
 

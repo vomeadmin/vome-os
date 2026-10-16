@@ -28,6 +28,10 @@ ENVIRONMENT
     MCP_REFRESH_TOKEN_TTL     seconds, default 30 days
     MCP_LESSONS_DOC_ID        ClickUp doc holding the Sprint Lessons Log
     MCP_LESSONS_PAGE_IDS      comma separated page ids inside it
+    MCP_CODE_REPOS            repos the code tools may read. Default: all of
+                              them in repos.py. Separate from
+                              VOMEOS_CODE_REPOS on purpose.
+    MCP_LIVE_BRANCHES         repo=branch overrides, see repos.py
     MCP_PRODUCT_SOURCE_TTL    seconds between refreshes of the frontend
                               source, default 6 hours
     CLICKUP_TEAM_ID           the ClickUp workspace, for the docs API
@@ -152,6 +156,20 @@ def clickup_team_id() -> str:
 
 def clickup_token() -> str:
     return os.environ.get("CLICKUP_API_TOKEN", "").strip()
+
+
+def code_repos() -> tuple[str, ...]:
+    """Repositories the connector's code tools may read.
+
+    Its own list, separate from VOMEOS_CODE_REPOS, which governs the
+    autonomous Sentry analyst and is deliberately narrow. Default: every
+    repository in repos.py.
+    """
+    from mcp_connector import repos
+
+    raw = os.environ.get("MCP_CODE_REPOS", "")
+    chosen = tuple(r.strip() for r in raw.split(",") if r.strip())
+    return chosen or repos.slugs()
 
 
 def product_source_ttl() -> int:

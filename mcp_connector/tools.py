@@ -417,7 +417,10 @@ def check_existing_work(query: str) -> dict:
 def _connector_for(repo: repos.Repo):
     from vomeos.integrations.code_search import Bitbucket, GitHub
 
-    return Bitbucket() if repo.host == "bitbucket" else GitHub()
+    allowlist = config.code_repos()
+    if repo.host == "bitbucket":
+        return Bitbucket(allowlist=allowlist)
+    return GitHub(allowlist=allowlist)
 
 
 def _bitbucket_hits(data) -> list[dict]:
@@ -499,6 +502,10 @@ def search_code(query: str, repo: str = "") -> dict:
         )
         hits += parsed
 
+    # A workspace-wide Bitbucket search reaches every repo in the workspace,
+    # not only the ones this connector may read. Drop the rest.
+    permitted = {slug.lower() for slug in config.code_repos()}
+    hits = [h for h in hits if (h["repo"] or "").lower() in permitted]
     return {
         "query": query,
         "files": hits[:30],
@@ -606,10 +613,12 @@ def read_code_file(
 
 
 def list_repositories() -> dict:
+    permitted = set(config.code_repos())
     return {
         "repositories": [
             {"name": r.slug, "what": r.what, "live_branch": r.live_ref,
-             "host": r.host}
+             "why_this_branch": r.evidence, "host": r.host,
+             "readable": r.slug in permitted}
             for r in repos.all_repos()
         ],
         "aliases": repos.ALIASES,
