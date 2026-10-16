@@ -138,9 +138,16 @@ def test_empty_storyboard_is_rejected(jobs, monkeypatch):
     assert out["ok"] is False
 
 
+def _use_local(jobs, monkeypatch, tmp_path):
+    """Pretend there is a local Studio checkout, and no HTTP endpoint."""
+    monkeypatch.setattr(jobs, "_studio", lambda: None)
+    monkeypatch.setattr(jobs, "_local_studio", lambda: str(tmp_path))
+
+
 def test_validation_failure_stops_before_the_build(jobs, monkeypatch, tmp_path):
     """Studio's validator is the real gate. A failure here costs a message;
     the same failure at build time costs credits."""
+    _use_local(jobs, monkeypatch, tmp_path)
     monkeypatch.setattr(jobs, "_faq_text", lambda r, m: ("T", "body"))
     monkeypatch.setattr(jobs, "_write_storyboard", lambda sb: sb["id"])
     monkeypatch.setattr(jobs, "_studio_json",
@@ -152,9 +159,10 @@ def test_validation_failure_stops_before_the_build(jobs, monkeypatch, tmp_path):
     assert "em dash" in out["error"]
 
 
-def test_revision_keeps_the_storyboard_id(jobs, monkeypatch):
+def test_revision_keeps_the_storyboard_id(jobs, monkeypatch, tmp_path):
     """A new id would render into a new folder and orphan every earlier
     version of this video."""
+    _use_local(jobs, monkeypatch, tmp_path)
     monkeypatch.setattr(jobs, "_faq_text", lambda r, m: ("T", "body"))
     monkeypatch.setattr(jobs, "_read_storyboard", lambda slug: dict(STORYBOARD))
     written = {}
@@ -179,3 +187,33 @@ def test_revision_without_a_storyboard_is_refused(jobs, monkeypatch):
     out = jobs.run_content_producer("change it", {"storyboard": "gone"},
                                     revise=True)
     assert out["ok"] is False
+
+
+# ------------------------------------------------------------- transport
+
+def test_no_transport_is_reported_not_guessed(jobs, monkeypatch):
+    """The first real Slack message failed with a Windows path on a Linux
+    host: the deployed agent fell through to a local checkout that only
+    exists on one laptop. It must say so instead."""
+    monkeypatch.setattr(jobs, "_studio", lambda: None)
+    monkeypatch.setattr(jobs, "_local_studio", lambda: "")
+    monkeypatch.setattr(jobs, "_faq_text", lambda r, m: ("T", "body"))
+    monkeypatch.setattr(jobs, "_write_storyboard", lambda sb: sb["id"])
+    _patch_agent(jobs, monkeypatch, _Result("ok", data=dict(STORYBOARD)))
+    out = jobs.run_content_producer("brief", {"feature_name": "Kiosk"})
+    assert out["ok"] is False
+    assert "VOME_STUDIO_API_URL" in out["error"]
+
+
+def test_missing_id_is_derived_not_untitled(jobs):
+    """"untitled" names the render folder and every output file. The first
+    real run produced exactly that."""
+    sb = {"feature_name": "Recruitment Workflows", "scenes": []}
+    monkey = jobs._write_storyboard(sb)
+    assert monkey == "recruitment-workflows"
+    assert sb["id"] == "recruitment-workflows"
+
+
+def test_slugify(jobs):
+    assert jobs._slugify("Kiosk check-in!") == "kiosk-check-in"
+    assert jobs._slugify("") == "untitled"

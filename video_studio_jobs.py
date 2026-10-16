@@ -26,14 +26,15 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 import slack
 import video_threads
 
-STUDIO_DIR = os.environ.get(
-    "VOME_STUDIO_DIR",
-    r"C:\Users\sfage\Projects\Vome\vome-studio",
-)
+# Local checkout, used only when Studio is not reachable over HTTP. No
+# default: a hardcoded laptop path is how the deployed agent ended up trying
+# to write C:\Users\... on a Linux host.
+STUDIO_DIR = os.environ.get("VOME_STUDIO_DIR", "")
 STUDIO_PY = os.environ.get("VOME_STUDIO_PYTHON", sys.executable)
 
 # A four-format render is minutes, not seconds.
@@ -41,6 +42,38 @@ BUILD_TIMEOUT = int(os.environ.get("VOME_STUDIO_BUILD_TIMEOUT", "1800"))
 
 # A help-centre link in the brief names the exact article to read.
 FAQ_URL = re.compile(r"https?://\S*(?:kb|support|faq)\S*", re.I)
+
+
+def _studio() -> "object | None":
+    """The HTTP connector, if Studio is deployed and configured."""
+    try:
+        from vomeos.integrations.vome_studio import VomeStudio
+    except ImportError:
+        return None
+    conn = VomeStudio()
+    return conn if conn.configured() else None
+
+
+def _local_studio() -> str:
+    """The local checkout, if there is a usable one on THIS machine."""
+    if not STUDIO_DIR:
+        return ""
+    if not os.path.isdir(os.path.join(STUDIO_DIR, "storyboards")):
+        return ""
+    return STUDIO_DIR
+
+
+def _no_transport_error() -> dict:
+    """Said once, in the thread, in terms someone can act on."""
+    return {
+        "ok": False,
+        "error": (
+            "I cannot reach Vome Studio from here. Set VOME_STUDIO_API_URL "
+            "and VOME_STUDIO_API_KEY once Studio is deployed, or run this "
+            "agent on a machine with the repo checked out and "
+            "VOME_STUDIO_DIR pointing at it."
+        ),
+    }
 
 
 def _post(thread_ts: str, message: str) -> None:
@@ -56,11 +89,16 @@ def _studio_cli(args: list[str], timeout: int = 120):
     The interim path until Studio has an HTTP endpoint. Everything about
     Studio being a local directory is confined here.
     """
+    root = _local_studio()
+    if not root:
+        return False, "", ("no local Vome Studio checkout "
+                           "(set VOME_STUDIO_DIR, or deploy Studio and set "
+                           "VOME_STUDIO_API_URL)")
     env = dict(os.environ)
     env.setdefault("PYTHONIOENCODING", "utf-8")
     try:
         p = subprocess.run(
-            [STUDIO_PY] + args, cwd=STUDIO_DIR, env=env,
+            [STUDIO_PY] + args, cwd=root, env=env,
             capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=timeout,
         )
@@ -183,8 +221,22 @@ def _faq_text(row: dict, brief: str) -> tuple[str, str]:
     return hits[0].get("title", ""), hits[0].get("body", "")
 
 
+def _slugify(value: str) -> str:
+    """A storyboard id from a feature name.
+
+    The id names the render folder and every output file, so "untitled" is
+    never acceptable. The agent is told to set it; this is the backstop for
+    when it does not.
+    """
+    out = re.sub(r"[^a-z0-9]+", "-", (value or "").lower()).strip("-")
+    return out or "untitled"
+
+
 def _read_storyboard(slug: str) -> dict | None:
-    path = os.path.join(STUDIO_DIR, "storyboards", "%s.json" % slug)
+    root = _local_studio()
+    if not root:
+        return None
+    path = os.path.join(root, "storyboards", "%s.json" % slug)
     try:
         with open(path, encoding="utf-8") as f:
             return json.load(f)
@@ -193,10 +245,15 @@ def _read_storyboard(slug: str) -> dict | None:
 
 
 def _write_storyboard(sb: dict) -> str:
-    slug = sb.get("id") or "untitled"
-    path = os.path.join(STUDIO_DIR, "storyboards", "%s.json" % slug)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(sb, f, indent=2)
+    """Persist locally. Over HTTP the storyboard is sent with the request, so
+    there is nothing to write here and the slug is all the caller needs."""
+    slug = sb.get("id") or _slugify(sb.get("feature_name", ""))
+    sb["id"] = slug
+    root = _local_studio()
+    if root:
+        path = os.path.join(root, "storyboards", "%s.json" % slug)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(sb, f, indent=2)
     return slug
 
 
@@ -271,7 +328,14 @@ def run_content_producer(message: str, row: dict, revise: bool = False) -> dict:
     # Studio validates it properly: em dashes, duplicate cues, unknown
     # templates, timings that should not be there. Catching it now costs a
     # message; catching it at build time costs credits.
-    check = _studio_json(["scripts/produce.py", slug, "--dry-run"])
+    conn = _studio()
+    if conn is not None:
+        res = conn.validate(storyboard)
+        check = res.data if res.ok else {"ok": False, "error": res.error}
+    elif _local_studio():
+        check = _studio_json(["scripts/produce.py", slug, "--dry-run"])
+    else:
+        return _no_transport_error()
     if not check.get("ok"):
         return {"ok": False,
                 "error": "the draft did not validate:\n%s"
@@ -298,34 +362,21 @@ def build_video(thread_ts: str) -> None:
     This is the expensive call. It only ever runs from an explicit greenlight
     matched in the handler, never from a model's reading of a message.
     """
-    report = _studio_json(
-        ["scripts/produce.py", "--engine", "elevenlabs"],
-        timeout=BUILD_TIMEOUT,
-    )
+    row = video_threads.get(thread_ts) or {}
+    slug = row.get("storyboard") or ""
 
-    # Studio formats its own delivery post, so the wording lives next to the
-    # thing it describes rather than being duplicated here.
-    tmp = os.path.join(STUDIO_DIR, ".last_build_report.json")
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(report, f)
-        ok, out, err = _studio_cli(
-            ["scripts/review.py", "--delivered", ".last_build_report.json"])
-        message = out.strip() if ok and out.strip() else None
-    except OSError as exc:
-        message = None
-        print("[VIDEO] could not write build report: %s" % exc)
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
+    conn = _studio()
+    if conn is not None:
+        report = _build_over_http(conn, slug)
+    elif _local_studio():
+        args = ["scripts/produce.py", "--engine", "elevenlabs"]
+        if slug:
+            args.insert(1, slug)
+        report = _studio_json(args, timeout=BUILD_TIMEOUT)
+    else:
+        report = _no_transport_error()
 
-    if not message:
-        message = ("The build finished but I could not format the result.\n"
-                   "```%s```" % json.dumps(report)[:1200])
-
-    _post(thread_ts, message)
+    _post(thread_ts, _delivery_post(report))
     video_threads.update(
         thread_ts,
         state=(video_threads.STATE_DELIVERED if report.get("ok")
@@ -333,3 +384,80 @@ def build_video(thread_ts: str) -> None:
         last_runtime=report.get("runtime"),
         render_folder=report.get("folder", ""),
     )
+
+
+def _build_over_http(conn, slug: str) -> dict:
+    """Start a build and poll it.
+
+    A render is minutes long, which is why the endpoint returns an id instead
+    of holding the request open. Polling here rather than in the handler
+    keeps the Slack thread responsive the whole time.
+    """
+    storyboard = _read_storyboard(slug) or {"id": slug}
+    started = conn.build(storyboard, engine="elevenlabs")
+    if not started.ok:
+        return {"ok": False, "error": started.error or "Studio refused the build"}
+    build_id = (started.data or {}).get("build_id")
+    if not build_id:
+        return {"ok": False, "error": "Studio did not return a build id"}
+
+    deadline = time.time() + BUILD_TIMEOUT
+    while time.time() < deadline:
+        time.sleep(15)
+        polled = conn.get_build(build_id)
+        if not polled.ok:
+            continue          # a blip while rendering is not a failed build
+        rec = polled.data or {}
+        if rec.get("status") != "running":
+            return rec.get("report") or {
+                "ok": False, "error": "build %s" % rec.get("status")}
+    return {"ok": False,
+            "error": "build did not finish within %ds" % BUILD_TIMEOUT}
+
+
+def _delivery_post(report: dict) -> str:
+    """The message that goes back to the thread.
+
+    Studio formats this when there is a local checkout, so the wording lives
+    next to the thing it describes. Over HTTP there is no checkout, so the
+    same shape is built here from the report.
+    """
+    root = _local_studio()
+    if root:
+        tmp = os.path.join(root, ".last_build_report.json")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(report, f)
+            ok, out, _ = _studio_cli(
+                ["scripts/review.py", "--delivered", ".last_build_report.json"])
+            if ok and out.strip():
+                return out.strip()
+        except OSError as exc:
+            print("[VIDEO] could not write build report: %s" % exc)
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+    if not report.get("ok"):
+        return ("*%s* could not be built.\n```%s```\nNothing was published "
+                "and the storyboard is unchanged."
+                % (report.get("feature_name", "This video"),
+                   str(report.get("error", "unknown error"))[:1200]))
+
+    lines = ["*%s* is built. :white_check_mark:"
+             % report.get("feature_name", "Your video"), ""]
+    if report.get("runtime"):
+        lines.append("_%.0f seconds, %d formats._"
+                     % (report["runtime"], len(report.get("outputs", []))))
+    if report.get("folder"):
+        lines.append("Folder: `vome-studio/%s`" % report["folder"])
+    lines.append("")
+    for o in report.get("outputs", []):
+        lines.append("*%s*  `%s`" % (o["aspect"], o["path"].rsplit("/", 1)[-1]))
+        lines.append("    %s  (%.1f MB)" % (o.get("where", ""),
+                                            o.get("bytes", 0) / 1e6))
+    for w in report.get("warnings", []):
+        lines.append(":warning: %s" % w)
+    return "\n".join(lines)

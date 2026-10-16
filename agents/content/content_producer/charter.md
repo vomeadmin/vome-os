@@ -27,6 +27,9 @@ whose words are already large on screen gets no caption; duplicating it is
 noise. Mark a line `"stack": true` when its chunks should build up underneath
 each other rather than replace each other.
 
+**Set `id`** to a lower-case slug of the feature, like
+`recruitment-workflows`. It names the render folder and every output file.
+
 **Never write a timing.** Studio measures the real voice and derives every
 one. A storyboard with a timestamp in it is wrong.
 

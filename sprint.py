@@ -148,6 +148,29 @@ def _pull_page(offset: int) -> list[dict]:
     return data
 
 
+def resolve_ticket(ticket: str) -> dict | None:
+    """The queue row for a ticket given by number or by internal id.
+
+    People type the number they see in Zoho (9500). `getTicket` only takes
+    the internal id (569440000043050400) and answers a number with
+    URL_NOT_FOUND, which used to reach the agent as an empty ticket. Internal
+    ids are long, numbers are short, so a short value is looked up first.
+    """
+    if len(ticket) > 10:
+        return {"id": ticket, "ticketNumber": ticket}
+    result = _zoho_desk_call(
+        "ZohoDesk_searchTickets",
+        {"query_params": {"ticketNumber": [ticket], "limit": 1}},
+    )
+    payload = _unwrap_mcp_result(result) if result else None
+    data = payload.get("data") if isinstance(payload, dict) else payload
+    if isinstance(data, dict):
+        data = data.get("data")
+    if isinstance(data, list) and data:
+        return data[0]
+    return None
+
+
 def _last_activity(row: dict) -> str:
     """When anything last happened on this ticket. Sorts as an ISO string."""
     return str(
@@ -301,7 +324,11 @@ def render_card(number: str, subject: str, account: str, card: dict) -> str:
 
 def run(limit: int, ticket: str = "", out_path: str = "") -> int:
     if ticket:
-        rows = [{"id": ticket, "ticketNumber": ticket}]
+        row = resolve_ticket(ticket)
+        if not row:
+            print(f"Could not find ticket {ticket} in Zoho. Nothing was triaged.")
+            return 1
+        rows = [row]
     else:
         print("Pulling the queue...")
         try:
