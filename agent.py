@@ -339,12 +339,7 @@ def _extract_ticket_fields(raw_result: dict) -> dict:
         or ""
     )
 
-    # CC list — Zoho returns as a comma-separated string or a list
-    raw_cc = ticket.get("cc", "") or ""
-    if isinstance(raw_cc, list):
-        cc_email = ",".join(raw_cc)
-    else:
-        cc_email = raw_cc
+    cc_email = _ticket_cc_emails(ticket, exclude=contact_email)
 
     # Origin signals — distinguish a client-submitted ticket (inbound email /
     # web form) from one an agent created by hand inside Zoho Desk. Zoho marks
@@ -363,6 +358,82 @@ def _extract_ticket_fields(raw_result: dict) -> dict:
         "channel": ticket.get("channel", "") or "",
         "source_type": source_type,
     }
+
+
+def _is_own_address(email: str) -> bool:
+    """True for addresses that are Vome's own (team inboxes, the Zoho Desk
+    support alias). Copying those on a client reply only loops mail back."""
+    email = email.strip().lower()
+    return (
+        email in TEAM_EMAILS
+        or email == ZOHO_FROM_ADDRESS.lower()
+        or email.endswith(("@vomevolunteer.com", "@vomevolunteer.co",
+                           "@vomevolunteer.zohodesk.com"))
+    )
+
+
+def _fetch_contact_email(contact_id: str) -> str:
+    """Resolve a Zoho Desk contact id to its email, or "" on any failure."""
+    result = _zoho_desk_call("ZohoDesk_getContact", {
+        "path_variables": {"contactId": str(contact_id)},
+        "query_params": {"orgId": str(ZOHO_ORG_ID)},
+    })
+    data = _unwrap_mcp_result(result) if result else None
+    if isinstance(data, dict) and isinstance(data.get("data"), dict):
+        data = data["data"]
+    if not isinstance(data, dict):
+        print(f"[CC] Could not resolve secondary contact {contact_id}")
+        return ""
+    return (data.get("email") or "").strip()
+
+
+def _ticket_cc_emails(ticket: dict, exclude: str = "") -> str:
+    """Comma-separated CC list for a client reply on this ticket.
+
+    The address a client types into the portal's CC box is NOT on the ticket
+    as a ``cc`` field (getTicket has no such key). Zoho stores it as a
+    secondary contact, a list of contact ids under ``secondaryContacts``.
+    Replies sent from the Zoho UI copy secondary contacts automatically;
+    ``sendReply`` over the API does not, so every Vic reply silently dropped
+    them (ticket #9313, Kimberly Crest). Resolve each id to its email here.
+
+    The legacy ``cc`` key is still honoured in case Zoho ever returns it.
+    Vome's own addresses and the primary contact are left out.
+    """
+    candidates: list[str] = []
+    raw_cc = ticket.get("cc") or ""
+    if isinstance(raw_cc, list):
+        candidates.extend(str(c) for c in raw_cc)
+    else:
+        candidates.extend(str(raw_cc).split(","))
+    for contact_id in ticket.get("secondaryContacts") or []:
+        if contact_id:
+            candidates.append(_fetch_contact_email(str(contact_id)))
+
+    seen = {(exclude or "").strip().lower()}
+    emails: list[str] = []
+    for raw in candidates:
+        # Strip a display-name wrapper: '"Janet" <janet@x.com>' -> janet@x.com
+        match = re.search(r"[^\s<>\"',]+@[^\s<>\"',]+", raw or "")
+        if not match:
+            continue
+        email = match.group(0)
+        key = email.lower()
+        if key in seen or _is_own_address(email):
+            continue
+        seen.add(key)
+        emails.append(email)
+    return ",".join(emails)
+
+
+def fetch_ticket_cc(ticket_id: str) -> str:
+    """CC list for a client reply, for send paths that do not already hold
+    the ticket fields. Returns "" when the ticket cannot be fetched, so a
+    lookup failure never blocks the reply itself."""
+    raw = fetch_ticket_from_zoho(ticket_id)
+    if not raw:
+        return ""
+    return _extract_ticket_fields(raw).get("cc_email", "")
 
 
 def _is_agent_created(source_type: str) -> bool:
@@ -1163,14 +1234,18 @@ def _run_auth_bypass(email: str) -> dict | None:
 
 def _send_auth_reply(ticket_id: str, to_email: str, content: str) -> None:
     """Send an auth-specific reply via ZohoDesk email."""
+    body = {
+        "channel": "EMAIL",
+        "fromEmailAddress": ZOHO_FROM_ADDRESS,
+        "to": to_email,
+        "content": content,
+        "contentType": "plainText",
+    }
+    cc_email = fetch_ticket_cc(ticket_id)
+    if cc_email:
+        body["cc"] = cc_email
     _zoho_desk_call("ZohoDesk_sendReply", {
-        "body": {
-            "channel": "EMAIL",
-            "fromEmailAddress": ZOHO_FROM_ADDRESS,
-            "to": to_email,
-            "content": content,
-            "contentType": "plainText",
-        },
+        "body": body,
         "path_variables": {"ticketId": str(ticket_id)},
         "query_params": {"orgId": str(ZOHO_ORG_ID)},
     })
@@ -1354,8 +1429,11 @@ def send_auto_acknowledgment(
     client_tier: str,
     detected_lang: str | None,
     has_attachments: bool = False,
+    cc_email: str | None = None,
 ) -> bool:
     """Send an immediate auto-acknowledgment reply to the client.
+
+    ``cc_email`` None means "not known yet": it is looked up from the ticket.
 
     Picks a random template, optionally appends info-request for
     low/medium tier clients with sparse tickets.
@@ -1416,14 +1494,19 @@ def send_auto_acknowledgment(
     # If more details are needed, Sam handles that in a manual reply.
 
     # LIVE: Send reply to client via email
+    send_body = {
+        "channel": "EMAIL",
+        "fromEmailAddress": ZOHO_FROM_ADDRESS,
+        "to": contact_email,
+        "content": reply,
+        "contentType": "plainText",
+    }
+    if cc_email is None:
+        cc_email = fetch_ticket_cc(ticket_id)
+    if cc_email:
+        send_body["cc"] = cc_email
     result = _zoho_desk_call("ZohoDesk_sendReply", {
-        "body": {
-            "channel": "EMAIL",
-            "fromEmailAddress": ZOHO_FROM_ADDRESS,
-            "to": contact_email,
-            "content": reply,
-            "contentType": "plainText",
-        },
+        "body": send_body,
         "path_variables": {"ticketId": str(ticket_id)},
         "query_params": {"orgId": str(ZOHO_ORG_ID)},
     })
@@ -1663,6 +1746,7 @@ def _email_completeness_gate(
     contact_name: str,
     detected_lang: str | None = None,
     has_attachments: bool = False,
+    cc_email: str | None = None,
 ) -> bool:
     """Check if an email ticket has enough context to process.
 
@@ -1751,14 +1835,19 @@ def _email_completeness_gate(
         )
 
     # Send the reply
+    send_body = {
+        "channel": "EMAIL",
+        "fromEmailAddress": ZOHO_FROM_ADDRESS,
+        "to": contact_email,
+        "content": reply,
+        "contentType": "plainText",
+    }
+    if cc_email is None:
+        cc_email = fetch_ticket_cc(ticket_id)
+    if cc_email:
+        send_body["cc"] = cc_email
     result = _zoho_desk_call("ZohoDesk_sendReply", {
-        "body": {
-            "channel": "EMAIL",
-            "fromEmailAddress": ZOHO_FROM_ADDRESS,
-            "to": contact_email,
-            "content": reply,
-            "contentType": "plainText",
-        },
+        "body": send_body,
         "path_variables": {"ticketId": str(ticket_id)},
         "query_params": {"orgId": str(ZOHO_ORG_ID)},
     })
@@ -1806,6 +1895,7 @@ def process_ticket(ticket_data: dict) -> str | None:
         fields = _extract_ticket_fields(zoho_ticket)
         contact_name = fields["contact_name"]
         contact_email = fields["contact_email"]
+        cc_email = fields["cc_email"]
         subject = fields["subject"]
         body = fields["description"]
         extra_context = (
@@ -1824,6 +1914,7 @@ def process_ticket(ticket_data: dict) -> str | None:
         # Fall back to webhook payload
         contact_name = ticket_data.get("contact_name", "")
         contact_email = ticket_data.get("contact_email", "")
+        cc_email = None  # unknown; each sender looks it up at send time
         subject = ticket_data.get("subject", "")
         body = ticket_data.get("body", "")
         extra_context = ""
@@ -1931,6 +2022,7 @@ def process_ticket(ticket_data: dict) -> str | None:
             contact_name=contact_name,
             detected_lang=detected_lang,
             has_attachments=attachment_info["has_attachments"],
+            cc_email=cc_email,
         ):
             return "parked_incomplete"
 
@@ -2082,6 +2174,7 @@ def process_ticket(ticket_data: dict) -> str | None:
                 has_attachments=attachment_info[
                     "has_attachments"
                 ],
+                cc_email=cc_email,
             )
         else:
             if agent_created:

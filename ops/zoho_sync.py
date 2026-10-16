@@ -14,6 +14,7 @@ from agent import (
     ZOHO_ORG_ID,
     _zoho_desk_call,
     _unwrap_mcp_result,
+    fetch_ticket_cc,
     fetch_ticket_from_zoho,
     fetch_ticket_conversations,
 )
@@ -118,8 +119,17 @@ def set_zoho_owner(ticket_id: str, assignee_id: str) -> bool:
     return True
 
 
-def send_zoho_reply(ticket_id: str, content: str, to_email: str = "") -> dict | None:
-    """Send an email reply via Zoho Desk (actually emails the client)."""
+def send_zoho_reply(
+    ticket_id: str,
+    content: str,
+    to_email: str = "",
+    cc_email: str | None = None,
+) -> dict | None:
+    """Send an email reply via Zoho Desk (actually emails the client).
+
+    ``cc_email`` None means "look it up": the ticket's CC'd secondary contacts
+    are copied, as a reply from the Zoho UI would. Pass "" to send to no CC.
+    """
     body = {
         "channel": "EMAIL",
         "fromEmailAddress": ZOHO_FROM_ADDRESS,
@@ -128,6 +138,10 @@ def send_zoho_reply(ticket_id: str, content: str, to_email: str = "") -> dict | 
     }
     if to_email:
         body["to"] = to_email
+    if cc_email is None:
+        cc_email = fetch_ticket_cc(ticket_id)
+    if cc_email:
+        body["cc"] = cc_email
 
     result = _zoho_desk_call("ZohoDesk_sendReply", {
         "body": body,
