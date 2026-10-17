@@ -330,7 +330,9 @@ def concepts_post(concepts: list[dict], feature_name: str = "",
         if _seconds(c.get("seconds")):
             meta.append(_seconds(c.get("seconds")))
         if c.get("purpose"):
-            meta.append("for %s" % _esc(c["purpose"]))
+            # The line ends in its own period; a purpose that brings one
+            # printed "reassurance.." in the first real post.
+            meta.append("for %s" % _esc(str(c["purpose"]).rstrip(" .")))
         lines.append("_%s._" % ", ".join(meta))
         lines.append("Hook: \"%s\"" % _esc(c.get("hook")))
         for beat in c.get("beats") or []:
