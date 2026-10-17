@@ -48,22 +48,52 @@ STUDIO_DIR = os.environ.get(
     r"C:\Users\sfage\Projects\Vome\vome-studio",
 )
 
-# Matched on the whole message, lowercased. Deliberately a short list of
-# unambiguous instructions. Anything not on it is treated as a note on the
-# script, which is the safe direction to be wrong in: the cost of asking
-# again is one message, the cost of building early is real money.
+# Matched on the WHOLE message, lowercased, after a little politeness is
+# trimmed ("ok, go build the video please"). Deliberately a short list of
+# unambiguous instructions. Anything else is a note on the script, which is
+# the safe direction to be wrong in: the cost of asking again is one
+# message, the cost of building early is real money.
+#
+# It used to match these phrases anywhere in a message, and "make it" was
+# on the list. On 2026-10-17 Sammy posted three paragraphs of notes that
+# began "In the opener hook make it clear that...", and the bot built the
+# rejected script, spent the credits, and never read the notes.
 GREENLIGHT = (
     "go build the video",
     "go build it",
+    "go build",
     "build the video",
     "build it",
     "ship it",
     "approve",
     "approved",
+    "approve it",
+    "approve the script",
     "greenlight",
     "green light",
-    "make it",
 )
+
+# Politeness around an approval, trimmed before the whole-message match.
+_LEAD = re.compile(
+    r"^(?:(?:ok|okay|great|perfect|yes|yep|lgtm|looks good|love it|"
+    r"all good|good to go|thanks|thank you|please|let'?s)[,.!]*\s+)+")
+_TAIL = re.compile(r"(?:[,.!]*\s+(?:please|thanks|thank you|now))+[.!]*$")
+
+
+def is_greenlight(text: str) -> bool:
+    """True only when the whole message is an approval."""
+    body = re.sub(r"<[^>]+>", " ", text or "")        # Slack mentions
+    body = re.sub(r"\s+", " ", body).strip().lower()
+    body = _LEAD.sub("", body)
+    body = _TAIL.sub("", body)
+    return body.strip(" ,.!") in GREENLIGHT
+
+
+def mentions_approval(text: str) -> bool:
+    """An approval word inside a longer message: it is a note, and the
+    person is told so, so nobody wonders why nothing was built."""
+    body = " %s " % re.sub(r"[^a-z' ]+", " ", (text or "").lower())
+    return any(" %s " % p in body for p in GREENLIGHT)
 
 # Phrases that LOOK like approval and are not. Checked first, because
 # "approve" appears inside "do not approve yet" and matching that as a
@@ -91,7 +121,7 @@ def classify(text: str, thread_state: str | None) -> str:
     """What this message is asking for.
 
     new | pick | direction | busy | pick_first | note | greenlight | forget
-    | ignore
+    | script_pending | ignore
 
     `thread_state` is what we already know about this thread, and it matters:
     the same words mean different things at different points. "Go build it"
@@ -116,7 +146,7 @@ def classify(text: str, thread_state: str | None) -> str:
     if thread_state == video_threads.STATE_AWAITING_CONCEPT:
         if video_concepts.match_concept_pick(text) is not None:
             return "pick"
-        if body.strip(" .!") in GREENLIGHT:
+        if is_greenlight(text):
             return "pick_first"
         return "direction"
 
@@ -126,15 +156,14 @@ def classify(text: str, thread_state: str | None) -> str:
     if any(p in body for p in NOT_GREENLIGHT):
         return "note"
 
-    is_greenlight = any(
-        body == p or body.startswith(p + " ") or body.startswith(p + "!")
-        or body.startswith(p + ".") or (" " + p + " ") in (" " + body + " ")
-        for p in GREENLIGHT
-    )
-    if is_greenlight:
+    if is_greenlight(text):
         # Approving something that does not exist yet.
         if thread_state in (None, video_threads.STATE_IDEA):
             return "new"
+        # A script is being rewritten: the approval would build the version
+        # being replaced. The person approves the one they have read.
+        if thread_state == video_threads.STATE_DRAFTING:
+            return "script_pending"
         return "greenlight"
 
     # No thread yet, or a thread where nothing came of the first attempt
@@ -253,7 +282,19 @@ def handle_video_studio_message(event: dict) -> None:
         ).start()
         return
 
+    if intent == "script_pending":
+        _ack(thread_ts,
+             "Hold on, I am still updating the script. Approve it once you "
+             "have read the new version, and nothing is built before then.")
+        return
+
     if intent == "note":
+        if mentions_approval(text):
+            # Approval words inside notes: say plainly which way it went.
+            _ack(thread_ts,
+                 "I read this as notes, not approval, so nothing is being "
+                 "built. Updating the script now. When you are happy with it, "
+                 "reply with just: go build the video")
         video_threads.update(thread_ts, state=video_threads.STATE_DRAFTING)
         threading.Thread(
             target=_revise_script, args=(thread_ts, text), daemon=True

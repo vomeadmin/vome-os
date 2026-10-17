@@ -147,3 +147,51 @@ def test_forget_that_is_an_undo_in_any_state(handler, text):
     "I forgot that the shift block exists"])
 def test_a_note_containing_the_words_is_not_an_undo(handler, text):
     assert handler.classify(text, "awaiting_review") != "forget"
+
+
+# ----------------------------------- approval is the whole message, only
+
+SAMMYS_NOTE = (
+    "Here are a few notes\n\nIn the opener hook make it clear that we're "
+    "sending volunteer emails or we're using volunteer email campaigns or "
+    "something like that. Specify that our target audience is volunteer "
+    "managers sending out volunteer communication. Vome offers a complete "
+    "email integration module where they can integrate their domain, send "
+    "and schedule emails from their personal account, and customise it to "
+    "build complete newsletters. Then it's just simple: preview it, "
+    "indicate who you're sending it to, and send. This is the concept to "
+    "take forward... use that angle")
+
+
+def test_notes_that_contain_make_it_are_notes(handler):
+    """2026-10-17: these notes began 'make it clear that', the old matcher
+    found 'make it' inside them, and the rejected script was built and paid
+    for while the notes went unread."""
+    assert handler.classify(SAMMYS_NOTE, "awaiting_review") == "note"
+    assert not handler.is_greenlight(SAMMYS_NOTE)
+
+
+@pytest.mark.parametrize("text", [
+    "go build the video", "Go build the video.", "approve", "approved!",
+    "ship it", "ok, go build it", "looks good, go build the video",
+    "great, approve it please", "<@U123> go build the video",
+    "build it now", "lgtm, ship it"])
+def test_a_whole_message_approval_builds(handler, text):
+    assert handler.classify(text, "awaiting_review") == "greenlight"
+
+
+@pytest.mark.parametrize("text", [
+    "make it shorter", "make it about volunteers", "build it from blocks",
+    "approve the hook but change the ending",
+    "I'd approve this if the hook said volunteer",
+    "can you build it so the context comes first?",
+    "ship it once the CTA says volunteer"])
+def test_approval_words_inside_a_note_are_a_note(handler, text):
+    assert handler.classify(text, "awaiting_review") == "note"
+    assert handler.mentions_approval(text) or "make it" in text
+
+
+def test_approval_while_the_script_is_being_rewritten_waits(handler):
+    """Approving during a rewrite would build the version being replaced."""
+    assert handler.classify("go build the video", "drafting") == \
+        "script_pending"
