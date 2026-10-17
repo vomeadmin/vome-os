@@ -41,7 +41,9 @@ STUDIO_PY = os.environ.get("VOME_STUDIO_PYTHON", sys.executable)
 BUILD_TIMEOUT = int(os.environ.get("VOME_STUDIO_BUILD_TIMEOUT", "1800"))
 
 # A help-centre link in the brief names the exact article to read.
-FAQ_URL = re.compile(r"https?://\S*(?:kb|support|faq)\S*", re.I)
+# Stops at "|" and ">": Slack sends a pasted link as <url|label>, and
+# matching to the next space captured the label and a ">" with it.
+FAQ_URL = re.compile(r"https?://[^\s|<>]*(?:kb|support|faq)[^\s|<>]*", re.I)
 
 
 def _studio() -> "object | None":
@@ -206,6 +208,8 @@ def _faq_text(row: dict, brief: str) -> tuple[str, str]:
         m = FAQ_URL.search(brief or "")
         url = m.group(0) if m else ""
 
+    # Rows saved before the pattern was fixed carry "|label>" on the end.
+    url = re.split(r"[|<>]", url)[0]
     if url:
         permalink = url.rstrip("/").rsplit("/", 1)[-1]
         try:
@@ -216,6 +220,11 @@ def _faq_text(row: dict, brief: str) -> tuple[str, str]:
             article = None
         if article and (article.get("body") or "").strip():
             return article.get("title", ""), article["body"]
+        # A link was given and it is not in our copy, usually because it was
+        # published after the nightly sync. Searching instead found "How do
+        # the Vome API and webhooks work?" for an email format article on the
+        # first live run. No article beats the wrong one.
+        return "", ""
 
     query = (row.get("feature_name") or brief or "").strip()
     if not query:
@@ -285,6 +294,49 @@ def _write_storyboard(sb: dict) -> str:
     return slug
 
 
+def _contract() -> dict | None:
+    """Studio's storyboard contract: schema, worked example, required cues."""
+    conn = _studio()
+    if conn is not None:
+        res = conn.contract()
+        return res.data if res.ok and isinstance(res.data, dict) else None
+    if _local_studio():
+        out = _studio_json(["-c", "import json, sys; sys.path.insert(0, "
+                                  "'scripts'); import storyboard; "
+                                  "print(json.dumps(storyboard.contract()))"])
+        return out if out.get("example") else None
+    return None
+
+
+def _claim_fresh_id(sb: dict, contract: dict, thread_ts: str) -> None:
+    """Give a new draft an id no other video is using.
+
+    Drafting the pilot's own feature, the agent chose `recruitment-workflows`
+    and saving it overwrote the approved storyboard. A taken id gets today's
+    date, and the reviewer is told why, so revising the existing video stays
+    a deliberate choice made in its own thread.
+    """
+    slug = sb.get("id") or _slugify(sb.get("feature_name", ""))
+    taken = set(video_threads.slugs_in_use(thread_ts))
+    taken.add(((contract or {}).get("example") or {}).get("id", ""))
+    folder = os.path.join(_local_studio() or "", "storyboards")
+    if _local_studio() and os.path.isdir(folder):
+        taken.update(n[:-5] for n in os.listdir(folder) if n.endswith(".json"))
+    if slug not in taken:
+        sb["id"] = slug
+        return
+    fresh = "%s-%s" % (slug, time.strftime("%Y%m%d"))
+    n = 2
+    while fresh in taken:
+        fresh = "%s-%s-%d" % (slug, time.strftime("%Y%m%d"), n)
+        n += 1
+    note = ("A video called %s already exists, so this draft is saved as %s "
+            "and cannot overwrite it. To change that video instead, reply in "
+            "its own thread." % (slug, fresh))
+    sb["review_notes"] = (note + " " + sb.get("review_notes", "")).strip()
+    sb["id"] = fresh
+
+
 def _remember_storyboard(thread_ts: str, sb: dict) -> None:
     """Keep the whole storyboard on the thread row.
 
@@ -309,6 +361,15 @@ def run_content_producer(message: str, row: dict, revise: bool = False) -> dict:
     """
     title, body = _faq_text(row, message)
     if not body.strip() and not revise:
+        if row.get("faq_url") or FAQ_URL.search(message or ""):
+            return {
+                "ok": False,
+                "error": ("I could not find that article in my copy of the "
+                          "help centre. New articles reach it in the nightly "
+                          "sync at 2am Eastern, so a brand new one will not "
+                          "be there yet. Once it is synced, ask again in "
+                          "this thread."),
+            }
         return {
             "ok": False,
             "error": ("I could not find the FAQ for this one. Paste the help "
@@ -316,7 +377,9 @@ def run_content_producer(message: str, row: dict, revise: bool = False) -> dict:
         }
 
     context = {
-        "feature_name": row.get("feature_name") or title or "",
+        # The article's own title over the thread's label, which is just
+        # the first line of the Slack message ("I have a new video idea...").
+        "feature_name": title or row.get("feature_name") or "",
         "faq_text": body,
         "brief": message,
     }
@@ -327,6 +390,16 @@ def run_content_producer(message: str, row: dict, revise: bool = False) -> dict:
                     "error": "the storyboard file for this thread is missing"}
         context["existing_storyboard"] = json.dumps(existing, indent=2)
         context["change_requested"] = message
+
+    # The agent is shown the real format, from Studio, not told about it.
+    # Told "match Studio's schema" with no schema, it guessed every field
+    # name on its first live run.
+    contract = _contract()
+    if not contract or not contract.get("example"):
+        return {"ok": False,
+                "error": ("I could not get the storyboard format from Vome "
+                          "Studio, so I did not guess at it.")}
+    context["storyboard_contract"] = json.dumps(contract, indent=2)
 
     try:
         from vomeos.runner import run_agent
@@ -358,6 +431,8 @@ def run_content_producer(message: str, row: dict, revise: bool = False) -> dict:
     # folder and orphan every earlier version of this video.
     if revise and row.get("storyboard"):
         storyboard["id"] = row["storyboard"]
+    elif not revise:
+        _claim_fresh_id(storyboard, contract, row.get("thread_ts", ""))
 
     try:
         slug = _write_storyboard(storyboard)

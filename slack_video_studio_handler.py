@@ -64,7 +64,9 @@ NOT_GREENLIGHT = (
     "before you build", "don't approve", "do not approve", "not approved",
 )
 
-FAQ_URL = re.compile(r"https?://\S*(?:kb|support|faq)\S*", re.I)
+# Stops at "|" and ">": Slack sends a pasted link as <url|label>, and
+# matching to the next space captured the label and a ">" with it.
+FAQ_URL = re.compile(r"https?://[^\s|<>]*(?:kb|support|faq)[^\s|<>]*", re.I)
 
 
 def classify(text: str, thread_state: str | None) -> str:

@@ -17,14 +17,22 @@ hired = "2026-10-15"
 # that runs on every production error, so paying junior rates here would save
 # almost nothing and risk the one thing that is expensive to fix.
 tier = "senior"
-max_tokens = 4000
+# A full storyboard is about 2,500 tokens of JSON, but the senior model
+# reasons first and that counts against this cap too. At 8000 the first real
+# run was cut off 6,000 characters into the JSON. Above 16000 the runner
+# streams, which is what a call this size needs.
+max_tokens = 20000
 
 [job]
 charter = "charter.md"
-skills = []
+skills = ["writing-a-vome-storyboard"]
 requires_context = [
     "feature_name",
     "faq_text",
+    # From Studio: the schema, an approved storyboard to copy the shape of,
+    # and the cue names the animation needs. Required so the agent can never
+    # run without it and guess, which is what the first live run did.
+    "storyboard_contract",
 ]
 output = "json"
 
@@ -48,8 +56,9 @@ output = ["json_shape", "non_empty"]
 client_facing = false
 
 [limits]
-# A storyboard is one careful pass over an FAQ, not a conversation.
-timeout_seconds = 180
+# A storyboard is one careful pass over an FAQ, not a conversation. But it
+# is a long one: the contract plus the FAQ in, reasoning, then the JSON out.
+timeout_seconds = 300
 max_retries = 2
 
 [approval]

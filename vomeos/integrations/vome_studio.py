@@ -79,6 +79,16 @@ class VomeStudio(Connector):
     # Operations. One method per thing the OS is allowed to ask for.
     # -----------------------------------------------------------------
 
+    def contract(self) -> IntegrationResult:
+        """What a storyboard must look like, from Studio itself.
+
+        `{"schema", "example", "required_cues", "templates"}`. The example is
+        an approved storyboard: each template draws one specific mock, so a
+        new storyboard keeps its structure and `on_screen` keys and changes
+        the words and mock content. Free.
+        """
+        return self._call("contract", "GET", "/v1/contract")
+
     def validate(self, storyboard: dict) -> IntegrationResult:
         """Check a storyboard and estimate its runtime. Builds nothing.
 

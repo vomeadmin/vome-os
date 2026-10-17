@@ -27,6 +27,19 @@ def jobs():
     return j
 
 
+CONTRACT = {"schema": {}, "example": {"id": "x", "scenes": []},
+            "required_cues": ["card_in"], "templates": ["hook"]}
+
+
+@pytest.fixture(autouse=True)
+def _contract(jobs, monkeypatch):
+    """Studio's contract, so the agent wiring tests reach the agent. And no
+    database: unit tests must never ask production which ids are taken."""
+    monkeypatch.setattr(jobs, "_contract", lambda: dict(CONTRACT))
+    monkeypatch.setattr(jobs.video_threads, "slugs_in_use",
+                        lambda exclude="": set())
+
+
 ARTICLE_URL = ("https://support.vomevolunteer.com/portal/en/kb/articles/"
                "recruitment-workflows-on-vome")
 
@@ -61,6 +74,22 @@ def test_url_is_found_in_a_free_text_brief(jobs, monkeypatch):
     title, body = jobs._faq_text(
         {}, "can we do a video on this %s please" % ARTICLE_URL)
     assert (title, body) == ("T", "B")
+
+
+def test_a_link_that_misses_is_not_replaced_by_search(jobs, monkeypatch):
+    """A new article is not in the nightly copy yet. Searching instead
+    drafted from "How do the Vome API and webhooks work?" on the first live
+    run, for an article about email formats."""
+    import database
+    monkeypatch.setattr(database, "get_kb_article_by_permalink",
+                        lambda p: None, raising=False)
+    monkeypatch.setattr(
+        database, "search_kb_articles_db",
+        lambda q, **k: pytest.fail("searched despite a pasted link"),
+        raising=False)
+    assert jobs._faq_text({"faq_url": ARTICLE_URL}, "") == ("", "")
+    out = jobs.run_content_producer("video please", {"faq_url": ARTICLE_URL})
+    assert out["ok"] is False and "nightly" in out["error"]
 
 
 def test_falls_back_to_search_without_a_link(jobs, monkeypatch):
@@ -310,3 +339,78 @@ def test_build_without_a_storyboard_sends_nothing(jobs, monkeypatch):
     jobs.build_video("1.2")
     assert conn.built == []
     assert posted and "lost the script" in posted[0]
+
+
+# ------------------------------------------------------------ the contract
+
+def test_agent_is_given_the_real_format(jobs, monkeypatch):
+    """Told to "match Studio's schema" with no schema, the first live run
+    guessed every field name. It must be handed the contract."""
+    _use_http(jobs, monkeypatch, _Conn())
+    monkeypatch.setattr(jobs, "_faq_text", lambda r, m: ("T", "body"))
+    monkeypatch.setattr(jobs.video_threads, "update", lambda *a, **k: None)
+    seen = {}
+
+    def run_agent(name, context, **k):
+        seen.update(context)
+        return _Result("ok", data=dict(STORYBOARD))
+    import vomeos.runner as runner
+    monkeypatch.setattr(runner, "run_agent", run_agent)
+    jobs.run_content_producer("brief", {"thread_ts": "1.2"})
+    assert '"required_cues"' in seen["storyboard_contract"]
+
+
+def test_no_contract_means_no_guessing(jobs, monkeypatch):
+    monkeypatch.setattr(jobs, "_contract", lambda: None)
+    monkeypatch.setattr(jobs, "_faq_text", lambda r, m: ("T", "body"))
+    import vomeos.runner as runner
+    monkeypatch.setattr(runner, "run_agent",
+                        lambda *a, **k: pytest.fail("agent must not run"))
+    out = jobs.run_content_producer("brief", {"feature_name": "Kiosk"})
+    assert out["ok"] is False and "format" in out["error"]
+
+
+# ---------------------------------------------------------- slack link markup
+
+SLACK_MSG = ("I have a new video idea from a featrure we just went live with."
+             "\n\n<https://support.vomevolunteer.com/portal/en/kb/articles/"
+             "choosing-an-email-format-basic-designed-custom-html|"
+             "support.vomevolunteer.com/portal/…/choosing-an-email-format>")
+
+
+def test_slack_link_markup_is_not_part_of_the_url(jobs):
+    """Slack sends <url|label>. The first live run stored the label and a
+    trailing ">" as part of the URL, so the permalink lookup missed."""
+    url = jobs.FAQ_URL.search(SLACK_MSG).group(0)
+    assert url.endswith("choosing-an-email-format-basic-designed-custom-html")
+
+
+def test_stored_url_with_markup_still_finds_the_article(jobs, monkeypatch):
+    import database
+    seen = []
+    monkeypatch.setattr(database, "get_kb_article_by_permalink",
+                        lambda p: seen.append(p) or {"title": "T", "body": "b"})
+    bad = ("https://support.vomevolunteer.com/portal/en/kb/articles/"
+           "choosing-an-email-format|support.vomevolunteer.com/x>")
+    jobs._faq_text({"faq_url": bad}, "")
+    assert seen == ["choosing-an-email-format"]
+
+
+def test_new_draft_never_takes_an_existing_videos_id(jobs, monkeypatch):
+    """Drafting the pilot's feature, the agent chose its id and the save
+    overwrote the approved storyboard."""
+    monkeypatch.setattr(jobs, "_local_studio", lambda: "")
+    monkeypatch.setattr(jobs.video_threads, "slugs_in_use",
+                        lambda exclude="": {"kiosk-check-in"})
+    sb = dict(STORYBOARD)
+    jobs._claim_fresh_id(sb, CONTRACT, "1.2")
+    assert sb["id"].startswith("kiosk-check-in-") and sb["id"] != "kiosk-check-in"
+    assert "already exists" in sb["review_notes"]
+
+    pilot = dict(STORYBOARD, id="x")          # the contract example's id
+    jobs._claim_fresh_id(pilot, CONTRACT, "1.2")
+    assert pilot["id"] != "x"
+
+    free = dict(STORYBOARD, id="brand-new")
+    jobs._claim_fresh_id(free, CONTRACT, "1.2")
+    assert free["id"] == "brand-new" and "review_notes" not in free

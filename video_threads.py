@@ -123,6 +123,23 @@ def update(thread_ts: str, **fields) -> None:
         )
 
 
+def slugs_in_use(exclude_thread: str = "") -> set[str]:
+    """Storyboard ids claimed by other threads.
+
+    A new thread must not reuse one: its draft would overwrite that video's
+    storyboard and its build would publish into that video's folder.
+    """
+    if not DATABASE_URL:
+        return set()
+    with _get_engine().begin() as conn:
+        rows = conn.execute(
+            text("SELECT storyboard FROM video_threads "
+                 "WHERE storyboard <> '' AND thread_ts <> :t"),
+            {"t": exclude_thread or ""},
+        ).all()
+    return {r[0] for r in rows}
+
+
 def bump_round(thread_ts: str) -> int:
     """Count a round of review. Returned so a post can say which one it is."""
     if not DATABASE_URL:
