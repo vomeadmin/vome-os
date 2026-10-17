@@ -44,6 +44,8 @@ import time
 
 import httpx
 
+from zoho_links import extract_zoho_ticket_id
+
 CLICKUP_API_TOKEN = os.environ.get("CLICKUP_API_TOKEN", "")
 CLICKUP_BASE = "https://api.clickup.com/api/v2"
 
@@ -108,6 +110,7 @@ def _fetch_list(list_id: str, name: str) -> list[dict]:
                     "status": (task.get("status") or {}).get("status", ""),
                     "list": name,
                     "url": task.get("url", ""),
+                    "zoho_ticket_id": extract_zoho_ticket_id(task) or "",
                 })
             if body.get("last_page") or len(batch) < 100:
                 break
@@ -178,3 +181,107 @@ def describe_matches(query: str, limit: int = 5) -> str:
             f"status: {task['status']} ({shipped})"
         )
     return "\n".join(lines)
+
+
+# Words in a CRM account name that never appear in how the team names a task
+# ("Sarasota County Government" is filed as "Sarasota County -- ...").
+_ACCOUNT_NOISE = frozenset(
+    """
+    government inc llc ltd corp corporation company foundation association
+    organization organisation society group the of and
+    """.split()
+)
+
+
+def _ticket_linked(task: dict, ticket_number: str, zoho_ticket_id: str) -> bool:
+    if zoho_ticket_id and task.get("zoho_ticket_id") == zoho_ticket_id:
+        return True
+    return bool(ticket_number) and bool(
+        re.search(rf"#{re.escape(ticket_number)}\b", task.get("name", ""))
+    )
+
+
+def _account_tokens(account: str) -> set[str]:
+    return {t for t in _tokens(account) if t not in _ACCOUNT_NOISE}
+
+
+def describe_existing_work(
+    query: str,
+    ticket_number: str = "",
+    zoho_ticket_id: str = "",
+    account: str = "",
+    limit: int = 5,
+) -> str:
+    """The `existing_tasks` block, searched the way a person searches.
+
+    Name-token overlap alone misses the commonest case. Ticket #9500 ("Forms
+    Issue") was being worked on task "[#9393] ... Form settings won't save",
+    which shares no token with the subject, and the overlap search picked an
+    unrelated 2024 feature request instead. A person looks for the ticket
+    number first, then at everything open for that customer, and only then
+    at the symptom. This does the same, in that order, and labels each group
+    so the agent can weigh a direct link above a word match.
+    """
+    if not CLICKUP_API_TOKEN:
+        return (
+            "Existing-task search did NOT run (no ClickUp token). Treat "
+            "existing work as UNKNOWN, not as none."
+        )
+    try:
+        all_tasks = [
+            task
+            for name, list_id in LISTS.items()
+            for task in _fetch_list(list_id, name)
+        ]
+        symptom = search_tasks_by_text(query, limit=limit)
+    except Exception as exc:
+        return (
+            f"Existing-task search FAILED ({exc}). Treat existing work as "
+            "UNKNOWN, not as none."
+        )
+
+    def line(task: dict) -> str:
+        shipped = task["status"].lower() in SHIPPED
+        state = "SHIPPED" if shipped else "work in flight, not a fix"
+        return (
+            f"- Task {task['id']} '{task['name']}' in {task['list']} is at "
+            f"status: {task['status']} ({state})"
+        )
+
+    seen: set[str] = set()
+    sections: list[str] = []
+
+    linked = [t for t in all_tasks if _ticket_linked(t, ticket_number, zoho_ticket_id)]
+    if linked:
+        seen.update(t["id"] for t in linked)
+        sections.append(
+            "Linked to THIS ticket (Zoho link or ticket number in the name):\n"
+            + "\n".join(line(t) for t in linked)
+        )
+
+    wanted = _account_tokens(account)
+    if wanted:
+        same_account = [
+            t for t in all_tasks
+            if t["id"] not in seen
+            and wanted <= _tokens(t["name"])
+            and t["status"].lower() not in SHIPPED
+        ]
+        if same_account:
+            seen.update(t["id"] for t in same_account)
+            sections.append(
+                "Other OPEN tasks for this same customer (check whether one "
+                "of these is already the work, e.g. a reopened earlier "
+                "ticket):\n" + "\n".join(line(t) for t in same_account[:10])
+            )
+
+    symptom = [t for t in symptom if t["id"] not in seen]
+    if symptom:
+        sections.append(
+            "Possible matches on the symptom wording only (weak evidence):\n"
+            + "\n".join(line(t) for t in symptom)
+        )
+
+    if not sections:
+        return "No existing task found for this ticket, customer or symptom (search ran cleanly)."
+    return "\n\n".join(sections)

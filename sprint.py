@@ -181,16 +181,28 @@ def _last_activity(row: dict) -> str:
     )
 
 
-def find_existing_tasks(subject: str, fields: dict) -> str:
+def find_existing_tasks(
+    subject: str,
+    fields: dict,
+    ticket_number: str = "",
+    zoho_ticket_id: str = "",
+    account: str = "",
+) -> str:
     """What the reviewer would search for before proposing new work.
 
+    Ticket number first, then the customer's open tasks, then the symptom.
     Delegates to clickup_search, which is explicit about the difference
     between "nothing found" and "we did not look".
     """
-    from clickup_search import describe_matches
+    from clickup_search import describe_existing_work
 
     query = f"{subject} {fields.get('description', '')}"
-    return describe_matches(query)
+    return describe_existing_work(
+        query,
+        ticket_number=ticket_number,
+        zoho_ticket_id=zoho_ticket_id,
+        account=account,
+    )
 
 
 def find_kb_matches(subject: str, body: str) -> str:
@@ -253,7 +265,11 @@ def build_context(ticket_row: dict) -> dict | None:
         "thread": thread or "(no readable conversation)",
         "attachments": attachments,
         "existing_tasks": find_existing_tasks(
-            fields.get("subject", ""), fields
+            fields.get("subject", ""),
+            fields,
+            ticket_number=str(ticket_row.get("ticketNumber") or ""),
+            zoho_ticket_id=str(ticket_id),
+            account=account_name,
         ),
         "kb_matches": find_kb_matches(
             fields.get("subject", ""), fields.get("description", "")

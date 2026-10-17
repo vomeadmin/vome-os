@@ -11,7 +11,9 @@ hired = "2026-09-28"
 # Everything downstream inherits its category, so an error here is an error
 # everywhere. This is the one place worth paying for the best model.
 tier = "senior"
-max_tokens = 2000
+# 3000, not 2000. A long thread (ticket #9477) ran out mid-JSON at 2000 and
+# the json_shape guard threw the whole card away. Same lesson as bug_analyst.
+max_tokens = 3000
 
 [job]
 charter = "charter.md"

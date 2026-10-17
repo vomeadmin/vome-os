@@ -1421,6 +1421,16 @@ def _handle_auth_bypass_email_ticket(
     return True
 
 
+def auto_ack_enabled() -> bool:
+    """Whether the instant new-ticket acknowledgment may send.
+
+    On unless ENABLE_AUTO_ACK is explicitly false, so deploying the flag
+    changes nothing until someone turns it off.
+    """
+    value = os.environ.get("ENABLE_AUTO_ACK", "").strip().lower()
+    return value not in ("false", "0", "off", "no")
+
+
 def send_auto_acknowledgment(
     ticket_id: str,
     contact_name: str,
@@ -2163,7 +2173,11 @@ def process_ticket(ticket_data: dict) -> str | None:
         # 4. Auto-ack: only for client-submitted tickets assigned to engineers.
         #    Skip agent-created tickets — when Sam opens a ticket on a client's
         #    behalf he controls the first reply, so no auto-ack should fire.
-        if routing["assignee_id"] and not agent_created:
+        #    ENABLE_AUTO_ACK=false switches it off once the triage agent's
+        #    Sam-approved first reply replaces it.
+        if not auto_ack_enabled():
+            print(f"Auto-ack disabled (ENABLE_AUTO_ACK) on ticket {ticket_id}")
+        elif routing["assignee_id"] and not agent_created:
             send_auto_acknowledgment(
                 ticket_id=ticket_id,
                 contact_name=contact_name,
