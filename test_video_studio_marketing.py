@@ -778,7 +778,9 @@ def test_a_new_idea_goes_to_concepts(handler, routed, monkeypatch):
          "text": "Video idea https://support.vomevolunteer.com/kb/x"})
     assert routed.started == [("_develop_concepts", (
         "5.5", "Video idea https://support.vomevolunteer.com/kb/x"))]
-    assert {"state": "concepting"} in routed.updates
+    # The first message is kept as the brief, so "start over" can reuse it.
+    assert {"state": "concepting", "brief": "Video idea "
+            "https://support.vomevolunteer.com/kb/x"} in routed.updates
     assert "three ways" in routed.acks[0]
 
 
@@ -861,3 +863,24 @@ def test_a_one_off_edit_keeps_nothing_and_says_nothing(jobs, env,
     env.real_capture("1.2", "make line 3 shorter",
                                      "script", row={})
     assert env.posts == []
+
+
+def test_start_over_sets_the_old_run_aside(jobs, env, monkeypatch):
+    """'start over, lead with automations': the rejected positioning,
+    concepts, pick and script are cleared, the thread's first brief is
+    reused (it carries 'we just went live'), and the direction goes in."""
+    calls = []
+    monkeypatch.setattr(jobs, "develop_concepts",
+                        lambda t, brief, direction="": calls.append(
+                            (brief, direction)))
+    env.row = {"thread_ts": "1.2", "brief": "New feature, just went live.",
+               "positioning_json": "{}", "concepts_json": "[]",
+               "storyboard": "x", "storyboard_json": "{}"}
+    jobs.restart_concepts("1.2", "lead with automations")
+    cleared = _merged(env.updates)
+    for k in ("positioning_json", "concepts_json", "storyboard",
+              "storyboard_json"):
+        assert cleared[k] == ""
+    assert cleared["chosen_concept"] is None
+    brief, direction = calls[0]
+    assert "just went live" in brief and direction == "lead with automations"

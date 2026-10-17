@@ -182,6 +182,26 @@ def develop_concepts(thread_ts: str, brief: str, direction: str = "") -> None:
             capture_lessons(thread_ts, direction, "concepts", row=row)
 
 
+def restart_concepts(thread_ts: str, direction: str = "") -> None:
+    """"Start over": fresh research and three new concepts, same feature.
+
+    The positioning, concepts, pick and script are set aside so nothing
+    from the rejected run steers the new one, except the person's direction
+    if they gave any (which also goes to the lesson keeper). The thread's
+    first brief is reused, so the scout still sees "we just went live".
+    """
+    row = video_threads.get(thread_ts) or {}
+    video_threads.update(thread_ts, positioning_json="", concepts_json="",
+                         chosen_concept=None, storyboard="",
+                         storyboard_json="")
+    brief = row.get("brief") or row.get("feature_name") or "this feature"
+    if direction:
+        develop_concepts(thread_ts, brief + "\n\n" + direction,
+                         direction=direction)
+    else:
+        develop_concepts(thread_ts, brief)
+
+
 def _develop(thread_ts: str, brief: str, direction: str, row: dict) -> None:
     had_concepts = bool(video_concepts.load_concepts(row))
     result = run_concepts(brief, row, direction=direction)

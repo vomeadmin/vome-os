@@ -95,6 +95,7 @@ def mentions_approval(text: str) -> bool:
     body = " %s " % re.sub(r"[^a-z' ]+", " ", (text or "").lower())
     return any(" %s " % p in body for p in GREENLIGHT)
 
+
 # Phrases that LOOK like approval and are not. Checked first, because
 # "approve" appears inside "do not approve yet" and matching that as a
 # greenlight would be the worst possible failure of this file.
@@ -112,6 +113,33 @@ FORGET = re.compile(
     r"undo that lesson|scratch that lesson|don't keep that|do not keep that)"
     r"(?:\s+lesson)?(?:,?\s+please)?[.!]*$")
 
+# Close the thread. The whole message, so a note mentioning "scrap the
+# second line" is still a note.
+SCRAP = re.compile(
+    r"^(?:<[^>]+>\s*)?(?:ok,?\s+|okay,?\s+|please\s+|let'?s\s+)?"
+    r"(?:scrap|kill|discard|abandon|bin|drop|cancel)\s+"
+    r"(?:it|this|this one|that|that one|this video|the video|this thread|"
+    r"the whole thing|all of it)(?:,?\s+please)?[.!]*$")
+
+# Fresh research and three new concepts, same feature. Anything after the
+# phrase is direction: "start over, lead with automations".
+RESTART = re.compile(
+    r"^(?:<[^>]+>\s*)?(?:ok,?\s+|okay,?\s+|please\s+|let'?s\s+)?"
+    r"(?:start (?:over|again|fresh|from scratch)|restart|from scratch|"
+    r"new concepts|back to (?:the )?concepts)"
+    r"(?:\s*(?:[,.:;!-]+\s*|\s+)(?:please[,.]?\s*)?(?:with\s+|and\s+)?"
+    r"(?P<direction>.*))?$", re.S)
+
+# A dislike with nothing to act on. Guessing a revision from it helps
+# nobody, so the person is shown their three options instead.
+VAGUE_DISLIKE = re.compile(
+    r"^(?:<[^>]+>\s*)?(?:hmm+,?\s+|honestly,?\s+)?"
+    r"(?:i\s+)?(?:don'?t|do not|didn'?t|did not)\s+(?:really\s+)?"
+    r"(?:like|love)\s+(?:it|this|that|this one|the video|the script)"
+    r"(?:\s+(?:much|at all|very much))?[.!]*$"
+    r"|^(?:not (?:good|great|it|loving it)|meh|nope|no|this is bad|"
+    r"this isn'?t (?:it|working|good)|it'?s not working)[.!]*$")
+
 # Stops at "|" and ">": Slack sends a pasted link as <url|label>, and
 # matching to the next space captured the label and a ">" with it.
 FAQ_URL = re.compile(r"https?://[^\s|<>]*(?:kb|support|faq)[^\s|<>]*", re.I)
@@ -121,7 +149,8 @@ def classify(text: str, thread_state: str | None) -> str:
     """What this message is asking for.
 
     new | pick | direction | busy | pick_first | note | greenlight | forget
-    | script_pending | ignore
+    | script_pending | scrap | restart | unclear | scrapped | building
+    | ignore
 
     `thread_state` is what we already know about this thread, and it matters:
     the same words mean different things at different points. "Go build it"
@@ -142,6 +171,26 @@ def classify(text: str, thread_state: str | None) -> str:
     # forget that the hook..." is still a note, not an undo.
     if FORGET.match(body):
         return "forget"
+
+    if thread_state == video_threads.STATE_SCRAPPED:
+        return "restart" if RESTART.match(body) else "scrapped"
+
+    # A build is spending credits and cannot be pulled back; anything that
+    # would change the script waits for it.
+    if thread_state == video_threads.STATE_BUILDING and (
+            SCRAP.match(body) or RESTART.match(body)):
+        return "building"
+
+    if SCRAP.match(body):
+        return "scrap"
+    if RESTART.match(body) and thread_state not in (
+            None, video_threads.STATE_IDEA, video_threads.STATE_CONCEPTING):
+        return "restart"
+    if VAGUE_DISLIKE.match(body) and thread_state in (
+            video_threads.STATE_AWAITING_REVIEW,
+            video_threads.STATE_DELIVERED,
+            video_threads.STATE_AWAITING_CONCEPT):
+        return "unclear"
 
     if thread_state == video_threads.STATE_AWAITING_CONCEPT:
         if video_concepts.match_concept_pick(text) is not None:
@@ -234,7 +283,9 @@ def handle_video_studio_message(event: dict) -> None:
             # A retry in a thread whose first attempt found nothing: the
             # link posted now is the one to read.
             video_threads.update(thread_ts, faq_url=faq.group(0))
-        video_threads.update(thread_ts, state=video_threads.STATE_CONCEPTING)
+        video_threads.update(thread_ts, state=video_threads.STATE_CONCEPTING,
+                             brief=text if not (row or {}).get("brief")
+                             else row["brief"])
         _ack(thread_ts,
              "On it. Reading the FAQ and working out three ways to tell "
              "this one, back shortly with concepts to pick from. Nothing "
@@ -279,6 +330,57 @@ def handle_video_studio_message(event: dict) -> None:
         threading.Thread(
             target=_develop_concepts, args=(thread_ts, text, text),
             daemon=True,
+        ).start()
+        return
+
+    if intent == "scrap":
+        video_threads.update(thread_ts, state=video_threads.STATE_SCRAPPED)
+        _ack(thread_ts,
+             "Scrapped. Nothing more happens in this thread, and it will not "
+             "count as an earlier video, so its hook is free to use again. "
+             "Any files already made stay in storage. Start a new thread for "
+             "a fresh video, or reply *start over* to bring this one back "
+             "with new concepts.")
+        return
+
+    if intent == "scrapped":
+        _ack(thread_ts,
+             "This thread was scrapped. Reply *start over* to bring it back "
+             "with new concepts, or start a new thread.")
+        return
+
+    if intent == "building":
+        _ack(thread_ts,
+             "The build is already running and cannot be pulled back. Once "
+             "it is posted, reply *start over* or *scrap this*.")
+        return
+
+    if intent == "unclear":
+        _ack(thread_ts,
+             "Happy to change it. Three ways to go:\n"
+             "• Tell me what to change (the angle, a line, the hook) and I "
+             "will rework this script.\n"
+             "• Reply *start over* (optionally with direction, like "
+             "_start over, lead with automations_) for fresh research and "
+             "three new concepts.\n"
+             "• Reply *scrap this* to close the thread.")
+        return
+
+    if intent == "restart":
+        m = RESTART.match((text or "").strip().lower()) or None
+        direction = ""
+        if m and m.group("direction"):
+            # The original casing, from the same offset.
+            start = len(text.strip()) - len(m.group("direction"))
+            direction = text.strip()[start:].strip(" ,.:;-")
+        video_threads.update(thread_ts, state=video_threads.STATE_CONCEPTING)
+        _ack(thread_ts,
+             "Starting over: fresh research and three new concepts%s. The "
+             "previous script%s is set aside." % (
+                 ", taking your direction" if direction else "",
+                 " and video" if (row or {}).get("render_folder") else ""))
+        threading.Thread(
+            target=_restart, args=(thread_ts, direction), daemon=True
         ).start()
         return
 
@@ -342,6 +444,11 @@ def _develop_concepts(thread_ts: str, brief: str, direction: str = "") -> None:
 def _draft_from_concept(thread_ts: str, number: int) -> None:
     from video_studio_jobs import draft_from_concept
     draft_from_concept(thread_ts, number)
+
+
+def _restart(thread_ts: str, direction: str) -> None:
+    from video_studio_jobs import restart_concepts
+    restart_concepts(thread_ts, direction)
 
 
 def _revise_script(thread_ts: str, note: str) -> None:

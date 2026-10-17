@@ -38,6 +38,10 @@ STATE_DRAFTING = "drafting"
 STATE_AWAITING_REVIEW = "awaiting_review"
 STATE_BUILDING = "building"
 STATE_DELIVERED = "delivered"
+# Closed by a person ("scrap this"). Its files stay in storage and its
+# storyboard id stays reserved, but it no longer counts as an earlier
+# video, and nothing more happens in the thread.
+STATE_SCRAPPED = "scrapped"
 
 _CREATE = """
 CREATE TABLE IF NOT EXISTS video_threads (
@@ -75,6 +79,10 @@ _ADD_COLUMNS = (
     "concepts_json TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE video_threads ADD COLUMN IF NOT EXISTS "
     "chosen_concept INTEGER NULL",
+    # The first message, so "start over" can re-run the research with the
+    # same brief (and its "we just went live" evidence) the thread began with.
+    "ALTER TABLE video_threads ADD COLUMN IF NOT EXISTS "
+    "brief TEXT NOT NULL DEFAULT ''",
 )
 
 
@@ -128,7 +136,8 @@ def update(thread_ts: str, **fields) -> None:
     """Set named columns on a thread. Unknown columns are ignored."""
     allowed = {"storyboard", "storyboard_json", "feature_name", "faq_url",
                "state", "rounds", "last_runtime", "render_folder",
-               "positioning_json", "concepts_json", "chosen_concept"}
+               "positioning_json", "concepts_json", "chosen_concept",
+               "brief"}
     sets = {k: v for k, v in fields.items() if k in allowed}
     if not sets or not DATABASE_URL:
         return
@@ -173,8 +182,10 @@ def recent_videos(exclude_thread: str = "", limit: int = 8) -> list[dict]:
             text("SELECT feature_name, storyboard, storyboard_json, "
                  "concepts_json, chosen_concept FROM video_threads "
                  "WHERE storyboard_json <> '' AND thread_ts <> :t "
+                 "AND state <> :scrapped "
                  "ORDER BY updated_at DESC LIMIT :n"),
-            {"t": exclude_thread or "", "n": int(limit)},
+            {"t": exclude_thread or "", "n": int(limit),
+             "scrapped": STATE_SCRAPPED},
         ).mappings().all()
     return [dict(r) for r in rows]
 

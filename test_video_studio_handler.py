@@ -195,3 +195,59 @@ def test_approval_while_the_script_is_being_rewritten_waits(handler):
     """Approving during a rewrite would build the version being replaced."""
     assert handler.classify("go build the video", "drafting") == \
         "script_pending"
+
+
+# ------------------------------------------ scrap, start over, vague dislike
+
+@pytest.mark.parametrize("text", [
+    "scrap this", "Scrap it.", "kill this one", "discard this video",
+    "ok, scrap the whole thing", "<@U1> scrap this", "cancel this please"])
+def test_scrap_closes_the_thread(handler, text):
+    for state in ("awaiting_concept", "awaiting_review", "delivered"):
+        assert handler.classify(text, state) == "scrap"
+
+
+@pytest.mark.parametrize("text", [
+    "scrap the second line", "kill the music under the hook",
+    "drop the shift block"])
+def test_scrap_inside_a_note_is_a_note(handler, text):
+    assert handler.classify(text, "awaiting_review") == "note"
+
+
+@pytest.mark.parametrize("text,direction", [
+    ("start over", None), ("Start over.", None), ("let's start fresh", None),
+    ("start over, lead with the automation angle",
+     "lead with the automation angle"),
+    ("start again: make it about volunteer email campaigns",
+     "make it about volunteer email campaigns"),
+    ("new concepts please", None)])
+def test_start_over_restarts_with_optional_direction(handler, text,
+                                                     direction):
+    assert handler.classify(text, "delivered") == "restart"
+    m = handler.RESTART.match(text.strip().lower())
+    got = (m.group("direction") or "").strip(" ,.:;-") or None
+    assert got == (direction.lower() if direction else None)
+
+
+@pytest.mark.parametrize("text", [
+    "I don't like it", "don't like this", "I didn't like the video",
+    "not good", "meh", "this isn't working"])
+def test_a_vague_dislike_gets_the_options_not_a_guess(handler, text):
+    assert handler.classify(text, "delivered") == "unclear"
+    assert handler.classify(text, "awaiting_review") == "unclear"
+
+
+def test_a_specific_dislike_is_a_note(handler):
+    assert handler.classify("I don't like the hook, say volunteer emails",
+                            "awaiting_review") == "note"
+
+
+def test_nothing_pulls_back_a_running_build(handler):
+    assert handler.classify("scrap this", "building") == "building"
+    assert handler.classify("start over", "building") == "building"
+
+
+def test_a_scrapped_thread_only_answers_start_over(handler):
+    assert handler.classify("change the hook", "scrapped") == "scrapped"
+    assert handler.classify("go build the video", "scrapped") == "scrapped"
+    assert handler.classify("start over", "scrapped") == "restart"
