@@ -87,9 +87,51 @@ def test_a_link_that_misses_is_not_replaced_by_search(jobs, monkeypatch):
         database, "search_kb_articles_db",
         lambda q, **k: pytest.fail("searched despite a pasted link"),
         raising=False)
+    monkeypatch.setattr(jobs, "_live_article", lambda p: None)
     assert jobs._faq_text({"faq_url": ARTICLE_URL}, "") == ("", "")
     out = jobs.run_content_producer("video please", {"faq_url": ARTICLE_URL})
-    assert out["ok"] is False and "nightly" in out["error"]
+    assert out["ok"] is False and "published" in out["error"]
+
+
+def test_a_new_article_is_read_live_from_zoho(jobs, monkeypatch):
+    """Published today, so not in the nightly copy yet. Zoho has it."""
+    import database
+    monkeypatch.setattr(database, "get_kb_article_by_permalink",
+                        lambda p: None, raising=False)
+    asked = []
+    monkeypatch.setattr(jobs, "_live_article",
+                        lambda p: asked.append(p) or ("Fresh", "New body."))
+    assert jobs._faq_text({"faq_url": ARTICLE_URL}, "") == ("Fresh",
+                                                            "New body.")
+    assert asked == ["recruitment-workflows-on-vome"]
+
+
+def test_live_lookup_only_accepts_the_exact_permalink(jobs, monkeypatch):
+    """Only the exact permalink counts. A neighbour is never chosen."""
+    import agent
+    import kb_sync
+
+    def listing(*items):
+        return lambda tool, args: {"data": list(items)}
+    monkeypatch.setattr(agent, "_unwrap_mcp_result", lambda r: r)
+    monkeypatch.setattr(agent, "_zoho_desk_call", listing(
+        {"permalink": "how-do-the-vome-api-and-webhooks-work", "id": "1"}))
+    monkeypatch.setattr(kb_sync, "_fetch_article_detail",
+                        lambda i: pytest.fail("fetched a near miss"))
+    assert jobs._live_article("choosing-an-email-format") is None
+
+    monkeypatch.setattr(agent, "_zoho_desk_call", listing(
+        {"permalink": "how-do-the-vome-api-and-webhooks-work", "id": "1"},
+        {"permalink": "choosing-an-email-format", "id": "7"}))
+    monkeypatch.setattr(kb_sync, "_fetch_article_detail", lambda i: {
+        "status": "Published", "title": "Choosing an email format",
+        "answer": "<p>Basic, <b>Designed</b> or Custom HTML.</p>"})
+    assert jobs._live_article("choosing-an-email-format") == (
+        "Choosing an email format", "Basic, Designed or Custom HTML.")
+
+    monkeypatch.setattr(kb_sync, "_fetch_article_detail", lambda i: {
+        "status": "Draft", "title": "x", "answer": "<p>draft</p>"})
+    assert jobs._live_article("choosing-an-email-format") is None
 
 
 def test_falls_back_to_search_without_a_link(jobs, monkeypatch):

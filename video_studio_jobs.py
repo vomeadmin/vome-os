@@ -220,11 +220,11 @@ def _faq_text(row: dict, brief: str) -> tuple[str, str]:
             article = None
         if article and (article.get("body") or "").strip():
             return article.get("title", ""), article["body"]
-        # A link was given and it is not in our copy, usually because it was
-        # published after the nightly sync. Searching instead found "How do
-        # the Vome API and webhooks work?" for an email format article on the
-        # first live run. No article beats the wrong one.
-        return "", ""
+        # Not in our copy, usually because it was published after the
+        # nightly sync. Ask Zoho directly. Never fall back to a keyword
+        # search of our copy: that found "How do the Vome API and webhooks
+        # work?" for an email format article on the first live run.
+        return _live_article(permalink) or ("", "")
 
     query = (row.get("feature_name") or brief or "").strip()
     if not query:
@@ -239,6 +239,48 @@ def _faq_text(row: dict, brief: str) -> tuple[str, str]:
     if not hits:
         return "", ""
     return hits[0].get("title", ""), hits[0].get("body", "")
+
+
+def _live_article(permalink: str) -> tuple[str, str] | None:
+    """One article straight from Zoho Desk, for a link newer than our copy.
+
+    Zoho has no lookup by permalink, and its text search is no substitute
+    (ranking could hand back a neighbour). So: the 50 most recently modified
+    published articles, newest first, and a match ONLY on the exact
+    permalink. An article too new for the nightly copy is near the top of
+    that list by definition. The body comes from the article itself, and only
+    if it is published, because a draft's portal URL is a dead link outside
+    Vome.
+    """
+    try:
+        from agent import _zoho_desk_call, _unwrap_mcp_result, ZOHO_ORG_ID
+        from kb_sync import _fetch_article_detail, _is_published
+    except Exception as exc:
+        print("[VIDEO] Zoho lookup unavailable: %s" % exc)
+        return None
+    try:
+        raw = _unwrap_mcp_result(_zoho_desk_call("ZohoDesk_getArticles", {
+            "query_params": {"orgId": str(ZOHO_ORG_ID),
+                             "status": "Published",
+                             "sortBy": "-modifiedTime", "limit": 50}}))
+    except Exception as exc:
+        print("[VIDEO] Zoho listing failed for %s: %s" % (permalink, exc))
+        return None
+    items = raw.get("data", []) if isinstance(raw, dict) else (raw or [])
+    match = next((a for a in items if isinstance(a, dict)
+                  and a.get("permalink") == permalink), None)
+    if not match:
+        print("[VIDEO] %s not found in Zoho either" % permalink)
+        return None
+    detail = _fetch_article_detail(str(match.get("id", "")))
+    if not detail or not _is_published(detail.get("status")):
+        return None
+    body = re.sub(r"<[^>]+>", " ", detail.get("answer") or "")
+    body = re.sub(r"\s+", " ", body).strip()
+    if not body:
+        return None
+    print("[VIDEO] read %s live from Zoho (not yet synced)" % permalink)
+    return detail.get("title") or match.get("title", ""), body
 
 
 def _slugify(value: str) -> str:
@@ -364,11 +406,10 @@ def run_content_producer(message: str, row: dict, revise: bool = False) -> dict:
         if row.get("faq_url") or FAQ_URL.search(message or ""):
             return {
                 "ok": False,
-                "error": ("I could not find that article in my copy of the "
-                          "help centre. New articles reach it in the nightly "
-                          "sync at 2am Eastern, so a brand new one will not "
-                          "be there yet. Once it is synced, ask again in "
-                          "this thread."),
+                "error": ("I could not find that article, in my copy of the "
+                          "help centre or in Zoho itself. Check the link, "
+                          "and that the article is published rather than a "
+                          "draft, then post it again in this thread."),
             }
         return {
             "ok": False,
