@@ -366,6 +366,18 @@ _scheduler.add_job(
     max_instances=1,
 )
 
+# Draft autonomy report, Monday 09:30. Mirrors support.autonomy_report.
+from autonomy_report import run_autonomy_report  # noqa: E402
+
+_scheduler.add_job(
+    run_autonomy_report,
+    CronTrigger(day_of_week="mon", hour=9, minute=30,
+                timezone="America/Montreal"),
+    misfire_grace_time=3600,
+    coalesce=True,
+    max_instances=1,
+)
+
 # Credential watch, 08:00. Mirrors engineering.code_access. Runs before the
 # Sentry report so a dead token is known about before the report that depends
 # on it goes out. Silent unless something is broken or expiring.

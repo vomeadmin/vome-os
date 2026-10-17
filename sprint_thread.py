@@ -214,6 +214,17 @@ def render_card(item: dict, release: dict | None = None) -> str:
     ]
     if card.get("existing_work"):
         lines.append(f"*Existing:* {card['existing_work']}")
+    code = card.get("code_check") or {}
+    checked = code.get("verdict") not in (None, "", "not_checked") \
+        if isinstance(code, dict) else False
+    if checked:
+        lines.append(
+            f":mag: *Code check:* `{code.get('verdict')}` "
+            f"({code.get('confidence') or '?'}) {code.get('finding') or ''}"
+            + (f" `{code['where']}`" if code.get("where") else "")
+        )
+    if item.get("fix_pr"):
+        lines.append(f":hammer_and_wrench: *Proposed fix:* {item['fix_pr']}")
     if release and release.get("task_id"):
         lines.append(f"*Release:* {release.get('text')}")
     if card.get("blocking_claims"):
@@ -666,6 +677,13 @@ def _items_block(items: list[dict]) -> str:
         if card.get("blocking_claims"):
             lines.append(f"   Unbacked claim in thread: "
                          f"{card['blocking_claims']}")
+        code = card.get("code_check") or {}
+        if isinstance(code, dict) and code.get("verdict"):
+            lines.append(f"   Code check: {code.get('verdict')} "
+                         f"({code.get('confidence')}): {code.get('finding')}"
+                         f" [{code.get('where') or ''}]")
+        if i.get("fix_pr"):
+            lines.append(f"   Proposed fix PR: {i['fix_pr']}")
         if card.get("why_human"):
             lines.append(f"   Needs a person because: {card['why_human']}")
         draft = (i.get("draft") or "").strip()
@@ -937,7 +955,7 @@ def _redraft(item: dict, notes: str) -> str:
         sam_notes=notes,
     )
     sprint_store.set_draft(item["id"], draft["text"], draft["status"],
-                           draft["why"])
+                           draft["why"], kind="redraft")
     if draft["status"] == "ok":
         return (f"*{n}.* redrafted. Send with `send {n}`:\n"
                 f"```{draft['text']}```")
@@ -966,10 +984,96 @@ def _send(item: dict) -> str:
     to, cc = rcpt.get("to") or "", list(rcpt.get("cc") or [])
     zoho_actions.send_reply(item["ticket_id"], to, cc, draft)
     sprint_store.decide(item["id"], sprint_store.SENT, "sent by Sam")
+    sprint_store.record_sent(item["id"], draft)
     copied = f" cc {', '.join(cc)}" if cc else ""
     _post(f"Sent #{item.get('ticket_number')} to {to}{copied} on Sam's "
           "approval in the sprint thread.", channel=AGENT_LOG)
-    return f"*{n}.* sent to {to}{copied}."
+    after = _after_send(item)
+    return f"*{n}.* sent to {to}{copied}." + (f" {after}" if after else "")
+
+
+# What a sent reply means for the ticket. The reply is the decision; the
+# status follows from it, so nobody has to tidy two systems by hand.
+CLOSE_AFTER = {"user_education", "admin_action", "misdirected",
+               "account_deletion"}
+AWAIT_AFTER = {"vague_bug", "email_update"}
+
+
+def _after_send(item: dict) -> str:
+    """Zoho status and Agent Fixes closure after a sent reply.
+
+    A resolution (the linked fix is Live) or an answer closes the ticket,
+    silently. A question waits for the customer. An acknowledgment leaves
+    the status alone: the work is still open. Failures are reported, never
+    raised: the email already went, and that must not look like it failed.
+    """
+    import shadow_triage
+    import zoho_actions
+
+    category = item.get("category") or ""
+    release = shadow_triage.release_state(item.get("ticket_number") or "",
+                                          item.get("ticket_id") or "")
+    if release.get("live") or category in CLOSE_AFTER:
+        status = "Closed"
+    elif category in AWAIT_AFTER:
+        status = "Awaiting Client Response"
+    else:
+        return "Zoho status left as it is (the work is still open)."
+
+    notes = []
+    try:
+        zoho_actions.set_status(item["ticket_id"], status)
+        notes.append(f"Zoho set to {status}"
+                     + (" with no closure email." if status == "Closed"
+                        else "."))
+    except Exception as exc:
+        notes.append(f":warning: Zoho status NOT set to {status} ({exc}).")
+
+    if release.get("live"):
+        notes.append(_close_agent_fix(item))
+    return " ".join(n for n in notes if n)
+
+
+def _clickup_status(task_id: str, status: str) -> None:
+    import httpx
+
+    resp = httpx.put(
+        f"https://api.clickup.com/api/v2/task/{task_id}",
+        headers={"Authorization": os.environ.get("CLICKUP_API_TOKEN", ""),
+                 "Content-Type": "application/json"},
+        json={"status": status}, timeout=30,
+    )
+    resp.raise_for_status()
+
+
+def _close_agent_fix(item: dict) -> str:
+    """Close this ticket's Agent Fixes child, and the parent once its last
+    client has been told.
+
+    `Closed`, never `on prod`: on prod fires the on-prod handler, which
+    would write and send a second email to the same customer.
+    """
+    try:
+        import release_watcher as rw
+
+        tasks = rw._list_on_dev_tasks()
+    except Exception as exc:
+        return f":warning: Agent Fixes not closed ({exc})."
+    marker = f"[#{item.get('ticket_number')}]"
+    child = next((t for t in tasks if t.get("parent")
+                  and marker in (t.get("name") or "")), None)
+    if not child:
+        return ""
+    try:
+        _clickup_status(child["id"], "Closed")
+        left = [t for t in rw._children(child["parent"], tasks)
+                if t.get("id") != child["id"]]
+        if not left:
+            _clickup_status(child["parent"], "Closed")
+            return "Agent Fixes child and parent closed."
+        return f"Agent Fixes child closed; {len(left)} client(s) to go."
+    except Exception as exc:
+        return f":warning: Agent Fixes close failed ({exc})."
 
 
 def _clickup_create(list_id: str, body: dict) -> dict:

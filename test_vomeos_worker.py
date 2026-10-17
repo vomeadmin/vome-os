@@ -400,6 +400,7 @@ ADDED_SINCE = {
     "support.release_watcher": ("*/15 * * * *", "support", CLAIM_NONE),
     # Four a day on weekdays. Skips itself within 20 minutes of a post.
     "support.sprint_update": ("0 10,13,16,19 * * 1-5", "support", CLAIM_NONE),
+    "support.autonomy_report": ("30 9 * * mon", "support", CLAIM_WEEKLY),
 }
 
 

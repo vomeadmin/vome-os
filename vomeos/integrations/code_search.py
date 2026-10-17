@@ -262,6 +262,20 @@ class Bitbucket(Connector):
             f"/repositories/{self.workspace}/{repo}/merge-base/{a}..{b}",
         )
 
+    def pull_request(self, repo: str, number: str) -> IntegrationResult:
+        """One pull request: its state and, once merged, the merge commit.
+
+        How an agent-opened fix PR is noticed reaching the dev branch, so the
+        release watcher can take over from there.
+        """
+        if not _repo_permitted(repo, self.allowlist):
+            return self._denied("pull_request", repo)
+        return self._call(
+            "pull_request",
+            "GET",
+            f"/repositories/{self.workspace}/{repo}/pullrequests/{number}",
+        )
+
     def pipelines(
         self, repo: str, branch: str, limit: int = 10
     ) -> IntegrationResult:
@@ -460,6 +474,20 @@ class GitHub(Connector):
             }
         return result
 
+    def pull_request(
+        self, repo: str, number: str, owner: str = ""
+    ) -> IntegrationResult:
+        """One pull request: `merged` and `merge_commit_sha` once merged."""
+        if not _repo_permitted(repo, self.allowlist):
+            return self._denied("pull_request", repo)
+        who = owner or self.owner
+        return self._call(
+            "pull_request",
+            "GET",
+            f"/repos/{who}/{repo}/pulls/{number}",
+            headers=self.headers(who),
+        )
+
     def workflow_runs(
         self,
         repo: str,
@@ -544,6 +572,7 @@ def describe() -> dict[str, object]:
         "operations": [
             "search_code", "read_file", "recent_commits",
             "compare / merge_base", "workflow_runs / pipelines",
+            "pull_request",
         ],
         "writes": "none available",
     }

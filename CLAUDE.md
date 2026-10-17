@@ -76,6 +76,20 @@ sentry_*.py        the Sentry worker. SENTRY_RUNBOOK.md is how it runs,
                    SENTRY_TRIAGE.md is why it is built that way
 sprint.py          run a support sprint locally, sends nothing
 clickup_search.py  find the task that already covers a symptom
+
+customer success (2026-10-17, see WORKFLOWS.md for the map):
+shadow_triage.py   every new ticket / reply -> card + draft in the sprint thread
+sprint_thread.py   the daily #support-sprints thread: cards, 10/1/4/7 updates,
+                   Sam's conversation with the sprint partner, send/route/log
+sprint_store.py    numbered items, carry-forward, draft measurement
+zoho_actions.py    recipients, sendReply, silent status changes
+ticket_images.py   inline screenshots + attachments for the agents
+ticket_fix.py      code-check bug -> fix PR -> Agent Fixes -> on dev on merge
+release_watcher.py proves an Agent Fix live, posts "Fix live, N clients"
+sentry_agent_fixes.py  actionable Sentry issue -> one Agent Fixes task/cause
+autonomy_report.py weekly: how often drafts go out unedited, per category
+WORKFLOWS.md       the workflow map + gap register (source of truth)
+scripts/render_workflow_map.py  WORKFLOWS.md -> the published map page
 product_*.py       product knowledge: navigation, UI strings, guides
 mcp_connector/     Vome OS as a claude.ai connector (MCP + Google OAuth).
                    App side, never imported by vomeos/. See CONNECTOR.md
@@ -184,7 +198,57 @@ before acting; a handler with no such key is a bug, not a style choice.
 
 ---
 
-## State of play, 2026-09-30
+## State of play, 2026-10-17
+
+**Read WORKFLOWS.md first.** It maps every customer success workflow with a
+status per step (live / deployed / built / proposed / broken / decide) and a
+gap register. Published view: https://claude.ai/artifact/3a7sh6MMwjQ9X2LtJbh2Go
+(regenerate with `py scripts/render_workflow_map.py`, republish to that URL).
+
+**The broker cutover HAS happened.** `VOMEOS_BROKER_URL` is set: Celery beat
+(`beat-service`) schedules and `vome-os-worker` runs every job and event. The
+APScheduler block in main.py is mirrored but not started. Variables a job
+needs go on `vome-os-worker`, not the web service.
+
+**Customer success loop (Sam is the only reviewer):**
+- Zoho webhooks queue `customer_success.shadow_triage`: thread + images,
+  existing work, release state, code check (triage director has read-only
+  code tools, 10 calls), incident match, reply draft, numbered card in the
+  day's #support-sprints thread.
+- Sam talks to `customer_success.sprint_partner` in that thread. It proposes
+  actions; `sprint_thread._GATES` decides them from Sam's own words. A send
+  needs the item named or in focus; edit + send in one message only edits.
+  Send = Zoho sendReply (sender, their cc, secondary contacts), then the
+  ticket status and Agent Fixes tasks close themselves (`_after_send`).
+- Agents: triage_director (senior, tools, images), reply_drafter (text, all
+  outbound guards, never code tools), incident_matcher (fast),
+  sprint_partner (senior). Text agents are scored with contains /
+  not_contains / status / max_words (vomeos/evaluate.py).
+- Release watcher (every 15 min, always live) proves Agent Fixes live and
+  first promotes merged agent fix PRs to `on dev`. Nothing ever sets `on prod`
+  from these paths: the on-prod handler would email the customer again.
+- Retired: blind auto-ack (`ENABLE_AUTO_ACK` unset = off), email
+  completeness gate (removed), "Vic" signatures (engineer-triggered replies
+  sign "Sam | Vome team").
+
+**Kernel additions:** `vomeos/images.py` (manifest `job.images`),
+`vomeos/tools.py` + runner tool loop (manifest `job.tools`,
+`job.max_tool_calls`; onboarding refuses tools on client_facing agents),
+`read_file(max_bytes)`, connector reads for compare / merge_base /
+workflow_runs / pipelines / pull_request, Sentry `list_issues`.
+
+**Testing SQL locally:** `docker run -d --rm --name vomeos-sprint-test -e
+POSTGRES_PASSWORD=test -e POSTGRES_DB=vomeos -p 127.0.0.1:65432:5432
+postgres:16`, then `SPRINT_TEST_DATABASE_URL=postgresql://postgres:test@
+127.0.0.1:65432/vomeos py -m pytest`. Without it the SQL tests skip. Two
+Sentry channel tests (test_sentry_notify, test_sentry_slack) fail on main
+independent of this work.
+
+**Never** point a local run at the production database for writes: the local
+`.env` DATABASE_URL is production. Print-only modes exist for that reason
+(`py release_watcher.py`, `py sprint.py`).
+
+## State of play, 2026-09-30 (historical)
 
 **Built and working:**
 - Kernel: manifests, prompt composition, tiers, guards, trace, onboarding gate

@@ -78,6 +78,15 @@ store.register_table(
         important       BOOLEAN DEFAULT FALSE,
         card            JSONB,
         draft           TEXT,
+        -- What the agent first wrote, kept when Sam edits or redrafts, so
+        -- "sent unedited" can be measured per category (autonomy_report).
+        original_draft  TEXT,
+        edits           INTEGER NOT NULL DEFAULT 0,
+        redrafts        INTEGER NOT NULL DEFAULT 0,
+        sent_text       TEXT,
+        sent_unedited   BOOLEAN,
+        sent_at         TIMESTAMP,
+        fix_pr          TEXT,
         draft_status    VARCHAR,
         draft_why       TEXT,
         recipients      JSONB,
@@ -252,6 +261,8 @@ def upsert_ticket(
             " account = :account, subject = :subject, summary = :summary,"
             " important = :important, card = CAST(:card AS JSONB),"
             " draft = :draft, draft_status = :draft_status,"
+            " original_draft = :draft, edits = 0, redrafts = 0,"
+            " sent_text = NULL, sent_unedited = NULL, sent_at = NULL,"
             " draft_why = :draft_why,"
             " recipients = CAST(:recipients AS JSONB),"
             " last_thread_id = :last_thread_id,"
@@ -267,11 +278,13 @@ def upsert_ticket(
         rows = store.query(
             f"INSERT INTO {ITEMS} (ticket_id, ticket_number, kind, day,"
             " number, category, account, subject, summary, important, card,"
-            " draft, draft_status, draft_why, recipients, last_thread_id,"
+            " draft, original_draft, draft_status, draft_why, recipients,"
+            " last_thread_id,"
             " incident_key, arrived_at, updated_at) VALUES ("
             f" :ticket_id, :ticket_number, :kind, :day, {_next_number_sql()},"
             " :category, :account, :subject, :summary, :important,"
-            " CAST(:card AS JSONB), :draft, :draft_status, :draft_why,"
+            " CAST(:card AS JSONB), :draft, :draft, :draft_status,"
+            " :draft_why,"
             " CAST(:recipients AS JSONB), :last_thread_id, :incident_key,"
             " :now, :now)"
             " ON CONFLICT (ticket_id) DO NOTHING RETURNING *",
@@ -292,11 +305,63 @@ def set_card_ts(item_id: int, ts: str) -> None:
     )
 
 
-def set_draft(item_id: int, draft: str, status: str, why: str = "") -> None:
+EDITS = "vomeos_draft_edits"
+
+store.register_table(
+    EDITS,
+    f"""
+    CREATE TABLE IF NOT EXISTS {EDITS} (
+        id             SERIAL PRIMARY KEY,
+        item_id        INTEGER,
+        ticket_number  VARCHAR,
+        category       VARCHAR,
+        kind           VARCHAR,
+        before_text    TEXT,
+        after_text     TEXT,
+        created_at     TIMESTAMP NOT NULL DEFAULT NOW()
+    )
+    """,
+)
+
+
+def set_draft(item_id: int, draft: str, status: str, why: str = "",
+              kind: str = "edit") -> None:
+    """Replace the draft. `kind` is edit (Sam's words or the partner's
+    rewrite on his feedback) or redraft (the drafter again, with his notes).
+
+    The change is logged with what it replaced: every edit Sam makes is a
+    correction to the drafter, and the log is where answer-key cases come
+    from (autonomy_report --export).
+    """
+    before = get_item(item_id)
+    column = "redrafts" if kind == "redraft" else "edits"
     store.execute(
         f"UPDATE {ITEMS} SET draft = :d, draft_status = :s, draft_why = :w,"
-        " updated_at = :now WHERE id = :i",
+        f" {column} = {column} + 1, updated_at = :now WHERE id = :i",
         {"d": draft, "s": status, "w": why, "i": item_id, "now": _now()},
+    )
+    if store.ensure_table(EDITS):
+        store.execute(
+            f"INSERT INTO {EDITS} (item_id, ticket_number, category, kind,"
+            " before_text, after_text) VALUES (:i, :t, :c, :k, :b, :a)",
+            {"i": item_id, "t": before.get("ticket_number"),
+             "c": before.get("category"), "k": kind,
+             "b": before.get("draft") or "", "a": draft},
+        )
+
+
+def set_fix_pr(item_id: int, url: str) -> None:
+    store.execute(f"UPDATE {ITEMS} SET fix_pr = :u WHERE id = :i",
+                  {"u": url, "i": item_id})
+
+
+def record_sent(item_id: int, text: str) -> None:
+    """What actually went to the customer, and whether it was the agent's."""
+    store.execute(
+        f"UPDATE {ITEMS} SET sent_text = :t, sent_at = :now,"
+        " sent_unedited = (COALESCE(original_draft, '') = :t)"
+        " WHERE id = :i",
+        {"t": text, "i": item_id, "now": _now()},
     )
 
 

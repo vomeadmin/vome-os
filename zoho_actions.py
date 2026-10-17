@@ -156,6 +156,23 @@ def send_reply(ticket_id: str, to: str, cc: list[str], content: str) -> dict:
                  _reply_body(to, cc, content))
 
 
+def set_status(ticket_id: str, status: str) -> dict:
+    """Set a ticket's status without Zoho emailing the customer about it.
+
+    `disableClosureNotification` matters on Closed: without it Zoho sends its
+    own "your ticket is closed" email, which is an unapproved client send
+    (lessons log, 2026-09-28).
+    """
+    resp = httpx.request(
+        "PATCH", f"{ZOHO_BASE}/tickets/{ticket_id}",
+        headers=_headers(), params={"disableClosureNotification": "true"},
+        json={"status": status}, timeout=30,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Zoho {resp.status_code}: {resp.text[:300]}")
+    return resp.json() if resp.text.strip() else {}
+
+
 def set_in_progress(ticket_id: str, team: str) -> dict:
     """In Progress with the team as owner. Never left as Support Agent."""
     owner = FRONTEND_TEAM if team == "frontend" else BACKEND_TEAM

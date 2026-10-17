@@ -841,6 +841,16 @@ def run_release_watcher(
         print("[RELEASE] CLICKUP_API_TOKEN not set")
         return {"status": "unconfigured"}
 
+    if post and not dry_run:
+        # Agent-opened fix PRs that have merged move to on dev first, so
+        # this same pass can start watching them.
+        try:
+            import ticket_fix
+
+            ticket_fix.run_promotion()
+        except Exception as exc:
+            print(f"[RELEASE] fix PR promotion failed: {exc}")
+
     try:
         tasks = _list_on_dev_tasks()
     except Exception as exc:

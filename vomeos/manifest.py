@@ -82,6 +82,10 @@ class JobSpec:
     # The most images this agent may be shown. 0, the default, means none:
     # seeing pictures is a capability, granted in the manifest like any other.
     images: int = 0
+    # Read-only code tools this agent may call while it thinks (see
+    # vomeos/tools.py), and the most calls it may make in one run.
+    tools: tuple[str, ...] = ()
+    max_tool_calls: int = 0
 
 
 @dataclass(frozen=True)
@@ -200,6 +204,8 @@ def parse_manifest(raw: dict, directory: Path) -> AgentManifest:
         ),
         output=str(job_raw.get("output") or "text").strip(),
         images=int(job_raw.get("images") or 0),
+        tools=_tuple(job_raw.get("tools"), "job.tools"),
+        max_tool_calls=int(job_raw.get("max_tool_calls") or 0),
     )
 
     guards_raw = _table(raw, "guards")

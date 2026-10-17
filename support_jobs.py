@@ -250,6 +250,21 @@ def register_all() -> None:
         description="Post the sprint list in #support-sprints",
     )
 
+    # Draft autonomy, Monday 09:30. Per category: how often the agent's draft
+    # went out unedited. The evidence roadmap item 8 (earned auto-send)
+    # needs, and a list of Sam's edits to turn into answer-key cases.
+    from autonomy_report import run_autonomy_report
+
+    register_job(
+        "support.autonomy_report",
+        run_autonomy_report,
+        cron="30 9 * * mon",
+        queue=QUEUE,
+        claim=CLAIM_WEEKLY,
+        time_limit=300,
+        description="Weekly draft autonomy report in #support-sprints",
+    )
+
     # Shadow triage: a card and a draft for every new ticket or customer
     # reply, the moment it arrives. Idempotent on the customer message id.
     from shadow_triage import HANDLER_KEY as SHADOW_KEY

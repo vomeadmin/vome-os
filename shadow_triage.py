@@ -380,6 +380,20 @@ def _handle(ticket_id: str, reason: str, force: bool = False) -> dict:
     if not item:
         return {"status": "error", "reason": "could not record the item"}
 
+    # A small, certain bug the code check found: propose the fix as a pull
+    # request into the dev branch, and file it in Agent Fixes. Most cards
+    # stop at the first rung (see ticket_fix.should_attempt).
+    import ticket_fix
+    import zoho_actions as _za
+
+    fix = ticket_fix.propose_for_ticket(
+        ticket_id, ticket_number, context.get("account", ""), card,
+        _za.ticket_url(ticket_id),
+    )
+    if fix.get("pr_url"):
+        sprint_store.set_fix_pr(item["id"], fix["pr_url"])
+        item["fix_pr"] = fix["pr_url"]
+
     import sprint_thread
 
     sprint_thread.post_card(item, release=release)

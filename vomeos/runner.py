@@ -125,6 +125,108 @@ _DEPRECATED_PARAM_RE = re.compile(
 )
 
 
+_ANSWER_NOW = (
+    "Your tool budget is spent. Write your final answer now, in exactly the "
+    "output format your instructions require, using what you have found."
+)
+
+
+def _call_with_tools(
+    manifest: AgentManifest, system: str, user, model: str
+) -> tuple[str, int, int, int]:
+    """The model may call its granted read-only tools, then must answer.
+
+    Loops request -> tool calls -> results until the model answers in text
+    or spends `max_tool_calls`; the last request then forbids tools, so a
+    run always ends with an answer rather than a dangling call. Each request
+    goes through `_call_model`'s retry policy.
+    """
+    from vomeos import tools as tool_kit
+
+    definitions = tool_kit.definitions(manifest.job.tools)
+    messages = [{"role": "user", "content": user}]
+    budget = manifest.job.max_tool_calls
+    calls: list[dict] = []
+    nudged = False
+    total_in = total_out = total_attempts = 0
+    while True:
+        final = len(calls) >= budget
+        response, attempts = _request(manifest, {
+            "model": model,
+            "max_tokens": manifest.model.max_tokens,
+            "system": system,
+            "messages": messages,
+            "tools": definitions,
+            "tool_choice": {"type": "none"} if final else {"type": "auto"},
+            "timeout": manifest.limits.timeout_seconds,
+        })
+        usage = getattr(response, "usage", None)
+        total_in += int(getattr(usage, "input_tokens", 0) or 0)
+        total_out += int(getattr(usage, "output_tokens", 0) or 0)
+        total_attempts += attempts
+        uses = [b for b in response.content
+                if getattr(b, "type", "") == "tool_use"]
+        if final or not uses:
+            text = "".join(
+                b.text for b in response.content
+                if getattr(b, "type", "") == "text"
+            ).strip()
+            if not text and not nudged:
+                # Seen on 2026-10-17 (#9477): with tools forbidden, the
+                # model ended its turn with only a thinking block. One
+                # explicit request for the answer fixes it; it is not
+                # retried forever.
+                nudged = True
+                messages.append({"role": "assistant",
+                                 "content": response.content})
+                messages.append({"role": "user", "content": _ANSWER_NOW})
+                continue
+            if calls:
+                print(f"[VOMEOS] {manifest.qualified} used {len(calls)} "
+                      f"tool call(s): {tool_kit.summarize(calls)}")
+            return text, total_in, total_out, total_attempts
+        messages.append({"role": "assistant", "content": response.content})
+        results = []
+        for use in uses:
+            calls.append({"name": use.name, "input": use.input})
+            output = (tool_kit.execute(use.name, dict(use.input or {}))
+                      if len(calls) <= budget else
+                      "Tool budget spent. Answer with what you have.")
+            results.append({"type": "tool_result", "tool_use_id": use.id,
+                            "content": output})
+        if len(calls) >= budget:
+            results.append({"type": "text", "text": _ANSWER_NOW})
+        messages.append({"role": "user", "content": results})
+
+
+def _request(manifest: AgentManifest, kwargs: dict):
+    """One Messages API request with the standard retry policy.
+
+    Returns (response, attempts). Drops `temperature` and retries once if
+    the model rejects it, like `_call_model`.
+    """
+    last: Exception | None = None
+    attempts = manifest.limits.max_retries + 1
+    if manifest.model.temperature is not None:
+        kwargs = {**kwargs, "temperature": manifest.model.temperature}
+    for attempt in range(1, attempts + 1):
+        try:
+            return _client.messages.create(**kwargs), attempt
+        except _RETRYABLE as exc:
+            last = exc
+            if attempt < attempts:
+                time.sleep(2 ** (attempt - 1))
+        except anthropic.BadRequestError as exc:
+            if "temperature" in kwargs and _DEPRECATED_PARAM_RE.search(
+                    str(exc)):
+                kwargs = {k: v for k, v in kwargs.items()
+                          if k != "temperature"}
+                last = exc
+                continue
+            raise
+    raise last if last else RuntimeError("model call failed with no error")
+
+
 def _call_model(
     manifest: AgentManifest, system: str, user, model: str
 ) -> tuple[str, int, int, int]:
@@ -240,7 +342,8 @@ def run_agent(
 
     started = time.monotonic()
     try:
-        text, in_tokens, out_tokens, attempts = _call_model(
+        call = _call_with_tools if manifest.job.tools else _call_model
+        text, in_tokens, out_tokens, attempts = call(
             manifest, system, user, model
         )
     except Exception as exc:

@@ -155,6 +155,19 @@ def check_agent(manifest: AgentManifest) -> list[Finding]:
             "is client_facing but does not declare the client_message guard; "
             "this is the check that exists because of ticket #8945"
         )
+    # Code tools never go to an agent that writes to customers. A reply that
+    # quotes a file path tells a customer how our system is built (#8945).
+    from vomeos.tools import CODE_TOOLS
+
+    unknown_tools = set(manifest.job.tools) - set(CODE_TOOLS)
+    for name in sorted(unknown_tools):
+        fail(f"declares unknown tool {name!r}")
+    if manifest.guards.client_facing and manifest.job.tools:
+        fail("is client_facing and declares code tools; code access must "
+             "never reach an agent that drafts customer messages")
+    if manifest.job.tools and manifest.job.max_tool_calls <= 0:
+        fail("declares tools but no job.max_tool_calls budget")
+
     if manifest.job.output == "json" and "json_shape" not in declared:
         fail("returns JSON but does not declare the json_shape guard")
     if not declared:

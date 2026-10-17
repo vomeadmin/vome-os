@@ -23,11 +23,16 @@ skills = [
     "writing-the-triage-card",
     "deciding-not-to-act",
     "reading-ticket-images",
+    "checking-the-code",
 ]
 # Screenshots are shown, not just counted. Six covers every real thread seen
 # so far once signatures are removed (#9415 had one, #9436 two). The kernel
 # drops anything past this, oversized, or a duplicate.
 images = 6
+# Read-only code access (vomeos/tools.py). The card is internal, so this is
+# allowed; the drafter that writes to customers is never given it.
+tools = ["search_code", "read_code_file", "recent_commits"]
+max_tool_calls = 10
 requires_context = [
     "ticket_number",
     "account",
@@ -46,6 +51,7 @@ output = ["json_shape", "non_empty"]
 client_facing = false
 
 [limits]
+# Per request. A run with code checks makes several requests.
 timeout_seconds = 120
 max_retries = 2
 

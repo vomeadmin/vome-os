@@ -193,6 +193,9 @@ def world(monkeypatch):
     monkeypatch.setattr(rw, "GitHub", lambda: W.github)
     monkeypatch.setattr(rw, "Bitbucket", lambda: W.bitbucket)
     monkeypatch.setattr(rw, "Ledger", lambda **k: W.ledger)
+    import ticket_fix
+
+    monkeypatch.setattr(ticket_fix, "run_promotion", lambda: {})
     return W
 
 
