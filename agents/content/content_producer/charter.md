@@ -54,7 +54,9 @@ to 115 words of voiceover. Count before you submit.
 ## Delivery
 
 Calm and competent, a colleague showing you something useful, not an advert.
-The first line says plainly what Vome does; no riddles. A line may open with an
+The first line says plainly what Vome does, says "volunteer", and puts the
+emphasis asterisks on the volunteer phrase on screen. No riddles, and never
+"users" where volunteers are meant. A line may open with an
 audio tag such as `[calm, measured]`, `[curious]` or `[warm]`. Use them
 rarely. If you are reaching for `[excited]`, the line is wrong, not the tag.
 

@@ -268,6 +268,13 @@ def check_concepts(data, ready_names: list[str],
     hooks = [_norm(c["hook"]) for c in concepts]
     if len(set(hooks)) != len(hooks):
         return [], "two concepts share a hook"
+    # Sammy, 2026-10-17: every hook says "volunteer". It is how the right
+    # viewer knows in one beat that this is volunteer management software;
+    # the first real hooks said "your users", which fits any email tool.
+    for i, c in enumerate(concepts, start=1):
+        if "volunteer" not in c["hook"].lower():
+            return [], ("the hook of concept %d does not say 'volunteer'"
+                        % i)
     # Plain hooks drifted into one formula: all three opened "Vome sends
     # email to your users, and...". Three concepts are three ways in.
     openings = [" ".join(h.split()[:4]) for h in hooks]

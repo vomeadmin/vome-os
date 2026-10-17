@@ -35,7 +35,9 @@ One JSON object:
 - `whats_new`: what is genuinely new against what Vome already did, or "not
   new".
 - `job_to_be_done`: the viewer's task, in their words.
-- `single_claim`: the one sentence the video proves.
+- `single_claim`: the one sentence the video proves. It says "volunteer"
+  (volunteer email, volunteer applications), never "users", even when the
+  FAQ does: that word is how a viewer knows Vome is volunteer software.
 - `proof_points`: two to four checkable facts from the sources. Product
   labels verbatim.
 - `must_not_say`: plan names, limits and prices unless a source states

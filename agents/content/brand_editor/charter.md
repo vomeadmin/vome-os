@@ -14,6 +14,9 @@ cues, templates).
 
 ## What you check, in this order
 
+0. **"Volunteer", not "users".** Every hook says "volunteer" and its on-screen
+   emphasis falls on the volunteer phrase. Anywhere volunteers are meant,
+   "users", "members" or "people" becomes "volunteers".
 1. **The first line says plainly what Vome does.** A stranger must know
    what the product is after one line: the job, that Vome does it, then
    how. A generic opener ("Managing volunteers is hard") or a cryptic stunt

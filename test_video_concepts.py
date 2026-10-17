@@ -183,7 +183,7 @@ def test_chosen_concept_and_positioning_loading():
 
 def _concept(n, fmt="explainer", **kw):
     c = {"title": "Concept %d" % n, "format": fmt, "angle": "angle %d" % n,
-         "hook": "Hook number %d." % n, "beats": ["one", "two", "three"],
+         "hook": "Volunteer hook number %d." % n, "beats": ["one", "two", "three"],
          "why_it_works": "because", "purpose": "teach the choice",
          "seconds": 45}
     c.update(kw)
@@ -214,7 +214,7 @@ def test_good_concepts_pass():
     ({"concepts": [_concept(1), _concept(2), _concept(3, fmt="story")]},
      "story format"),
     ({"concepts": [_concept(1, "reveal"), _concept(2),
-                   _concept(3, hook="hook NUMBER 2")]}, "share a hook"),
+                   _concept(3, hook="VOLUNTEER hook NUMBER 2")]}, "share a hook"),
 ])
 def test_bad_concepts_are_refused(data, reason):
     concepts, err = vc.check_concepts(data, ["explainer", "reveal"])
@@ -238,10 +238,10 @@ def test_a_wholly_blank_extra_concept_is_dropped():
 def test_hooks_may_not_share_an_opening():
     """The third real run: every hook began 'Vome sends email to your
     users'. Plain, but one formula three times."""
-    same = "Vome sends email to your users, and %s"
+    same = "Vome sends email to your volunteers, and %s"
     data = {"concepts": [_concept(1, "reveal", hook=same % "one"),
                          _concept(2, hook=same % "two"),
-                         _concept(3, hook="A different opening line")]}
+                         _concept(3, hook="A different volunteer opening line")]}
     _, err = vc.check_concepts(data, ["explainer", "reveal"])
     assert "open with the same words" in err
 
@@ -290,7 +290,7 @@ SAMPLE_CONCEPTS = [
     {"title": "Which format, when", "format": "explainer",
      "angle": "Three formats, and the one question that decides between "
               "them.",
-     "hook": "Basic, Designed or Custom HTML?",
+     "hook": "Basic, Designed or Custom HTML for your volunteer emails?",
      "beats": ["Three choices in the Email format menu",
                "Basic for a quick note", "Designed for anything you want "
                "to look considered", "Custom HTML when you already have "
@@ -301,7 +301,7 @@ SAMPLE_CONCEPTS = [
     {"title": "Saved once, sent all year", "format": "explainer",
      "angle": "The designed email becomes a Message template the whole "
               "team reuses.",
-     "hook": "Design it once. Send it all year.",
+     "hook": "Design a volunteer email once. Send it all year.",
      "beats": ["A designed welcome email", "Saved as a Message template",
                "Reused for the next intake",
                "It adapts to mobile screens automatically"],
@@ -333,7 +333,7 @@ Why it works: The difference is visual, so the video shows it instead of describ
 
 *2. Which format, when*
 _Explainer, about 45 seconds, for teach the choice._
-Hook: "Basic, Designed or Custom HTML?"
+Hook: "Basic, Designed or Custom HTML for your volunteer emails?"
 • Three choices in the Email format menu
 • Basic for a quick note
 • Designed for anything you want to look considered
@@ -343,7 +343,7 @@ Why it works: Admins who already email from Vome need to know which to pick, not
 
 *3. Saved once, sent all year*
 _Explainer, about 40 seconds, for retention._
-Hook: "Design it once. Send it all year."
+Hook: "Design a volunteer email once. Send it all year."
 • A designed welcome email
 • Saved as a Message template
 • Reused for the next intake
@@ -393,3 +393,12 @@ def test_post_has_no_dashes():
     post = vc.concepts_post(SAMPLE_CONCEPTS, feature_name="X",
                             single_claim="y", notes="z")
     assert "\u2014" not in post and "\u2013" not in post
+
+
+def test_every_hook_says_volunteer():
+    """Sammy, 2026-10-17: the word is how the right viewer knows this is
+    volunteer management software. 'Your users' fits any email tool."""
+    data = {"concepts": [_concept(1, "reveal"), _concept(2),
+                         _concept(3, hook="Vome sends email to your users.")]}
+    _, err = vc.check_concepts(data, ["explainer", "reveal"])
+    assert "concept 3" in err and "volunteer" in err

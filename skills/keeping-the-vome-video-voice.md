@@ -22,6 +22,14 @@ is fine. Riddles, fragments and stunt lines are not.
 - Wrong: "No code. This email is building itself." "Desktop. Mobile. Dark
   mode." Catchy, but a stranger cannot tell what the product is.
 
+**Say "volunteer".** Sammy's rule, 2026-10-17. Vome is volunteer management
+software and the word tells the right viewer this is for them. Name things
+as volunteer things: volunteer email campaigns, volunteer applications,
+volunteer shifts. Never "users", "members" or "people" where volunteers are
+meant, even when the help article says "users". Every hook contains the word
+"volunteer", and on screen the volunteer phrase carries the emphasis:
+"Stuck sending *volunteer emails* one at a time?"
+
 Plain is not one formula. Three concepts in one round open three different
 ways: a question naming the job, a plain statement of what Vome does, a
 concrete moment ("Saturday, 9am, and every volunteer already has their

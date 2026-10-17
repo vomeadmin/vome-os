@@ -66,7 +66,7 @@ POSITIONING = {"audience": "Admins who already email users from Vome.",
 
 def _concept(n, fmt="explainer"):
     return {"title": "Concept %d" % n, "format": fmt, "angle": "angle %d" % n,
-            "hook": "Hook %d." % n, "beats": ["a", "b", "c"],
+            "hook": "Volunteer hook %d." % n, "beats": ["a", "b", "c"],
             "why_it_works": "w", "purpose": "p", "seconds": 40}
 
 
@@ -356,8 +356,8 @@ def test_a_refused_set_is_retried_once_with_the_reason(jobs, env,
     """Two hooks opening alike is fixable, so the director gets one retry
     with the reason rather than the person getting no concepts."""
     alike = [dict(_concept(1, "reveal"),
-                  hook="Vome sends email to your users A"),
-             dict(_concept(2), hook="Vome sends email to your users B"),
+                  hook="Vome sends email to your volunteers A"),
+             dict(_concept(2), hook="Vome sends email to your volunteers B"),
              _concept(3)]
     answers = iter([{"concepts": alike, "notes": "n"},
                     {"concepts": CONCEPTS, "notes": "n"}])
