@@ -65,9 +65,9 @@ flowchart TD
   OD --> PROMO["Human promotes dev -> master<br/>(batched)"]:::live
   PROMO --> BUILD["Prod build green<br/>(GitHub Actions / Bitbucket pipeline)"]:::live
   BUILD --> W["Release watcher every 15 min<br/>merged + built + live stamp"]:::live
-  W -->|all commits live| LIVE["Release Check Live +<br/>'Fix live' post in the day thread"]:::built
+  W -->|all commits live| LIVE["Release Check Live +<br/>'Fix live' post in the day thread"]:::live
   W -->|build failed / 2h stuck| FAIL["Release Check Failed + alert"]:::deployed
-  LIVE --> RD["Resolution draft per client,<br/>as a numbered card (once per ticket)"]:::built
+  LIVE --> RD["Resolution draft per client,<br/>as a numbered card (retry on error)"]:::broken
   RD --> AUTO{"RELEASE_AUTO_SEND on?<br/>(off; never needs_human)"}:::decide
   AUTO -->|off| SEND["Sam says 'send N'<br/>in the thread"]:::deployed
   AUTO -->|on, draft passed guards| AS["Sent automatically"]:::decide
@@ -117,15 +117,24 @@ flowchart LR
   SA --> SHIP["When it ships, draft the<br/>client update for Sam"]:::proposed
 ```
 
-<!-- map:diagram id=learning title="6. Getting better over time" -->
+<!-- map:diagram id=learning title="6. Every correction teaches the agents" -->
 ```mermaid
-flowchart LR
-  ED["Sam edits a draft<br/>in the thread"]:::built --> LOG["vomeos_draft_edits<br/>(before / after)"]:::built
-  LOG --> AR["Autonomy report, Mon 09:30<br/>unedited % per category"]:::built
-  LOG --> EX["Export edits -> answer-key<br/>cases (a person picks)"]:::built
-  EX --> EV["Evals per agent<br/>(triage 88%, drafter 13/13,<br/>matcher 12/12, partner 12/12)"]:::live
+flowchart TD
+  ED["Sam edits a draft or<br/>asks for a redraft (thread)"]:::built --> LK["Lesson keeper: a general rule,<br/>or a fix for this ticket only?"]:::built
+  FB["Sam gives general feedback<br/>in conversation"]:::built --> PL["Sprint partner records it<br/>(skill: learning-from-sam)"]:::built
+  CC["Sam corrects an agent in a<br/>Claude Code session"]:::built --> CLI["Session records it:<br/>py -m vomeos.lessons add"]:::built
+  LK -->|general| LS[("vomeos_lessons<br/>active lessons per agent")]:::built
+  PL --> LS
+  CLI --> LS
+  LK -->|ticket only| NONE["Nothing learned<br/>(names, dates, recipients)"]:::built
+  LS --> PROMPT["Added to that agent's prompt<br/>on its next run"]:::built
+  LS --> ANN["'Learned L7 ... forget 7 to undo'<br/>posted in the thread"]:::built
+  ED --> LOG["vomeos_draft_edits<br/>(before / after)"]:::built
+  LOG --> AR["Autonomy report, Mon 09:30<br/>unedited %, edits, live lessons"]:::built
+  AR --> PRO["Claude Code session promotes proven<br/>lessons into charters + answer keys"]:::built
+  PRO --> EV["Evals per agent (drafter 15/15,<br/>matcher 12/12, partner 12/12,<br/>keeper 10/11, triage 14/16)"]:::live
+  PRO -.-> AUTOPR["Promotion as an automatic PR<br/>to support-agent"]:::proposed
   AR --> AUTO["Earned auto-send per category<br/>(50 sent, 95% unedited)"]:::proposed
-  LESS["Sprint Lessons Log<br/>(written by hand)"]:::proposed
   KB["Help centre: sync 02:00, health<br/>Mon 09:00, gap pass monthly"]:::live
   NOFAQ["'Code, no FAQ' answers become<br/>article suggestions"]:::proposed
 ```
@@ -159,7 +168,7 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 <!-- map:register -->
 | id | area | item | status | why it matters | next step | owner |
 |---|---|---|---|---|---|---|
-| G1 | release | Resolution drafts made automatically when a fix goes Live | built | The first live release posted "1 client to notify" and stopped | Push; the three live fixes (#9415, #9436, #9500) get drafts on the first pass | Sam |
+| G1 | release | Resolution drafts made automatically when a fix goes Live | broken | First production pass (Oct 17 14:00 ET) failed for #9415, #9436, #9500: sprint tables did not exist yet | Push the pending batch (table setup + retry up to 3); the next pass drafts all three | Sam |
 | G21 | release | Auto-send resolutions once a fix is proven live (`RELEASE_AUTO_SEND`) | decide | Removes the last manual step for clean resolutions | Turn on once the Monday autonomy report shows resolutions going out unedited; never applies to needs_human | Sam |
 | G2 | engineer | Engineer-triggered replies still auto-send (on prod, needs client info, user education) | decide | They skip Sam's review; the playbook text says nothing auto-sends | Keep as is, or turn them into sprint thread drafts | Sam |
 | G3 | intake | #vome-tickets brief and legacy classifier run beside shadow triage | decide | Two cards per ticket, two places to look | Retire once the sprint thread is trusted (the old reply handling depends on it) | Sam |
@@ -172,7 +181,8 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 | G10 | feature | No duplicate check before logging a feature request | proposed | Risk of duplicate backlog items | Run check_existing_work before creating | agent |
 | G11 | feature | Client not told when a Sam Accepted request ships | proposed | Promise loop never closes | Watch Sam Accepted for closed tasks, draft the update | agent |
 | G12 | incident | Incident alert does not create the fix parent with one child per ticket | proposed | Grouping is manual | On a confirmed incident, create the parent and children | agent |
-| G13 | learning | Lessons log is written by hand | proposed | Lessons from the thread are lost between sessions | Weekly summary of Sam's corrections into the log | agent |
+| G13 | learning | Every correction becomes a live lesson (thread edits, conversation, Claude Code) | built | The same correction kept coming back | Push; then say `lessons` in the thread to see them | Sam |
+| G22 | learning | Lesson promotion into charters is done by hand weekly | proposed | Live lessons pile up if nobody promotes them | Have the Monday job open a PR with the proposed charter and answer-key changes | agent |
 | G14 | learning | Earned auto-send per category | proposed | The goal state; needs data first | After 50 sent at 95% unedited, Sam approves a category | Sam |
 | G15 | triage | Triage answer key was written by an agent, not reviewed | broken | 88% agreement against an unreviewed key | Sam reviews 16 cases once | Sam |
 | G16 | docs | CLAUDE.md "state of play" predates the broker cutover | built | New sessions start from wrong facts | Refreshed 2026-10-17 (see CLAUDE.md) | agent |

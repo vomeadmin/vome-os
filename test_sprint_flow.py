@@ -640,3 +640,14 @@ def test_conversation_is_remembered_across_messages(db, monkeypatch, world):
     assert "Here is 1." in calls[1]
     turns = sprint_thread._turns("500.1")
     assert sprint_thread._last_focus(turns) == 1
+
+
+def test_no_database_means_no_header_spam(monkeypatch):
+    """Oct 17: four day headers in 13 minutes when the tables were missing."""
+    posts = []
+    monkeypatch.setattr(sprint_store, "ready", lambda: False)
+    monkeypatch.setattr(sprint_thread, "_post",
+                        lambda *a, **k: posts.append(a) or "ts")
+    assert sprint_thread.ensure_thread() == ""
+    assert sprint_thread.ensure_thread() == ""
+    assert posts == []

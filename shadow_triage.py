@@ -333,6 +333,12 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
     import zoho_actions
     from vomeos import run_agent
 
+    # Callers other than handle() reach here too (release resolutions, the
+    # sprint update backfill, retriage). Without this the first of them on a
+    # fresh database recorded nothing (2026-10-17 rehearsal).
+    if not sprint_store.ready():
+        return {"status": "skipped", "reason": "no database"}
+
     rcpt = zoho_actions.recipients(ticket_id)
     thread_id = rcpt.get("thread_id") or ""
     existing = sprint_store.by_ticket(ticket_id)

@@ -49,6 +49,7 @@ store.register_table(
         item_number    INTEGER,
         outcome        VARCHAR,
         detail         TEXT,
+        attempts       INTEGER NOT NULL DEFAULT 1,
         created_at     TIMESTAMP NOT NULL DEFAULT NOW()
     )
     """,
@@ -64,16 +65,30 @@ def auto_send_enabled() -> bool:
     return value in ("true", "1", "on", "yes")
 
 
+MAX_ATTEMPTS = 3
+
+
 def _claim(child_id: str, parent_id: str, ticket_id: str,
            ticket_number: str) -> bool:
-    """True the first time this client ticket is prepared for this fix."""
+    """True when this client ticket should be prepared now.
+
+    The first time, and again after an error, up to MAX_ATTEMPTS. A draft
+    that was made (or sent) is never redone. Retrying matters: on the first
+    live pass in production (2026-10-17 14:00) all three resolutions failed
+    because the sprint tables did not exist yet, and without a retry they
+    would have stayed undrafted for good.
+    """
     if not store.ensure_table(TABLE):
         return False
     rows = store.query(
         f"INSERT INTO {TABLE} (child_id, parent_id, ticket_id, ticket_number,"
         " outcome) VALUES (:c, :p, :t, :n, 'claimed')"
-        " ON CONFLICT (child_id) DO NOTHING RETURNING child_id",
-        {"c": child_id, "p": parent_id, "t": ticket_id, "n": ticket_number},
+        " ON CONFLICT (child_id) DO UPDATE SET outcome = 'claimed',"
+        f" attempts = {TABLE}.attempts + 1"
+        f" WHERE {TABLE}.outcome = 'error'"
+        f" AND {TABLE}.attempts < :max RETURNING child_id",
+        {"c": child_id, "p": parent_id, "t": ticket_id, "n": ticket_number,
+         "max": MAX_ATTEMPTS},
         write=True,
     )
     return bool(rows)
@@ -113,6 +128,8 @@ def prepare(parent: dict, children: list[dict]) -> list[dict]:
     import sprint_store
     from zoho_links import extract_zoho_ticket_id
 
+    if not sprint_store.ready():
+        return []
     entries = []
     for child in children:
         number = ""

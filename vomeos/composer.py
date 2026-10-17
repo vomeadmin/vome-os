@@ -67,10 +67,13 @@ def _read(path: Path, what: str) -> str:
     return path.read_text(encoding="utf-8").strip()
 
 
-def compose_system_prompt(manifest: AgentManifest) -> str:
+def compose_system_prompt(
+    manifest: AgentManifest, include_lessons: bool = True
+) -> str:
     """The full system prompt for one agent.
 
-    Deterministic: same files in, same string out. That is what makes a run
+    Deterministic apart from Sam's live lessons: same files and same active
+    lessons in, same string out. That is what makes a run
     reproducible from its trace, and what lets the eval harness replay a case
     against the exact prompt that produced the original answer.
     """
@@ -90,6 +93,22 @@ def compose_system_prompt(manifest: AgentManifest) -> str:
     parts.append(
         f"## Your job: {title}\n\n{manifest.charter_text()}"
     )
+
+    # Sam's live corrections (vomeos/lessons.py). The one part of the prompt
+    # that comes from the database rather than from files: a correction has
+    # to shape the next run, not the next deploy. The trace stores the
+    # output, so a run is still explainable; replaying one exactly needs the
+    # lessons that were active at the time.
+    if include_lessons:
+        from vomeos import lessons
+
+        try:
+            block = lessons.render_block(manifest.qualified)
+        except Exception as exc:
+            print(f"[VOMEOS] lessons unavailable: {exc}")
+            block = ""
+        if block:
+            parts.append(block)
 
     parts.append(
         _JSON_CONTRACT if manifest.job.output == "json" else _TEXT_CONTRACT

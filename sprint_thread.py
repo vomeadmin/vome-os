@@ -156,8 +156,16 @@ def _clock(moment: datetime) -> str:
 
 
 def ensure_thread(day=None) -> str:
-    """The thread_ts for the day, creating the parent message if needed."""
+    """The thread_ts for the day, creating the parent message if needed.
+
+    Returns "" when the day cannot be remembered. Posting a header it cannot
+    store means a new header on every post: production, 2026-10-17, four
+    "Support sprint, Saturday" threads in 13 minutes before the tables
+    existed. Callers post to the channel instead, which is noisy but honest.
+    """
     day = day or sprint_store.today()
+    if not sprint_store.ready():
+        return ""
     row = sprint_store.get_day(day)
     if row.get("thread_ts"):
         return row["thread_ts"]
@@ -530,8 +538,12 @@ def handle_command(message: dict) -> dict:
     text = message.get("text") or ""
     _record_turn(thread, message.get("ts") or "", "sam", text, None)
 
-    commands = parse_strict(text)
-    if commands is not None:
+    lesson_reply = _lesson_command(text)
+    commands = parse_strict(text) if lesson_reply is None else None
+    if lesson_reply is not None:
+        reply, focus, outcome = lesson_reply, None, {
+            "status": "ok", "results": [], "path": "lessons"}
+    elif commands is not None:
         results = _run_commands(commands, day)
         reply = "\n".join(results) or "Nothing to do."
         focus = (commands[0]["numbers"] or [None])[0]
@@ -547,6 +559,128 @@ def handle_command(message: dict) -> dict:
         {"r": reply[:4000], "ts": message.get("ts")},
     )
     return outcome
+
+
+# ---------------------------------------------------------------------------
+# Learning from Sam (vomeos/lessons.py)
+# ---------------------------------------------------------------------------
+
+DRAFTER = "customer_success.reply_drafter"
+_LEARNABLE = {"customer_success.reply_drafter",
+              "customer_success.triage_director",
+              "customer_success.sprint_partner",
+              "customer_success.incident_matcher", "*"}
+
+
+def _learn(item: dict, before: str, after: str, sam_said: str,
+           agent: str = DRAFTER) -> str:
+    """Ask the lesson keeper whether this correction is a general rule.
+
+    Returns the line to show Sam ("Learned ... say forget 7"), or "" when it
+    was a one-off fix for this ticket. Never raises: a lesson missed costs
+    one more correction; a crash here would cost the edit Sam just made.
+    """
+    if not after or before.strip() == after.strip():
+        return ""
+    try:
+        from vomeos import lessons, run_agent
+
+        existing = lessons.active_for(agent, limit=40)
+        result = run_agent(
+            "customer_success.lesson_keeper",
+            context={
+                "agent": agent,
+                "category": item.get("category") or "",
+                "before": before,
+                "after": after,
+                "sam_said": sam_said or "(nothing beyond the edit)",
+                "existing_lessons": "\n".join(
+                    f"- [L{r['id']}] {r['rule']}" for r in existing)
+                or "(none yet)",
+            },
+            subject_type="sprint_item", subject_id=str(item.get("id")),
+        )
+        data = result.data if result.ok else None
+        if not data or not data.get("general") or \
+                data.get("confidence") == "low":
+            return ""
+        if data.get("duplicate_of"):
+            return (f"\n:brain: Already a lesson "
+                    f"({data['duplicate_of']}); applied again.")
+        target = data.get("applies_to") or agent
+        target = target if target in _LEARNABLE else agent
+        lesson_id = lessons.add(
+            target, data.get("rule") or "", "slack_edit",
+            evidence=f"Before:\n{before}\n\nAfter:\n{after}\n\n"
+                     f"Sam: {sam_said}",
+            ticket=str(item.get("ticket_number") or ""),
+            created_by="sprint_thread",
+        )
+        if not lesson_id:
+            return ""
+        return (f"\n:brain: Learned *L{lesson_id}* ({_short(target)}): "
+                f"{data.get('rule')} Say `forget {lesson_id}` to undo.")
+    except Exception as exc:
+        print(f"[SPRINT] lesson keeper failed: {exc}")
+        return ""
+
+
+def _short(agent: str) -> str:
+    return "every agent" if agent == "*" else agent.split(".")[-1].replace(
+        "_", " ")
+
+
+def _record_partner_lessons(raw, sam_text: str) -> list[str]:
+    """General feedback Sam gave in conversation, as the partner heard it."""
+    out: list[str] = []
+    if not isinstance(raw, list):
+        return out
+    try:
+        from vomeos import lessons
+    except Exception:
+        return out
+    for entry in raw[:3]:
+        if not isinstance(entry, dict):
+            continue
+        agent = str(entry.get("agent") or "")
+        rule = str(entry.get("rule") or "").strip()
+        if agent not in _LEARNABLE or not rule:
+            continue
+        lesson_id = lessons.add(agent, rule, "slack_feedback",
+                                evidence=f"Sam: {sam_text}",
+                                created_by="sprint_partner")
+        if lesson_id:
+            out.append(f":brain: Learned *L{lesson_id}* ({_short(agent)}): "
+                       f"{rule} Say `forget {lesson_id}` to undo.")
+    return out
+
+
+_FORGET = re.compile(r"^\s*(forget|unlearn)\s+L?(\d+)\s*$", re.I)
+_LIST = re.compile(r"^\s*(lessons|what have you learned\??)\s*$", re.I)
+
+
+def _lesson_command(text: str) -> str | None:
+    """`forget 7` and `lessons`. None when the message is neither."""
+    from vomeos import lessons
+
+    match = _FORGET.match(text or "")
+    if match:
+        lesson_id = int(match.group(2))
+        row = lessons.get(lesson_id)
+        if not row:
+            return f"There is no lesson L{lesson_id}."
+        lessons.retire(lesson_id, "Sam said forget")
+        return f":wastebasket: Forgot L{lesson_id}: {row.get('rule')}"
+    if _LIST.match(text or ""):
+        rows = lessons.all_active()
+        if not rows:
+            return "No live lessons yet."
+        lines = [f":brain: *{len(rows)} live lessons* (newest first):"]
+        lines += [f"*L{r['id']}* ({_short(r['agent'])}) {r['rule']}"
+                  for r in rows[:30]]
+        lines.append("Say `forget N` to drop one.")
+        return "\n".join(lines)
+    return None
 
 
 def _run_commands(commands: list[dict], day) -> list[str]:
@@ -812,6 +946,8 @@ def converse(text: str, day, thread: str) -> tuple[str, object, list[str]]:
     focus = data.get("focus") if isinstance(data.get("focus"), int) else None
     actions = [a for a in data.get("actions") or [] if isinstance(a, dict)]
 
+    learned = _record_partner_lessons(data.get("lessons"), text)
+
     by_number = {i.get("number"): i for i in items}
     sendable = _allowed_sends(text, items, turns)
     edited = {a.get("number") for a in actions
@@ -842,26 +978,32 @@ def converse(text: str, day, thread: str) -> tuple[str, object, list[str]]:
         elif verb not in _GATES and verb not in _FREE:
             continue
         try:
-            results.append(_run_action(verb, action, item))
+            results.append(_run_action(verb, action, item, sam_text=text,
+                                       learn=not learned))
         except Exception as exc:
             results.append(f"*{number}.* {verb} failed: {exc}")
 
+    results += learned
     full = reply + ("\n\n" + "\n".join(results) if results else "")
     return full, focus, results
 
 
-def _run_action(verb: str, action: dict, item: dict) -> str:
+def _run_action(verb: str, action: dict, item: dict, sam_text: str = "",
+                learn: bool = True) -> str:
     n = item.get("number")
     if verb == "edit":
         body = str(action.get("text") or "").strip()
         if not body:
             return f"*{n}.* edit had no text."
+        before = item.get("draft") or ""
         status, why = _check_draft(item, body)
         sprint_store.set_draft(item["id"], body, status, why)
+        note = _learn(item, before, body, sam_text) if learn else ""
         if status != "ok":
             return (f":no_entry: *{n}.* the new draft is held by a guard: "
-                    f"{why}. Not sendable until fixed.")
-        return f"*{n}.* draft updated. Say `send {n}` when you're happy."
+                    f"{why}. Not sendable until fixed." + note)
+        return (f"*{n}.* draft updated. Say `send {n}` when you're happy."
+                + note)
     if verb == "retriage":
         import shadow_triage
 
@@ -925,12 +1067,13 @@ def _edit(item: dict, text: str) -> str:
         return f"*{n}.* edit needs text after the colon."
     body = _signed(item, text)
     notes = _guard_notes(body, item)
+    before = item.get("draft") or ""
     sprint_store.set_draft(item["id"], body, "ok",
                            "; ".join(notes) if notes else "")
     shown = f"*{n}.* draft replaced. Send with `send {n}`:\n```{body}```"
     if notes:
         shown += "\n:warning: Check before sending: " + "; ".join(notes)
-    return shown
+    return shown + _learn(item, before, body, "")
 
 
 def _redraft(item: dict, notes: str) -> str:
@@ -957,9 +1100,10 @@ def _redraft(item: dict, notes: str) -> str:
     )
     sprint_store.set_draft(item["id"], draft["text"], draft["status"],
                            draft["why"], kind="redraft")
+    note = _learn(item, item.get("draft") or "", draft["text"], notes)
     if draft["status"] == "ok":
         return (f"*{n}.* redrafted. Send with `send {n}`:\n"
-                f"```{draft['text']}```")
+                f"```{draft['text']}```" + note)
     return (f"*{n}.* redraft {draft['status']}: {draft['why']}\n"
             f"```{draft['text']}```")
 

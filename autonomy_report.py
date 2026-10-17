@@ -77,14 +77,14 @@ def recent_edits(days: int = WINDOW_DAYS, limit: int = 200) -> list[dict]:
     )
 
 
-def render(rows: list[dict], edits: list[dict]) -> str:
+def render(rows: list[dict], edits: list[dict],
+           lessons: list[dict] | None = None) -> str:
     lines = [f":bar_chart: *Draft autonomy, last {WINDOW_DAYS} days*",
              f"_A category qualifies for auto-send at {MIN_SENT}+ sent and "
              f"{int(MIN_UNEDITED * 100)}%+ unedited. Auto-send is not "
              "built; this only shows who would qualify._"]
     if not rows:
         lines.append("No drafts in the window yet.")
-        return "\n".join(lines)
     for r in rows:
         rate = f"{r['unedited_rate'] * 100:.0f}%" if r["sent"] else "-"
         flag = " :white_check_mark: *qualifies*" if r["eligible"] else ""
@@ -98,6 +98,13 @@ def render(rows: list[dict], edits: list[dict]) -> str:
                      "correction the drafter got wrong and a candidate "
                      "answer-key case (`py autonomy_report.py --export "
                      "edits.jsonl`).")
+    if lessons:
+        lines.append(f"\n:brain: *{len(lessons)} live lessons* are applied "
+                     "on every run. Ready to promote into the charters (a "
+                     "Claude Code session does it, then marks them "
+                     "promoted):")
+        lines += [f"*L{r['id']}* {r['agent'].split('.')[-1]}: {r['rule']}"
+                  for r in lessons[:12]]
     return "\n".join(lines)
 
 
@@ -105,9 +112,11 @@ def run_autonomy_report() -> dict:
     """The weekly post. Read-only apart from the Slack message."""
     rows = category_stats()
     edits = recent_edits()
+    from vomeos import lessons as lesson_store
+
     import sprint_thread
 
-    ts = sprint_thread._post(render(rows, edits))
+    ts = sprint_thread._post(render(rows, edits, lesson_store.all_active()))
     return {"status": "ok" if ts else "post failed",
             "categories": len(rows), "edits": len(edits)}
 

@@ -200,6 +200,34 @@ before acting; a handler with no such key is a bug, not a style choice.
 
 ---
 
+## Every correction Sam makes teaches the agents
+
+Sam's rule (2026-10-17): wherever he corrects agent content or behaviour, in
+a Slack draft, in the sprint thread, or in a Claude Code session, the
+correction must reach the agents and stick. It is not enough to fix the one
+draft.
+
+- **In the sprint thread** this is automatic. An edit or redraft runs the
+  lesson keeper (`customer_success.lesson_keeper`); general feedback in
+  conversation is recorded by the partner. Either becomes an active lesson in
+  `vomeos_lessons`, added to that agent's prompt on its next run, announced
+  as "Learned L7 ... say forget 7". `lessons` lists them.
+- **In a Claude Code session** you must do it by hand, every time:
+  1. record it live:
+     `railway run --service Postgres py -m vomeos.lessons add --agent
+     customer_success.reply_drafter --rule "..." --source claude_code
+     --evidence "<what Sam said>"`
+  2. add an answer-key case that reproduces the mistake, and run
+     `py -m vomeos.evaluate <agent>`
+  3. if the rule is permanent, put it in the charter or a skill (600-word
+     cap), re-run the evals, and `py -m vomeos.lessons promote <id>`.
+- **Weekly**, the Monday autonomy report lists live lessons. A Claude Code
+  session promotes the proven ones into charters and answer keys and marks
+  them promoted, so the live block stays short.
+
+Lessons refine a charter and never override the handbook or a never-bent
+rule; the guards still run on every output.
+
 ## State of play, 2026-10-17
 
 **Read WORKFLOWS.md first.** It maps every customer success workflow with a

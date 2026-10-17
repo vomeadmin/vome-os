@@ -14,7 +14,11 @@ max_tokens = 2500
 
 [job]
 charter = "charter.md"
-skills = ["reading-a-ticket-thread", "checking-for-existing-work"]
+skills = [
+    "reading-a-ticket-thread",
+    "checking-for-existing-work",
+    "learning-from-sam",
+]
 requires_context = [
     "now",
     "items_today",
