@@ -210,6 +210,28 @@ def register_all() -> None:
         description="Watch and auto-recover the ClickUp status webhook",
     )
 
+    # Release watcher, every 15 minutes.
+    #
+    # Proves an agent fix is live (every commit on master and inside a green
+    # production build) and tells #support-sprints which clients to notify.
+    # Sub-hourly because a prod build takes 10 to 15 minutes and a client is
+    # waiting on the other side of it.
+    #
+    # CLAIM_NONE for the same reason as the webhook check: there is no
+    # 15-minute claim period, and the job carries its own idempotency in
+    # vomeos_release_fixes (it posts only when a fix's state changes).
+    from release_watcher import run_release_watcher
+
+    register_job(
+        "support.release_watcher",
+        run_release_watcher,
+        cron="*/15 * * * *",
+        queue=QUEUE,
+        claim=CLAIM_NONE,
+        time_limit=300,
+        description="Mark agent fixes Live once every commit is deployed",
+    )
+
 
 # Importing this module registers the jobs, which is what
 # VOMEOS_JOB_MODULES=support_jobs relies on.

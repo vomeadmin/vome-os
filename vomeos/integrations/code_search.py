@@ -19,10 +19,12 @@ the filesystem. Three reasons not to:
 
 WHAT THIS CAN AND CANNOT DO
 ---------------------------
-Four read operations: search code, read a file, list recent commits touching
-a path, and read a commit. There are no write methods, at all. The access
-control is not an instruction in a charter that a model might reason around;
-it is the absence of any code that could write.
+Read operations only: search code, read a file, list recent commits touching
+a path, ask whether one commit is an ancestor of another (compare /
+merge_base), and list CI runs on a branch (workflow_runs / pipelines), which
+is how the release watcher proves a fix is live. There are no write methods,
+at all. The access control is not an instruction in a charter that a model
+might reason around; it is the absence of any code that could write.
 
 Use a token scoped to READ on the repositories you want reachable. If the
 token can write, the connector's restraint is the only thing stopping a
@@ -46,6 +48,14 @@ ENVIRONMENT
                                read:repository:bitbucket is needed, and that
                                covers workspace code search too (verified
                                2026-10-01, 148 hits across the workspace).
+    VOMEOS-PIPELINES           second Atlassian token carrying
+    (or VOMEOS_BITBUCKET_PIPELINES_TOKEN)
+                               read:pipeline:bitbucket, used only by
+                               Bitbucket.pipelines(). Unset means the main
+                               token is tried, which works if it has the scope.
+                               The hyphenated name is the Railway one; some
+                               shells drop hyphenated names, which is what the
+                               underscore spelling is for.
     VOMEOS_BITBUCKET_WORKSPACE workspace slug (e.g. "vomedjango")
     VOMEOS_BITBUCKET_EMAIL     LEAVE UNSET. Only for app passwords and
                                unscoped tokens, which need Basic. See
@@ -72,6 +82,9 @@ from vomeos.integrations.base import Connector, IntegrationResult
 # How much of a file to hand back. A whole 4000 line module drowns the
 # reasoning and costs more than it informs.
 MAX_FILE_BYTES = int(os.environ.get("VOMEOS_CODE_MAX_FILE_BYTES", "60000"))
+
+# The Bitbucket token that may read pipelines, first match wins.
+PIPELINES_TOKEN_VARS = ("VOMEOS-PIPELINES", "VOMEOS_BITBUCKET_PIPELINES_TOKEN")
 
 
 def allowed_repos() -> tuple[str, ...]:
@@ -156,7 +169,9 @@ class Bitbucket(Connector):
         and unscoped tokens that genuinely need it. The email must then be
         the account that OWNS the token, not whoever is deploying.
         """
-        token = os.environ.get("VOMEOS_BITBUCKET_TOKEN", "")
+        return self._auth(os.environ.get("VOMEOS_BITBUCKET_TOKEN", ""))
+
+    def _auth(self, token: str) -> dict[str, str]:
         email = os.environ.get("VOMEOS_BITBUCKET_EMAIL", "")
         if email:
             import base64
@@ -224,6 +239,50 @@ class Bitbucket(Connector):
             "GET",
             f"/repositories/{self.workspace}/{repo}/commits{suffix}",
             params=params,
+        )
+
+    def merge_base(self, repo: str, a: str, b: str) -> IntegrationResult:
+        """The best common ancestor of two revisions.
+
+        `merge_base(repo, sha, "master")` returning `sha` itself is how
+        "is this commit on master" is spelled here: Bitbucket has no compare
+        status like GitHub's, but a commit is an ancestor of a branch exactly
+        when it is its own merge base with that branch.
+        """
+        if not _repo_permitted(repo, self.allowlist):
+            return self._denied("merge_base", repo)
+        return self._call(
+            "merge_base",
+            "GET",
+            f"/repositories/{self.workspace}/{repo}/merge-base/{a}..{b}",
+        )
+
+    def pipelines(
+        self, repo: str, branch: str, limit: int = 10
+    ) -> IntegrationResult:
+        """Recent pipelines on one branch, newest first.
+
+        Needs read:pipeline:bitbucket, which the code-search token was never
+        given. A separate pipelines token (PIPELINES_TOKEN_VARS) carries it,
+        so adding CI visibility did not widen the token every agent reads
+        code with.
+        """
+        if not _repo_permitted(repo, self.allowlist):
+            return self._denied("pipelines", repo)
+        token = next(
+            (os.environ[n] for n in PIPELINES_TOKEN_VARS if os.environ.get(n)),
+            os.environ.get("VOMEOS_BITBUCKET_TOKEN", ""),
+        )
+        return self._call(
+            "pipelines",
+            "GET",
+            f"/repositories/{self.workspace}/{repo}/pipelines/",
+            params={
+                "target.branch": branch,
+                "sort": "-created_on",
+                "pagelen": min(int(limit), 50),
+            },
+            headers=self._auth(token),
         )
 
     def _denied(self, operation: str, repo: str) -> IntegrationResult:
@@ -367,6 +426,61 @@ class GitHub(Connector):
             headers=self.headers(who),
         )
 
+    def compare(
+        self, repo: str, base: str, head: str, owner: str = ""
+    ) -> IntegrationResult:
+        """How `head` relates to `base`.
+
+        `data["status"]` is "ahead" or "identical" exactly when `base` is an
+        ancestor of `head`, which makes `compare(repo, sha, "master")` the
+        "is this commit on master" check. "diverged" and "behind" mean it is
+        not. Only the status is wanted, so the commit and file lists that come
+        back with it are dropped rather than carried around.
+        """
+        if not _repo_permitted(repo, self.allowlist):
+            return self._denied("compare", repo)
+        who = owner or self.owner
+        result = self._call(
+            "compare",
+            "GET",
+            f"/repos/{who}/{repo}/compare/{base}...{head}",
+            params={"per_page": 1},
+            headers=self.headers(who),
+        )
+        if result.ok and isinstance(result.data, dict):
+            result.data = {
+                k: result.data.get(k)
+                for k in ("status", "ahead_by", "behind_by", "total_commits")
+            }
+        return result
+
+    def workflow_runs(
+        self,
+        repo: str,
+        workflow: str,
+        branch: str = "",
+        limit: int = 10,
+        owner: str = "",
+    ) -> IntegrationResult:
+        """Recent runs of one workflow, newest first.
+
+        `workflow` is the file name (`cicd-prod.yml`) or numeric id. Needs
+        Actions: read on a fine-grained token.
+        """
+        if not _repo_permitted(repo, self.allowlist):
+            return self._denied("workflow_runs", repo)
+        who = owner or self.owner
+        params: dict = {"per_page": min(int(limit), 50)}
+        if branch:
+            params["branch"] = branch
+        return self._call(
+            "workflow_runs",
+            "GET",
+            f"/repos/{who}/{repo}/actions/workflows/{workflow}/runs",
+            params=params,
+            headers=self.headers(who),
+        )
+
     def _denied(self, operation: str, repo: str) -> IntegrationResult:
         return IntegrationResult(
             self.system, operation, False,
@@ -413,6 +527,9 @@ def describe() -> dict[str, object]:
         "allowlist": (
             list(allowed_repos()) or ["(no allowlist: all reachable)"]
         ),
-        "operations": ["search_code", "read_file", "recent_commits"],
+        "operations": [
+            "search_code", "read_file", "recent_commits",
+            "compare / merge_base", "workflow_runs / pipelines",
+        ],
         "writes": "none available",
     }

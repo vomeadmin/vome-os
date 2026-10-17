@@ -49,6 +49,7 @@ from calendly_booking_handler import handle_calendly_event
 from database import init_db
 from field_feedback import handle_field_feedback
 from on_prod_handler import handle_on_prod
+from release_watcher import run_release_watcher
 from code_access_monitor import check_code_access as run_code_access_check
 from sentry_handler import (
     handle_webhook as handle_sentry_webhook,
@@ -334,6 +335,19 @@ _scheduler.add_job(
 _scheduler.add_job(
     check_clickup_webhook_health,
     CronTrigger(minute=30, timezone="America/Montreal"),
+    misfire_grace_time=600,
+    coalesce=True,
+    max_instances=1,
+)
+
+# Release watcher, every 15 minutes. Mirrors support.release_watcher. Marks an
+# Agent Fixes parent Live once every commit in Fix Commit is on master and in
+# a green production build, and tells #support-sprints which clients to
+# notify. Never moves a task's status, so the on-prod auto-send cannot fire.
+# RELEASE_WATCHER_DRY_RUN (default on) keeps it to "would do" posts.
+_scheduler.add_job(
+    run_release_watcher,
+    CronTrigger(minute="*/15", timezone="America/Montreal"),
     misfire_grace_time=600,
     coalesce=True,
     max_instances=1,

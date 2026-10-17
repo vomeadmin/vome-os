@@ -395,6 +395,9 @@ ADDED_SINCE = {
     # granularity and this job is idempotent, so a double run costs one
     # extra ClickUp API call.
     "support.clickup_webhook_health": ("30 * * * *", "support", CLAIM_NONE),
+    # Every 15 minutes, unclaimed for the same reason. Its idempotency is the
+    # per-fix alert state in vomeos_release_fixes.
+    "support.release_watcher": ("*/15 * * * *", "support", CLAIM_NONE),
 }
 
 
