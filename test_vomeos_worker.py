@@ -398,6 +398,8 @@ ADDED_SINCE = {
     # Every 15 minutes, unclaimed for the same reason. Its idempotency is the
     # per-fix alert state in vomeos_release_fixes.
     "support.release_watcher": ("*/15 * * * *", "support", CLAIM_NONE),
+    # Four a day on weekdays. Skips itself within 20 minutes of a post.
+    "support.sprint_update": ("0 10,13,16,19 * * 1-5", "support", CLAIM_NONE),
 }
 
 

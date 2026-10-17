@@ -79,6 +79,9 @@ class JobSpec:
     skills: tuple[str, ...] = ()
     requires_context: tuple[str, ...] = ()
     output: str = "text"
+    # The most images this agent may be shown. 0, the default, means none:
+    # seeing pictures is a capability, granted in the manifest like any other.
+    images: int = 0
 
 
 @dataclass(frozen=True)
@@ -196,6 +199,7 @@ def parse_manifest(raw: dict, directory: Path) -> AgentManifest:
             job_raw.get("requires_context"), "job.requires_context"
         ),
         output=str(job_raw.get("output") or "text").strip(),
+        images=int(job_raw.get("images") or 0),
     )
 
     guards_raw = _table(raw, "guards")

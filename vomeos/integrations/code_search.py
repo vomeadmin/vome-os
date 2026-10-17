@@ -201,9 +201,14 @@ class Bitbucket(Connector):
         )
 
     def read_file(
-        self, repo: str, path: str, ref: str = "HEAD"
+        self, repo: str, path: str, ref: str = "HEAD",
+        max_bytes: int = 0,
     ) -> IntegrationResult:
-        """One file at one ref. Truncated to MAX_FILE_BYTES."""
+        """One file at one ref. Truncated to MAX_FILE_BYTES.
+
+        `max_bytes` raises the cap for a caller that windows the text
+        itself, which a whole-file reader must not do.
+        """
         if not _repo_permitted(repo, self.allowlist):
             return self._denied("read_file", repo)
         result = self._call(
@@ -211,7 +216,7 @@ class Bitbucket(Connector):
             "GET",
             f"/repositories/{self.workspace}/{repo}/src/{ref}/{path}",
         )
-        return _truncate(result)
+        return _truncate(result, max_bytes)
 
     def recent_commits(
         self, repo: str, path: str = "", limit: int = 10, ref: str = ""
@@ -380,7 +385,8 @@ class GitHub(Connector):
         )
 
     def read_file(
-        self, repo: str, path: str, ref: str = "", owner: str = ""
+        self, repo: str, path: str, ref: str = "", owner: str = "",
+        max_bytes: int = 0,
     ) -> IntegrationResult:
         if not _repo_permitted(repo, self.allowlist):
             return self._denied("read_file", repo)
@@ -393,7 +399,7 @@ class GitHub(Connector):
             params=params,
             headers=self.headers(who),
         )
-        return _truncate(result)
+        return _truncate(result, max_bytes)
 
     def recent_commits(
         self,
@@ -488,15 +494,23 @@ class GitHub(Connector):
         )
 
 
-def _truncate(result: IntegrationResult) -> IntegrationResult:
-    """Cap a file response so one large module cannot swamp the context."""
+def _truncate(
+    result: IntegrationResult, max_bytes: int = 0
+) -> IntegrationResult:
+    """Cap a file response so one large module cannot swamp the context.
+
+    A caller that windows around a line passes a larger `max_bytes`: the
+    default cap cut `birthday_tasks.py` near line 1300, so every frame below
+    it came back as an empty window.
+    """
+    cap = max_bytes or MAX_FILE_BYTES
     if not result.ok or not isinstance(result.data, str):
         return result
-    if len(result.data) <= MAX_FILE_BYTES:
+    if len(result.data) <= cap:
         return result
     result.data = (
-        result.data[:MAX_FILE_BYTES]
-        + f"\n\n... truncated at {MAX_FILE_BYTES} bytes ..."
+        result.data[:cap]
+        + f"\n\n... truncated at {cap} bytes ..."
     )
     return result
 

@@ -50,9 +50,12 @@ from database import init_db
 from field_feedback import handle_field_feedback
 from on_prod_handler import handle_on_prod
 from release_watcher import run_release_watcher
+import shadow_triage
+import sprint_thread
 from code_access_monitor import check_code_access as run_code_access_check
 from sentry_handler import (
     handle_webhook as handle_sentry_webhook,
+    run_backfill as run_sentry_backfill,
     run_regate_sweep as run_sentry_regate_sweep,
     run_shadow_report as run_sentry_shadow_report,
 )
@@ -344,11 +347,21 @@ _scheduler.add_job(
 # Agent Fixes parent Live once every commit in Fix Commit is on master and in
 # a green production build, and tells #support-sprints which clients to
 # notify. Never moves a task's status, so the on-prod auto-send cannot fire.
-# RELEASE_WATCHER_DRY_RUN (default on) keeps it to "would do" posts.
 _scheduler.add_job(
     run_release_watcher,
     CronTrigger(minute="*/15", timezone="America/Montreal"),
     misfire_grace_time=600,
+    coalesce=True,
+    max_instances=1,
+)
+
+# Sprint thread update at 10, 13, 16 and 19 on weekdays. Mirrors
+# support.sprint_update.
+_scheduler.add_job(
+    sprint_thread.run_sprint_update,
+    CronTrigger(day_of_week="mon-fri", hour="10,13,16,19", minute=0,
+                timezone="America/Montreal"),
+    misfire_grace_time=900,
     coalesce=True,
     max_instances=1,
 )
@@ -361,6 +374,19 @@ _scheduler.add_job(
     CronTrigger(
         hour=int(os.environ.get("CODE_ACCESS_HOUR", "8")),
         minute=int(os.environ.get("CODE_ACCESS_MINUTE", "0")),
+        timezone="America/Montreal",
+    ),
+    misfire_grace_time=3600,
+    coalesce=True,
+    max_instances=1,
+)
+
+# Sentry backfill, 08:15. Mirrors engineering.sentry_backfill.
+_scheduler.add_job(
+    run_sentry_backfill,
+    CronTrigger(
+        hour=int(os.environ.get("SENTRY_BACKFILL_HOUR", "8")),
+        minute=int(os.environ.get("SENTRY_BACKFILL_MINUTE", "15")),
         timezone="America/Montreal",
     ),
     misfire_grace_time=3600,
@@ -542,7 +568,18 @@ async def slack_events_webhook(request: Request):
             SLACK_QUEUE_SANJAY_CHANNEL,
             SLACK_QUEUE_ONLYG_CHANNEL,
         )
-        if channel in _reply_channels and thread_ts:
+        if channel == sprint_thread.CHANNEL:
+            # Sam's commands in the day's sprint thread. Top-level messages
+            # and chat that is not a command are ignored.
+            if thread_ts and thread_ts != event.get("ts"):
+                sprint_thread.handle_reply({
+                    "user": user,
+                    "text": text,
+                    "thread_ts": thread_ts,
+                    "ts": event.get("ts", ""),
+                })
+
+        elif channel in _reply_channels and thread_ts:
             # Only process replies in threads (not new top-level messages)
             if thread_ts != event.get("ts"):
                 handle_reply({
@@ -606,6 +643,10 @@ async def zoho_ticket_webhook(request: Request):
 
     process_ticket(ticket_data)
 
+    # Card and draft for the sprint thread, on the worker. Never blocks or
+    # breaks the existing intake above.
+    shadow_triage.enqueue(str(ticket_data.get("ticket_id") or ""), "new")
+
     return {"status": "ok"}
 
 
@@ -640,6 +681,7 @@ async def zoho_update_webhook(request: Request):
     # him in a Closed<->Processing loop. See is_zoho_reply_event().
     if is_zoho_reply_event(event_type, raw_id, raw_ticket_id):
         process_ticket_update(ticket_id)
+        shadow_triage.enqueue(ticket_id, "reply")
     else:
         print(
             f"Zoho update on ticket {ticket_id} is not a new client reply "

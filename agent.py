@@ -354,6 +354,7 @@ def _extract_ticket_fields(raw_result: dict) -> dict:
         "contact_email": contact_email,
         "cc_email": cc_email,
         "status": ticket.get("status", ""),
+        "ticket_number": str(ticket.get("ticketNumber", "") or ""),
         "created_time": ticket.get("createdTime", ""),
         "channel": ticket.get("channel", "") or "",
         "source_type": source_type,

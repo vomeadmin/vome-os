@@ -1,0 +1,46 @@
+[identity]
+name = "sprint_partner"
+division = "customer_success"
+title = "Support Sprint Partner"
+reports_to = "sam"
+hired = "2026-10-17"
+
+[model]
+# Senior tier. Sam is asking judgment questions about real customers ("what
+# would you tell her", "is this the same bug as 9500") and the answer has to
+# be right the first time; he is reviewing on a phone between other things.
+tier = "senior"
+max_tokens = 2500
+
+[job]
+charter = "charter.md"
+skills = ["reading-a-ticket-thread", "checking-for-existing-work"]
+requires_context = [
+    "now",
+    "items_today",
+    "conversation",
+    "referenced_tickets",
+    "product_knowledge",
+    "sam_message",
+]
+output = "json"
+
+[guards]
+# Its reply goes to Sam, internally. Any draft it writes in an `edit` action
+# is customer-facing and is checked separately, with every outbound guard,
+# before it is stored (sprint_thread._check_draft). A send is never decided
+# by this agent alone: the code requires Sam's own words to ask for it.
+output = ["json_shape", "non_empty"]
+client_facing = false
+
+[limits]
+timeout_seconds = 120
+max_retries = 2
+
+[approval]
+requires_ceo_approval = false
+escalate_to = "#support-sprints"
+
+[evals]
+path = "evals/cases.jsonl"
+min_agreement = 0.8

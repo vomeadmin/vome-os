@@ -1,0 +1,60 @@
+[identity]
+name = "reply_drafter"
+division = "customer_success"
+title = "Customer Reply Writer"
+reports_to = "sam"
+hired = "2026-10-17"
+
+[model]
+# Standard tier. The judgment (what kind of ticket, what is backed) was made
+# by the triage director on senior; this writes four sentences in a fixed
+# voice from that card. The guards, not the tier, are what keep it safe.
+tier = "standard"
+max_tokens = 900
+
+[job]
+charter = "charter.md"
+skills = ["reading-a-ticket-thread"]
+requires_context = [
+    "ticket_number",
+    "contact_first_name",
+    "language",
+    "category",
+    "live_question",
+    "situation",
+    "existing_work",
+    "release_state",
+    "blocking_claims",
+    "missing_information",
+    "kb_matches",
+    "thread",
+    "sam_notes",
+]
+output = "text"
+
+[guards]
+# Every draft lands in front of Sam, and every one of these still runs,
+# because "Sam will read it" is how #8945 went out: a reviewer skimming a
+# draft that read fine and was not.
+output = [
+    "non_empty",
+    "client_message",
+    "no_unverified_claims",
+    "no_roadmap_without_task",
+    "no_confirmation",
+    "required_signature",
+]
+client_facing = true
+
+[limits]
+timeout_seconds = 90
+max_retries = 2
+
+[approval]
+# Nothing sends without Sam's explicit "send" in the sprint thread.
+requires_ceo_approval = true
+escalate_to = "#support-sprints"
+
+[evals]
+path = "evals/cases.jsonl"
+min_agreement = 0.8

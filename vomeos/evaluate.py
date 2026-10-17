@@ -28,6 +28,21 @@ key. Keys the agent returns that `expect` does not mention are ignored, which
 is what lets an answer key pin the decision ("recommendation") without also
 pinning the prose ("reason"). Comparison is case insensitive on strings after
 stripping, because "Send" and "send" are the same decision.
+
+TEXT AGENTS
+-----------
+An agent whose output is the message itself (`output = "text"`) has no keys
+to compare, and wrapping an email in JSON would put braces in front of the
+guards that are meant to read exactly what the customer reads. So a text
+agent's `expect` uses four checks instead:
+
+    status        "ok" or "blocked": did the draft pass its guards
+    contains      phrases that must appear (case insensitive)
+    not_contains  phrases that must not
+    max_words     the body may not run longer than this
+
+That pins what can be checked (the decision, the must-say, the must-never-say,
+the length) and leaves the prose to the person who approves it.
 """
 
 from __future__ import annotations
@@ -126,6 +141,27 @@ def compare(expected: dict, actual: dict | None) -> list[str]:
     return problems
 
 
+def compare_text(expected: dict, text: str, status: str) -> list[str]:
+    """The four text checks. Empty list means agreement."""
+    problems = []
+    want_status = expected.get("status")
+    if want_status and str(want_status).lower() != status:
+        problems.append(f"status: expected {want_status!r}, got {status!r}")
+    lowered = (text or "").lower()
+    for phrase in expected.get("contains") or []:
+        if str(phrase).lower() not in lowered:
+            problems.append(f"missing {phrase!r}")
+    for phrase in expected.get("not_contains") or []:
+        if str(phrase).lower() in lowered:
+            problems.append(f"must not say {phrase!r}")
+    limit = expected.get("max_words")
+    if limit and len((text or "").split()) > int(limit):
+        problems.append(
+            f"{len(text.split())} words, over the {limit} word limit"
+        )
+    return problems
+
+
 def evaluate(qualified: str, limit: int = 0) -> Report:
     """Run every case in the agent's answer key. Makes real model calls."""
     from vomeos.runner import run_agent  # local import: needs an API key
@@ -144,9 +180,16 @@ def evaluate(qualified: str, limit: int = 0) -> Report:
             context=case.get("context") or {},
             subject_type="eval",
             subject_id=case_id,
+            # Facts the guards need that are not the agent's input, such as
+            # the shipped task behind a resolution reply.
+            guard_context=case.get("guard_context"),
         )
-        actual = result.data if result.ok else None
-        mismatches = compare(expected, actual)
+        if manifest.job.output == "text":
+            actual = {"text": result.text}
+            mismatches = compare_text(expected, result.text, result.status)
+        else:
+            actual = result.data if result.ok else None
+            mismatches = compare(expected, actual)
         outcomes.append(CaseOutcome(
             case_id=case_id,
             agreed=not mismatches,

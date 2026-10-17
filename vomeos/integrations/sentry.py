@@ -208,6 +208,14 @@ def normalize(payload: dict, resource: str = "") -> IssueSignal | None:
     return None
 
 
+def from_rest_issue(issue: dict, reason: str) -> IssueSignal | None:
+    """An issue from the REST API (`list_issues`) as a signal.
+
+    Same shape as the webhook's issue body, so the same parser serves both.
+    """
+    return _from_issue(issue, reason)
+
+
 def _from_issue(issue: dict, reason: str) -> IssueSignal | None:
     issue_id = str(issue.get("id", "") or "")
     if not issue_id:
@@ -346,6 +354,31 @@ class Sentry(Connector):
         """
         return self._call(
             "list_projects", "GET", f"/organizations/{self.org}/projects/"
+        )
+
+    def list_issues(
+        self,
+        project: str,
+        query: str = "is:unresolved",
+        stats_period: str = "24h",
+        limit: int = 25,
+    ) -> IntegrationResult:
+        """Issues in one project, most frequent first.
+
+        For the daily backfill. The webhook fires only on `issue.created`,
+        so an issue that regressed, escalated, or was created while the
+        pipeline was off never arrives on its own.
+        """
+        return self._call(
+            "list_issues",
+            "GET",
+            f"/projects/{self.org}/{project}/issues/",
+            params={
+                "query": query,
+                "statsPeriod": stats_period,
+                "sort": "freq",
+                "limit": min(_int(limit, 25), 100),
+            },
         )
 
     def issue_tags(self, issue_id: str) -> IntegrationResult:

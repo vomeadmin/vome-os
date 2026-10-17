@@ -52,6 +52,10 @@ MAX_TOTAL_CHARS = int(os.environ.get("SENTRY_CODE_MAX_CHARS", "24000"))
 
 COMMITS = int(os.environ.get("SENTRY_CODE_COMMITS", "8"))
 
+# What to fetch per file before windowing. Not what reaches the model: the
+# window does that. Large because our biggest modules run past 4000 lines.
+READ_BYTES = int(os.environ.get("SENTRY_CODE_READ_BYTES", "2000000"))
+
 # Paths that are never ours. Reading Django's own source to diagnose our bug
 # is a reliable way to spend tokens learning that Django works.
 _VENDOR = tuple(
@@ -113,8 +117,59 @@ def _window(text: str, lineno: int) -> str:
     return head + "\n" + "\n".join(out)
 
 
+def message_anchor(title: str) -> str:
+    """The fixed text of a logged error, to find where it is raised.
+
+    `logger.error("Error sending Vome birthday email: %s", exc)` reaches
+    Sentry as a message event with no stack trace at all, titled
+    "Error sending Vome birthday email: null value in column ...". The part
+    before the first colon is the literal in our source; the rest is the
+    runtime detail. An exception title ("IntegrityError: ...") gives no
+    anchor, because those events carry a trace and the frames are better.
+    """
+    head = (title or "").split(":", 1)[0].strip().strip("\"'")
+    if len(head) < 12 or " " not in head:
+        return ""
+    if re.fullmatch(r"[A-Z][A-Za-z]*(Error|Exception|Warning)", head):
+        return ""
+    return head
+
+
+def _frames_from_message(client, repo: str, ref: str, anchor: str,
+                         kwargs: dict, errors: list[str]):
+    """(path, lineno, body) for files that contain a logged message.
+
+    Code search says which files. The line is then found in the file as read
+    at `ref`, because the search index follows the default branch and its
+    line numbers need not match the code that actually ran.
+    """
+    result = client.search_code(f'"{anchor}"', repo=repo, **kwargs)
+    if not result.ok:
+        errors.append(f"message search: {result.error[:120]}")
+        return []
+    data = result.data if isinstance(result.data, dict) else {}
+    paths = []
+    for item in data.get("values") or data.get("items") or []:
+        path = (item.get("file") or {}).get("path") or item.get("path") or ""
+        if path and _is_ours(path) and path not in paths:
+            paths.append(path)
+    found = []
+    for path in paths[:MAX_FILES]:
+        read = client.read_file(
+            repo, path, ref=ref, max_bytes=READ_BYTES, **kwargs
+        )
+        if not read.ok or not isinstance(read.data, str):
+            errors.append(f"{path}: {read.error[:120] or 'unreadable'}")
+            continue
+        for index, line in enumerate(read.data.splitlines(), start=1):
+            if anchor in line:
+                found.append((path, index, read.data))
+                break
+    return found
+
+
 def gather(trace: str, repo: str, ref: str, host: str = "bitbucket",
-           owner: str = "") -> dict:
+           owner: str = "", message: str = "") -> dict:
     """Files and recent commits behind a traceback.
 
     Returns `{"files": str, "commits": str, "read": [...], "errors": [...]}`.
@@ -122,6 +177,10 @@ def gather(trace: str, repo: str, ref: str, host: str = "bitbucket",
     Never raises, and never silently returns an empty string for a failure.
     "We could not read the repository" and "the file is empty" have to look
     different to the analyst, or it will reason confidently about nothing.
+
+    `message` is the issue title. When the trace names none of our files
+    (a logged error rather than an exception), the code is found by
+    searching for the message's fixed text instead.
     """
     frames = frames_of_interest(trace)
     client = _client_for(host)
@@ -140,10 +199,30 @@ def gather(trace: str, repo: str, ref: str, host: str = "bitbucket",
     errors: list[str] = []
     budget = MAX_TOTAL_CHARS
 
-    for path, lineno in frames:
+    anchor = "" if frames else message_anchor(message)
+    if anchor:
+        located = _frames_from_message(
+            client, repo, ref, anchor, kwargs, errors
+        )
+        for path, lineno, body in located:
+            if budget <= 0:
+                break
+            chunk = _window(body, lineno).replace("{path}", path)
+            chunk = (
+                "(no stack trace: located by the logged message "
+                f"'{anchor}')\n" + chunk
+            )[:budget]
+            budget -= len(chunk)
+            chunks.append(chunk)
+            read.append(f"{path}:{lineno}")
+        frames = [(path, lineno) for path, lineno, _ in located]
+
+    for path, lineno in ([] if anchor else frames):
         if budget <= 0:
             break
-        result = client.read_file(repo, path, ref=ref, **kwargs)
+        result = client.read_file(
+            repo, path, ref=ref, max_bytes=READ_BYTES, **kwargs
+        )
         if not result.ok:
             errors.append(f"{path}: {result.error[:120]}")
             continue
