@@ -1,0 +1,49 @@
+[identity]
+name = "feature_scout"
+division = "content"
+title = "Feature Scout"
+reports_to = "sam"
+hired = "2026-10-17"
+
+[model]
+# Standard tier. This is the mechanical first step: name the wider capability
+# a feature belongs to and say what to look up. The judgment (what the video
+# claims, how it is shaped) belongs to the strategist, who reads what this
+# finds. A wrong query here costs one irrelevant article, which the
+# strategist ignores; it does not cost a wrong video.
+tier = "standard"
+max_tokens = 3000
+
+[job]
+charter = "charter.md"
+skills = []
+requires_context = [
+    "feature_name",
+    "faq_text",
+    # What the person in the thread said. "We just went live with this" is
+    # the strongest signal that the feature is new.
+    "brief",
+]
+output = "json"
+
+[guards]
+# Output is a small JSON object read only by code (the queries) and by the
+# strategist. Nothing reaches a viewer.
+output = ["json_shape", "non_empty"]
+client_facing = false
+
+[limits]
+timeout_seconds = 90
+max_retries = 2
+
+[approval]
+requires_ceo_approval = false
+escalate_to = "#video-studio"
+
+[evals]
+path = "evals/cases.jsonl"
+# Held at 0.8. The capability name is phrasing and reasonable people word it
+# differently. What has to be right every time: the queries cover the wider
+# capability rather than restating the feature, and is_new follows the
+# evidence rather than a guess.
+min_agreement = 0.8

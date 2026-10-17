@@ -222,6 +222,16 @@ def _norm(text) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
 
 
+def _blank(c) -> bool:
+    """True for a concept with no content at all: every value empty."""
+    if not isinstance(c, dict):
+        return False
+    return not any(
+        (str(v).strip() if not isinstance(v, (list, int, float)) else
+         ([x for x in v if str(x).strip()] if isinstance(v, list) else v))
+        for v in c.values())
+
+
 def check_concepts(data, ready_names: list[str],
                    prior_hooks: list[str] | None = None
                    ) -> tuple[list[dict], str]:
@@ -232,6 +242,11 @@ def check_concepts(data, ready_names: list[str],
     when more than one is ready, and no hook lifted from an earlier video.
     """
     concepts = data.get("concepts") if isinstance(data, dict) else None
+    # A wholly blank entry carries nothing, so dropping it loses nothing. The
+    # first live run returned three good concepts and a fourth with every
+    # field empty, and the whole post was refused over it.
+    if isinstance(concepts, list):
+        concepts = [c for c in concepts if not _blank(c)]
     if not isinstance(concepts, list) or len(concepts) != 3:
         return [], ("the creative director did not return exactly three "
                     "concepts")
@@ -253,9 +268,14 @@ def check_concepts(data, ready_names: list[str],
     hooks = [_norm(c["hook"]) for c in concepts]
     if len(set(hooks)) != len(hooks):
         return [], "two concepts share a hook"
-    if len(ready) > 1 and len({c["format"] for c in concepts}) < 2:
+    # Variety is the default, not a rule: a ready format that cannot show
+    # the feature would make a broken concept. The first real run used one
+    # format because the explainer cannot draw an email at all, and said so.
+    # One format is allowed only with that reason given.
+    if (len(ready) > 1 and len({c["format"] for c in concepts}) < 2
+            and not str((data or {}).get("notes") or "").strip()):
         return [], ("all three concepts use one format although %d are "
-                    "ready" % len(ready))
+                    "ready, and the notes do not say why" % len(ready))
     taken = {_norm(h) for h in prior_hooks or [] if _norm(h)}
     for i, h in enumerate(hooks, start=1):
         if h in taken:

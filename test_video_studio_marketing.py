@@ -49,6 +49,12 @@ CATALOGUE = [
      "best_for": "choices", "description": "d", "ready": False},
 ]
 
+SCOUT = {"parent_capability": "Sending email to volunteers from Vome",
+         "is_new": True, "new_evidence": "just went live",
+         "queries": ["send emails from your own domain",
+                     "automated emails"],
+         "related_features": []}
+
 POSITIONING = {"audience": "Admins who already email users from Vome.",
                "whats_new": "How emails look.",
                "job_to_be_done": "Send a considered update.",
@@ -174,6 +180,11 @@ def env(jobs, monkeypatch):
     state = SimpleNamespace(updates=[], posts=[], studio=Studio(), row={})
     monkeypatch.setattr(jobs, "_studio", lambda: state.studio)
     monkeypatch.setattr(jobs, "_local_studio", lambda: "")
+    state.research = []
+    monkeypatch.setattr(
+        jobs, "_related_articles",
+        lambda queries, exclude_title="": state.research.append(
+            list(queries)) or "### Send from your own domain\nIt works.")
     monkeypatch.setattr(jobs, "_faq_text",
                         lambda row, msg: ("Choosing an email format",
                                           "Basic, Designed or Custom HTML."))
@@ -303,14 +314,23 @@ def test_strategist_then_director_with_the_right_context(jobs, env,
                             "storyboard_json": json.dumps({"scenes": [
                                 {"lines": [{"vo": "Still sending?"}]}]}),
                             "concepts_json": "", "chosen_concept": None}])
-    agents = Agents(content_strategist=POSITIONING,
+    agents = Agents(feature_scout=SCOUT, content_strategist=POSITIONING,
                     creative_director={"concepts": CONCEPTS, "notes": "n"})
     _install(monkeypatch, agents)
     out = jobs.run_concepts("video on this", {"thread_ts": "1.2"})
     assert out["ok"] is True, out
-    assert agents.names() == ["content_strategist", "creative_director"]
+    assert agents.names() == ["feature_scout", "content_strategist",
+                              "creative_director"]
+    assert set(agents.context("feature_scout")) == {
+        "feature_name", "faq_text", "brief"}
+    # The scout's queries are what gets researched, and the strategist
+    # sees what came back: the bigger picture, with its sources.
+    assert env.research == [SCOUT["queries"]]
     s = agents.context("content_strategist")
-    assert set(s) == {"feature_name", "faq_text", "brief", "prior_videos"}
+    assert set(s) == {"feature_name", "faq_text", "brief", "prior_videos",
+                      "scout", "related_articles"}
+    assert json.loads(s["scout"]) == SCOUT
+    assert "own domain" in s["related_articles"]
     assert "Recruitment workflows | explainer" in s["prior_videos"]
     d = agents.context("creative_director")
     for key in ("positioning", "faq_text", "formats", "prior_videos"):
@@ -325,7 +345,7 @@ def test_strategist_then_director_with_the_right_context(jobs, env,
 def test_a_concept_in_a_format_that_is_not_ready_is_refused(jobs, env,
                                                             monkeypatch):
     bad = [_concept(1, "trio"), _concept(2), _concept(3, "reveal")]
-    _install(monkeypatch, Agents(content_strategist=POSITIONING,
+    _install(monkeypatch, Agents(feature_scout=SCOUT, content_strategist=POSITIONING,
                                  creative_director={"concepts": bad}))
     out = jobs.run_concepts("brief", {"thread_ts": "1.2"})
     assert out["ok"] is False and "trio" in out["error"]
@@ -339,12 +359,12 @@ def test_no_ready_format_means_no_agents(jobs, env, monkeypatch):
 
 
 def test_blocked_strategist_stops_the_director(jobs, env, monkeypatch):
-    agents = Agents(content_strategist=_Result("blocked",
+    agents = Agents(feature_scout=SCOUT, content_strategist=_Result("blocked",
                                                reason="json_shape: no"))
     _install(monkeypatch, agents)
     out = jobs.run_concepts("brief", {"thread_ts": "1.2"})
     assert out["ok"] is False and "blocked" in out["error"]
-    assert agents.names() == ["content_strategist"]
+    assert agents.names() == ["feature_scout", "content_strategist"]
 
 
 def test_direction_keeps_the_positioning_and_shows_the_old_concepts(
@@ -365,7 +385,7 @@ def test_direction_keeps_the_positioning_and_shows_the_old_concepts(
 
 def test_develop_concepts_posts_and_waits_for_a_pick(jobs, env, monkeypatch):
     _install(monkeypatch, Agents(
-        content_strategist=POSITIONING,
+        feature_scout=SCOUT, content_strategist=POSITIONING,
         creative_director={"concepts": CONCEPTS, "notes": "Trio later."}))
     env.row = {"thread_ts": "1.2"}
     jobs.develop_concepts("1.2", "video please")
@@ -385,7 +405,7 @@ def test_develop_concepts_posts_and_waits_for_a_pick(jobs, env, monkeypatch):
 
 def test_failed_first_concepts_leave_the_thread_open(jobs, env, monkeypatch):
     _install(monkeypatch, Agents(
-        content_strategist=_Result("error", reason="overloaded")))
+        feature_scout=SCOUT, content_strategist=_Result("error", reason="overloaded")))
     env.row = {"thread_ts": "1.2"}
     jobs.develop_concepts("1.2", "video please")
     assert _merged(env.updates)["state"] == jobs.video_threads.STATE_IDEA

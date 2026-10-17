@@ -18,7 +18,7 @@ hired = "2026-10-17"
 tier = "senior"
 # The brief is a small JSON object, but the senior model reasons first and
 # that counts against this cap too.
-max_tokens = 8000
+max_tokens = 12000
 
 [job]
 charter = "charter.md"
@@ -33,6 +33,13 @@ requires_context = [
     # Required so the strategist can never position a video without
     # knowing what has already been said.
     "prior_videos",
+    # The feature_scout's read: parent capability, is_new and its evidence.
+    "scout",
+    # Help centre articles about the rest of the parent capability, found by
+    # the scout's queries. Required because the strategist positioned the
+    # first real video from one article and missed the bigger picture: that
+    # Vome already sends email from your own domain, on its own, at scale.
+    "related_articles",
 ]
 output = "json"
 

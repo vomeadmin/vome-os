@@ -573,6 +573,44 @@ def _run(agent: str, context: dict, thread_ts: str):
     return result.data, ""
 
 
+RELATED_PER_QUERY = 2
+RELATED_MAX = 8
+RELATED_CHARS = 1500
+
+
+def _related_articles(queries: list, exclude_title: str = "") -> str:
+    """Help centre articles on the rest of the feature's capability.
+
+    One search per scout query, deduplicated, capped, the source article
+    left out. These are the only facts the strategist may use beyond the FAQ,
+    so each keeps its title: a landscape claim names the article behind it.
+    """
+    try:
+        from database import search_kb_articles_db
+    except Exception as exc:
+        print("[VIDEO] KB search unavailable: %s" % exc)
+        return ""
+    seen, blocks = {(exclude_title or "").strip().lower()}, []
+    for q in [str(q).strip() for q in queries if str(q).strip()][:6]:
+        try:
+            hits = search_kb_articles_db(q, language="en",
+                                         limit=RELATED_PER_QUERY,
+                                         body_chars=RELATED_CHARS)
+        except Exception as exc:
+            print("[VIDEO] KB search failed for %r: %s" % (q, exc))
+            continue
+        for h in hits or []:
+            title = (h.get("title") or "").strip()
+            if not title or title.lower() in seen:
+                continue
+            seen.add(title.lower())
+            blocks.append("### %s\n%s" % (title, (h.get("body") or "")
+                                          .strip()))
+            if len(blocks) >= RELATED_MAX:
+                return "\n\n".join(blocks)
+    return "\n\n".join(blocks)
+
+
 def run_concepts(brief: str, row: dict, direction: str = "") -> dict:
     """The strategist and the creative director, for one thread.
 
@@ -604,11 +642,26 @@ def run_concepts(brief: str, row: dict, direction: str = "") -> dict:
 
     positioning = video_concepts.load_positioning(row) if direction else None
     if not positioning:
+        # Step back first. The strategist used to see only this article and
+        # positioned a narrow setting to viewers who do not know Vome sends
+        # email at all. The scout names the wider capability and what to
+        # look up; the related articles are what the strategist may use.
+        scout, err = _run("content.feature_scout", {
+            "feature_name": feature_name,
+            "faq_text": body,
+            "brief": brief,
+        }, thread_ts)
+        if err:
+            return {"ok": False, "error": err}
+        related = _related_articles(scout.get("queries") or [],
+                                    exclude_title=feature_name)
         positioning, err = _run("content.content_strategist", {
             "feature_name": feature_name,
             "faq_text": body,
             "brief": brief,
             "prior_videos": prior_text,
+            "scout": json.dumps(scout, indent=2),
+            "related_articles": related or "(none found)",
         }, thread_ts)
         if err:
             return {"ok": False, "error": err}
