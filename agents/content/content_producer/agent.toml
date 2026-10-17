@@ -25,14 +25,24 @@ max_tokens = 20000
 
 [job]
 charter = "charter.md"
-skills = ["writing-a-vome-storyboard"]
+skills = ["writing-a-vome-storyboard", "keeping-the-vome-video-voice"]
 requires_context = [
     "feature_name",
     "faq_text",
     # From Studio: the schema, an approved storyboard to copy the shape of,
-    # and the cue names the animation needs. Required so the agent can never
-    # run without it and guess, which is what the first live run did.
+    # and the cue names the animation needs, for the chosen concept's
+    # format. Required so the agent can never run without it and guess,
+    # which is what the first live run did.
     "storyboard_contract",
+    # The concept a person picked from the creative director's three, as
+    # JSON: format, angle, hook, beats. Required so every script is written
+    # to a chosen concept rather than to the shape of the first video.
+    # Threads that predate concepts pass an empty value, rendered as
+    # "(none provided)", and the charter says what to do then.
+    "concept",
+    # The strategist's positioning brief, as JSON. The single claim every
+    # line serves and the list of things the script must not say.
+    "positioning",
 ]
 output = "json"
 

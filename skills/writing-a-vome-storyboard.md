@@ -1,23 +1,30 @@
 ---
 name: writing-a-vome-storyboard
-description: The exact JSON shape of a Vome Studio storyboard, worked from the contract Studio supplies: structure, on-screen keys, cues, captions and emphasis.
+description: The exact JSON shape of a Vome Studio storyboard in any format, worked from the contract Studio supplies for that format: structure, on-screen keys, cues, captions and emphasis.
 owner: content
 ---
 
-You are given the **storyboard contract** from Vome Studio: the JSON
-`schema`, an `example` storyboard that a person approved and that is built,
-the `required_cues`, and the `templates`. Work from it, never from memory.
+You are given the **storyboard contract** from Vome Studio for one video
+format: the `format` name, the JSON `schema`, an `example` storyboard in that
+format that a person approved, the `required_cues`, and the `templates`.
+Work from it, never from memory. Formats differ in their scenes, so the
+contract you are given is the only one that applies.
 
 **Output one JSON object and nothing else.** No prose before or after it, no
 code fence.
 
 **Copy the example's structure exactly, then change the content.** Same top
-level keys. The same five scenes in the same order, with the same `id` and
-`template` on each: `hook`, `problem`, `ui_demo`, `benefit`, `cta`. Keep
-`voice`, `music` and `pacing` exactly as the example has them. Set the top
-level `id` to a lower-case slug of the feature, like `kiosk-check-in`; it
-names the render folder and every output file. Set `feature_name` and
-`source_faq_url`.
+level keys. The same scenes in the same order, with the same `id` and
+`template` on each as the example has. Keep `voice`, `music` and `pacing`
+exactly as the example has them. Set the top level `id` to a lower-case slug
+of the feature, like `kiosk-check-in`; it names the render folder and every
+output file. Set `feature_name` and `source_faq_url`. Set the top level
+`format` to the contract's `format`, except for `explainer`, which is the
+default and is left out.
+
+**A concept's beats land on the format's scenes**, in order. If a beat has
+no scene to land on, merge it into the nearest one or drop it; never add a
+scene the example does not have.
 
 **`on_screen` keeps the example's keys for each template.** Each template
 draws one specific mock and reads exactly those keys. Change the values (the
@@ -28,7 +35,8 @@ add a key, rename one, or drop one.
 example has it. The animation is timed off these names; a missing one means
 that part of the picture never moves.
 
-**What each scene is for.**
+**What each scene is for, in the explainer format.** Other formats describe
+their scenes in their own schema and example; follow those.
 
 - **hook** one line. A question or an instruction naming the pain. It has to
   land before anyone decides to scroll.

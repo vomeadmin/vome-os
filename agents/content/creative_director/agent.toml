@@ -1,0 +1,64 @@
+[identity]
+name = "creative_director"
+division = "content"
+title = "Creative Director"
+reports_to = "sam"
+hired = "2026-10-17"
+
+[model]
+# Senior tier. This is the step that stops every video coming out with the
+# same structure as the first one: choosing an angle, a hook and a format
+# that fit THIS feature, three genuinely different ways, without repeating
+# anything already made. Range and taste are exactly what a cheaper model
+# lacks; it returns three variations of one idea.
+#
+# It runs once per thread, plus once per round of direction on the
+# concepts. Rare enough that the tier costs nothing worth saving.
+tier = "senior"
+# Three concepts with beats is a small object, but the senior model reasons
+# first and that counts against this cap too.
+max_tokens = 10000
+
+[job]
+charter = "charter.md"
+skills = ["keeping-the-vome-video-voice"]
+requires_context = [
+    # The strategist's positioning brief, as JSON. Every concept proves its
+    # single_claim.
+    "positioning",
+    "faq_text",
+    # Studio's format catalogue, as JSON. Only formats whose `ready` is true
+    # may be offered. Required so a concept can never name a format Studio
+    # cannot build.
+    "formats",
+    # Earlier videos, so no concept repeats an angle or a hook.
+    "prior_videos",
+]
+output = "json"
+
+[guards]
+# The concepts are posted to the thread for a person to pick from, so the
+# shape has to parse. The handler also checks deterministically that there
+# are three, that every format is ready, and that no hook repeats.
+output = ["json_shape", "non_empty"]
+# False on the content_producer reasoning: a person in the thread reads the
+# concepts and picks one. Nothing here reaches a viewer or a customer.
+client_facing = false
+
+[limits]
+timeout_seconds = 180
+max_retries = 2
+
+[approval]
+# A person picks one of the three, or sends it back with direction. That is
+# the gate, and it is human.
+requires_ceo_approval = false
+escalate_to = "#video-studio"
+
+[evals]
+path = "evals/cases.jsonl"
+# Held at 0.8. Whether a concept is good is taste. What must hold every
+# time is structural and checkable: three concepts, only ready formats, no
+# repeated angle or hook, a hook that is a literal first line, nothing
+# outside the positioning brief.
+min_agreement = 0.8

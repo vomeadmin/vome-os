@@ -1,0 +1,60 @@
+[identity]
+name = "brand_editor"
+division = "content"
+title = "Brand Editor"
+reports_to = "sam"
+hired = "2026-10-17"
+
+[model]
+# Senior tier. The editor's whole value is catching what the copywriter got
+# plausibly wrong: a first line that is generic rather than loud, a claim
+# that drifted past the FAQ, a label paraphrased by one word. A cheaper
+# model approves exactly those, because they read fine.
+#
+# It runs once per first draft. Revisions after the script is posted are
+# a person's edits and do not go through it.
+tier = "senior"
+# It returns the full storyboard, revised or not, so it needs the same room
+# as content_producer. Above 16000 the runner streams.
+max_tokens = 20000
+
+[job]
+charter = "charter.md"
+skills = ["keeping-the-vome-video-voice", "writing-a-vome-storyboard"]
+requires_context = [
+    # The copywriter's storyboard, as JSON.
+    "storyboard",
+    # The concept the person picked, as JSON. The edit keeps its angle.
+    "concept",
+    # The strategist's positioning brief, as JSON. Every fact is checked
+    # against it and the FAQ inside it.
+    "positioning",
+    # Studio's contract for this storyboard's format. The edit must still
+    # match it exactly.
+    "contract",
+]
+output = "json"
+
+[guards]
+# Shape only. Studio validates the storyboard it returns, and the caller
+# restores the id and format and discards an edit that changed the scene
+# structure, so a bad edit cannot reach the thread unnoticed.
+output = ["json_shape", "non_empty"]
+# False on the content_producer reasoning: the edited script is posted to
+# the thread and approved by a person before anything is built.
+client_facing = false
+
+[limits]
+timeout_seconds = 300
+max_retries = 2
+
+[approval]
+requires_ceo_approval = false
+escalate_to = "#video-studio"
+
+[evals]
+path = "evals/cases.jsonl"
+# Held at 0.8. Whether a line is "loud enough" is arguable. What has to be
+# right every time: em dashes removed, unsourced claims cut, labels
+# restored, format and id untouched, structure matching the contract.
+min_agreement = 0.8
