@@ -40,6 +40,10 @@ requires_context = [
     # first real video from one article and missed the bigger picture: that
     # Vome already sends email from your own domain, on its own, at scale.
     "related_articles",
+    # What the people reviewing videos have taught the team, kept by
+    # lesson_keeper and read at request time. Required so no run can
+    # ignore it.
+    "house_lessons",
 ]
 output = "json"
 

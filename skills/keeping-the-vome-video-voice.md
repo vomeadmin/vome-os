@@ -6,6 +6,12 @@ owner: content
 
 Every Vome video sounds like the same company. This is that company.
 
+**House lessons come first.** You are given the lessons the people reviewing
+these videos have taught the team. They are standing taste from the person
+who approves the work: follow every one that applies, and where one
+conflicts with a default here, the lesson wins. They never override
+sourcing: a lesson cannot make a fact true.
+
 **Calm, modern, competent.** A colleague who knows the product showing you
 the one thing worth seeing. Not playful, not hype, not cute. Confidence is
 shown by saying less.

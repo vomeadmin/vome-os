@@ -40,6 +40,7 @@ import time
 
 import slack
 import video_concepts
+import video_lessons
 import video_threads
 
 # Local checkout, used only when Studio is not reachable over HTTP. No
@@ -171,6 +172,17 @@ def develop_concepts(thread_ts: str, brief: str, direction: str = "") -> None:
     the thread waits for a person to pick one.
     """
     row = video_threads.get(thread_ts) or {}
+    try:
+        _develop(thread_ts, brief, direction, row)
+    finally:
+        # Direction teaches the team, not only this thread. Judged against
+        # the concepts the person was actually reacting to: `row` is from
+        # before the new ones replaced them.
+        if direction:
+            capture_lessons(thread_ts, direction, "concepts", row=row)
+
+
+def _develop(thread_ts: str, brief: str, direction: str, row: dict) -> None:
     had_concepts = bool(video_concepts.load_concepts(row))
     result = run_concepts(brief, row, direction=direction)
     if not result.get("ok"):
@@ -273,14 +285,19 @@ def revise_script(thread_ts: str, note: str) -> None:
               "nothing to change. Post the feature and its FAQ link and I "
               "will draft one.")
         return
-    result = run_content_producer(note, row, revise=True)
-    if not result.get("ok"):
-        _post(thread_ts,
-              "I could not apply that change.\n```%s```"
-              % str(result.get("error", "unknown"))[:900])
-        return
-    _post_script_for_review(thread_ts, result.get("summary", "Updated."),
-                            review=result.get("review", ""))
+    try:
+        result = run_content_producer(note, row, revise=True)
+        if not result.get("ok"):
+            _post(thread_ts,
+                  "I could not apply that change.\n```%s```"
+                  % str(result.get("error", "unknown"))[:900])
+            return
+        _post_script_for_review(thread_ts, result.get("summary", "Updated."),
+                                review=result.get("review", ""))
+    finally:
+        # A note on one script can carry taste for every script. Judged
+        # against the script the person was reading, from before the edit.
+        capture_lessons(thread_ts, note, "script", row=row)
 
 
 def _faq_text(row: dict, brief: str) -> tuple[str, str]:
@@ -555,6 +572,83 @@ def _no_faq_error(row: dict, message: str) -> dict:
     }
 
 
+def _reacting_to(row: dict, stage: str) -> str:
+    """A short account of what the person was looking at when they wrote."""
+    if stage == "concepts":
+        lines = ["Concepts for %s:" % (row.get("feature_name") or "a video")]
+        for i, c in enumerate(video_concepts.load_concepts(row), start=1):
+            lines.append('%d. %s (%s). Hook: "%s"' % (
+                i, c.get("title", ""), c.get("format", ""), c.get("hook", "")))
+        return "\n".join(lines)
+    sb = _read_storyboard(row) or {}
+    spoken = [ln.get("vo", "") for sc in sb.get("scenes", [])
+              for ln in sc.get("lines", [])]
+    return "Script for %s (%s format):\n%s" % (
+        sb.get("feature_name") or row.get("feature_name") or "a video",
+        sb.get("format") or "explainer",
+        "\n".join("- %s" % s for s in spoken[:14]))
+
+
+def capture_lessons(thread_ts: str, message: str, stage: str,
+                    row: dict | None = None) -> None:
+    """Keep what a person's feedback teaches the whole team, and say so.
+
+    Sammy, 2026-10-17: feedback in a thread must improve every later video,
+    not only this one. Runs after the thread's own work has been posted, so
+    it never slows the reply, and never fails the thread: a lesson that
+    could not be kept is logged, not shown as an error.
+    """
+    if not (message or "").strip():
+        return
+    row = row if row is not None else (video_threads.get(thread_ts) or {})
+    try:
+        current = video_lessons.active()
+    except Exception as exc:
+        print("[VIDEO] lessons unavailable, not capturing: %s" % exc)
+        return
+    current_text = "\n".join("- [%d] %s" % (l["id"], l["rule"])
+                             for l in current) or "(none yet)"
+    data, err = _run("content.lesson_keeper", {
+        "message": message,
+        "stage": stage,
+        "reacting_to": _reacting_to(row, stage),
+        "current_lessons": current_text,
+    }, thread_ts)
+    if err or not isinstance(data, dict):
+        print("[VIDEO] lesson keeper failed on %s: %s" % (thread_ts, err))
+        return
+    lessons = [l for l in data.get("lessons") or []
+               if isinstance(l, dict) and str(l.get("rule") or "").strip()]
+    if not lessons:
+        return
+    known = {l["id"] for l in current}
+    replaces = [int(i) for i in data.get("replaces") or []
+                if str(i).isdigit() and int(i) in known]
+    try:
+        kept = video_lessons.add(lessons, thread_ts, message, stage,
+                                 retire_ids=replaces)
+    except Exception as exc:
+        print("[VIDEO] could not keep lessons from %s: %s" % (thread_ts, exc))
+        return
+    if not kept:
+        return
+    _post(thread_ts, "Noted for every future video:\n%s\n_Reply *forget that* "
+          "to drop %s._" % ("\n".join("• %s" % k["rule"] for k in kept),
+                            "it" if len(kept) == 1 else "them"))
+
+
+def _with_lessons(agent: str, context: dict) -> dict:
+    """Add what the team has been taught, for the roles that write.
+
+    Read at request time, so a lesson kept in one thread shapes the next
+    one with no deploy. Done here, once, so no call site can forget it.
+    """
+    role = agent.split(".")[-1]
+    if role in video_lessons.ROLES and "house_lessons" not in context:
+        context = dict(context, house_lessons=video_lessons.render_for(role))
+    return context
+
+
 def _run(agent: str, context: dict, thread_ts: str):
     """One agent call, as (data, error). Blocked and error are both failures
     here, and the reason says which, because they are not the same thing."""
@@ -562,6 +656,7 @@ def _run(agent: str, context: dict, thread_ts: str):
         from vomeos.runner import run_agent
     except ImportError as exc:
         return None, "Vome OS runner unavailable: %s" % exc
+    context = _with_lessons(agent, context)
     result = run_agent(agent, context, subject_type="video_thread",
                        subject_id=thread_ts or "")
     if result.blocked:
@@ -856,7 +951,7 @@ def run_content_producer(message: str, row: dict, revise: bool = False,
 
     result = run_agent(
         "content.content_producer",
-        context,
+        _with_lessons("content.content_producer", context),
         subject_type="video_thread",
         subject_id=row.get("thread_ts", ""),
     )

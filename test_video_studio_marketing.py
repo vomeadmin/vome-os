@@ -181,6 +181,13 @@ def env(jobs, monkeypatch):
     monkeypatch.setattr(jobs, "_studio", lambda: state.studio)
     monkeypatch.setattr(jobs, "_local_studio", lambda: "")
     state.research = []
+    state.captured = []
+    state.real_capture = jobs.capture_lessons
+    monkeypatch.setattr(jobs.video_lessons, 'render_for',
+                        lambda role: '- [1] Say volunteer.')
+    monkeypatch.setattr(jobs, 'capture_lessons',
+                        lambda t, m, stage, row=None:
+                        state.captured.append((m, stage)))
     monkeypatch.setattr(
         jobs, "_related_articles",
         lambda queries, exclude_title="": state.research.append(
@@ -328,7 +335,11 @@ def test_strategist_then_director_with_the_right_context(jobs, env,
     assert env.research == [SCOUT["queries"]]
     s = agents.context("content_strategist")
     assert set(s) == {"feature_name", "faq_text", "brief", "prior_videos",
-                      "scout", "related_articles"}
+                      "scout", "related_articles", "house_lessons"}
+    # Every writing role is given what the team has been taught.
+    assert s["house_lessons"] == "- [1] Say volunteer."
+    assert agents.context("creative_director")["house_lessons"]
+    assert "house_lessons" not in agents.context("feature_scout")
     assert json.loads(s["scout"]) == SCOUT
     assert "own domain" in s["related_articles"]
     assert "Recruitment workflows | explainer" in s["prior_videos"]
@@ -481,7 +492,7 @@ def test_copywriter_writes_the_concept_in_its_format(jobs, env, monkeypatch):
     assert json.loads(c["positioning"]) == POSITIONING
     assert json.loads(c["storyboard_contract"]) == REVEAL_CONTRACT
     e = agents.context("brand_editor")
-    assert set(e) == {"storyboard", "concept", "positioning", "contract"}
+    assert set(e) == {"storyboard", "concept", "positioning", "contract", "house_lessons"}
     assert json.loads(e["storyboard"])["format"] == "reveal"
     # What Studio validated is the edited storyboard, in the concept's format.
     sent = env.studio.validated[0]
@@ -796,3 +807,57 @@ def test_a_greenlight_before_a_pick_starts_nothing(handler, routed,
     handler.handle_video_studio_message(_event(handler, "go build it"))
     assert routed.started == [] and routed.updates == []
     assert "pick a concept first" in routed.acks[0]
+
+
+
+# ------------------------------------------------------------ house lessons
+
+def test_direction_and_notes_are_captured_as_lessons(jobs, env,
+                                                     monkeypatch):
+    """Sammy, 2026-10-17: feedback must improve every later video, at every
+    stage. Direction on concepts and notes on a script both go to the
+    lesson keeper, judged against what the person was reacting to."""
+    _install(monkeypatch, Agents(
+        feature_scout=SCOUT, content_strategist=POSITIONING,
+        creative_director={"concepts": CONCEPTS, "notes": "n"}))
+    env.row = {"thread_ts": "1.2", "positioning_json": json.dumps(POSITIONING),
+               "concepts_json": json.dumps(CONCEPTS)}
+    jobs.develop_concepts("1.2", "brief", direction="always say volunteer")
+    assert env.captured == [("always say volunteer", "concepts")]
+
+
+def test_capture_keeps_standing_taste_and_says_so(jobs, env, monkeypatch):
+    kept = []
+    monkeypatch.setattr(jobs.video_lessons, "active",
+                        lambda role="": [{"id": 4, "rule": "Old rule."}])
+    monkeypatch.setattr(
+        jobs.video_lessons, "add",
+        lambda lessons, t, q, stage, retire_ids=None: kept.append(
+            (lessons, stage, retire_ids)) or [
+            {"id": 9, "rule": l["rule"]} for l in lessons])
+    agents = Agents(lesson_keeper={
+        "lessons": [{"rule": "Every hook says volunteer.",
+                     "applies_to": ["all"]}],
+        "replaces": [4, 77], "note": "kept one"})
+    _install(monkeypatch, agents)
+    env.real_capture("1.2", "say volunteer always",
+                                     "script", row={})
+    ctx = agents.context("lesson_keeper")
+    assert ctx["message"] == "say volunteer always"
+    assert "[4] Old rule." in ctx["current_lessons"]
+    # Only a lesson that exists can be replaced.
+    assert kept[0][2] == [4]
+    assert "Noted for every future video" in env.posts[-1]
+    assert "forget that" in env.posts[-1]
+
+
+def test_a_one_off_edit_keeps_nothing_and_says_nothing(jobs, env,
+                                                      monkeypatch):
+    monkeypatch.setattr(jobs.video_lessons, "active", lambda role="": [])
+    monkeypatch.setattr(jobs.video_lessons, "add",
+                        lambda *a, **k: pytest.fail("kept a one-off"))
+    _install(monkeypatch, Agents(lesson_keeper={
+        "lessons": [], "replaces": [], "note": "one-off"}))
+    env.real_capture("1.2", "make line 3 shorter",
+                                     "script", row={})
+    assert env.posts == []

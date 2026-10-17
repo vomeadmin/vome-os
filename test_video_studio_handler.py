@@ -128,3 +128,22 @@ def test_handler_ignores_bot_messages(handler, monkeypatch):
         {"channel": "C0C9P2JMEEN", "bot_id": "B123",
          "text": "Recruitment workflows is built.", "ts": "1.0"})
     assert called == []
+
+
+# ------------------------------------------------------------ lessons undo
+
+@pytest.mark.parametrize("text", [
+    "forget that", "Forget that.", "ok, forget that", "please forget that",
+    "forget that lesson", "drop that lesson", "forget it", "forget those",
+    "<@U123> forget that", "do not keep that"])
+def test_forget_that_is_an_undo_in_any_state(handler, text):
+    for state in (None, "awaiting_concept", "awaiting_review", "delivered"):
+        assert handler.classify(text, state) == "forget"
+
+
+@pytest.mark.parametrize("text", [
+    "don't forget that the hook should say volunteer",
+    "forget that line, use the first hook instead please",
+    "I forgot that the shift block exists"])
+def test_a_note_containing_the_words_is_not_an_undo(handler, text):
+    assert handler.classify(text, "awaiting_review") != "forget"

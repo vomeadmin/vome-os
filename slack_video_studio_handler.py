@@ -73,6 +73,15 @@ NOT_GREENLIGHT = (
     "before you build", "don't approve", "do not approve", "not approved",
 )
 
+# Undo the lesson this thread just taught. The whole message must be the
+# instruction, optionally with "please" or a mention, so a note that merely
+# contains the words is still a note.
+FORGET = re.compile(
+    r"^(?:<[^>]+>\s*)?(?:ok,?\s+|okay,?\s+|please\s+)?"
+    r"(?:forget that|forget it|forget those|drop that lesson|"
+    r"undo that lesson|scratch that lesson|don't keep that|do not keep that)"
+    r"(?:\s+lesson)?(?:,?\s+please)?[.!]*$")
+
 # Stops at "|" and ">": Slack sends a pasted link as <url|label>, and
 # matching to the next space captured the label and a ">" with it.
 FAQ_URL = re.compile(r"https?://[^\s|<>]*(?:kb|support|faq)[^\s|<>]*", re.I)
@@ -81,7 +90,8 @@ FAQ_URL = re.compile(r"https?://[^\s|<>]*(?:kb|support|faq)[^\s|<>]*", re.I)
 def classify(text: str, thread_state: str | None) -> str:
     """What this message is asking for.
 
-    new | pick | direction | busy | pick_first | note | greenlight | ignore
+    new | pick | direction | busy | pick_first | note | greenlight | forget
+    | ignore
 
     `thread_state` is what we already know about this thread, and it matters:
     the same words mean different things at different points. "Go build it"
@@ -97,6 +107,11 @@ def classify(text: str, thread_state: str | None) -> str:
     body = (text or "").strip().lower()
     if not body:
         return "ignore"
+
+    # Undoing a lesson, in any state. Matched on the whole message so "don't
+    # forget that the hook..." is still a note, not an undo.
+    if FORGET.match(body):
+        return "forget"
 
     if thread_state == video_threads.STATE_AWAITING_CONCEPT:
         if video_concepts.match_concept_pick(text) is not None:
@@ -159,6 +174,24 @@ def handle_video_studio_message(event: dict) -> None:
     print("[VIDEO] %s from %s: %s" % (intent, user, text[:90]))
 
     if intent == "ignore":
+        return
+
+    if intent == "forget":
+        import video_lessons
+        try:
+            dropped = video_lessons.retire_latest(thread_ts)
+        except Exception as exc:
+            print("[VIDEO] could not retire lessons in %s: %s"
+                  % (thread_ts, exc))
+            dropped = None
+        if dropped is None:
+            _ack(thread_ts, "I could not reach the lessons just now, so "
+                 "nothing changed. Try again in a minute.")
+        elif dropped:
+            _ack(thread_ts, "Dropped, no future video will follow it:\n%s"
+                 % "\n".join("• %s" % r for r in dropped))
+        else:
+            _ack(thread_ts, "There is no lesson from this thread to drop.")
         return
 
     if intent == "new":

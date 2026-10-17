@@ -32,6 +32,10 @@ requires_context = [
     # Studio's contract for this storyboard's format. The edit must still
     # match it exactly.
     "contract",
+    # What the people reviewing videos have taught the team, kept by
+    # lesson_keeper and read at request time. Required so no run can
+    # ignore it.
+    "house_lessons",
 ]
 output = "json"
 

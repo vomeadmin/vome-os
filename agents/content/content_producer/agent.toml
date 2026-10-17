@@ -43,6 +43,10 @@ requires_context = [
     # The strategist's positioning brief, as JSON. The single claim every
     # line serves and the list of things the script must not say.
     "positioning",
+    # What the people reviewing videos have taught the team, kept by
+    # lesson_keeper and read at request time. Required so no run can
+    # ignore it.
+    "house_lessons",
 ]
 output = "json"
 

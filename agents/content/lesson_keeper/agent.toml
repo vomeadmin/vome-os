@@ -1,0 +1,55 @@
+[identity]
+name = "lesson_keeper"
+division = "content"
+title = "Lesson Keeper"
+reports_to = "sam"
+hired = "2026-10-17"
+
+[model]
+# Senior. A lesson it keeps shapes every later video, by every agent on the
+# team. Mistaking a one-off edit ("make line 3 shorter") for standing taste
+# would quietly bend all future work; missing real taste means the person
+# repeats themselves. It runs only when someone gives feedback, so the cost
+# is a handful of calls a week.
+tier = "senior"
+max_tokens = 6000
+
+[job]
+charter = "charter.md"
+skills = []
+requires_context = [
+    # The person's own words, exactly as written in the thread.
+    "message",
+    # Where in the loop it was said: "concepts" (direction on three
+    # concepts) or "script" (a note on a script or a delivered video).
+    "stage",
+    # What they were reacting to: the feature, the concepts or the script.
+    "reacting_to",
+    # Every active lesson, with its id, so a new one can replace an old one
+    # instead of contradicting it.
+    "current_lessons",
+]
+output = "json"
+
+[guards]
+# A small JSON object read by code and summarised back to the person in the
+# thread, who can retire any lesson with "forget that".
+output = ["json_shape", "non_empty"]
+client_facing = false
+
+[limits]
+timeout_seconds = 120
+max_retries = 2
+
+[approval]
+# Every lesson is announced in the thread and can be undone in one reply.
+# That visible, reversible step is the gate.
+requires_ceo_approval = false
+escalate_to = "#video-studio"
+
+[evals]
+path = "evals/cases.jsonl"
+# Held at 0.8. Wording a rule is taste. What has to be right every time: a
+# one-off edit is never kept, standing taste is, and a lesson that changes
+# an existing one replaces it rather than sitting beside it.
+min_agreement = 0.8

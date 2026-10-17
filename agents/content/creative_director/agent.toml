@@ -33,6 +33,10 @@ requires_context = [
     "formats",
     # Earlier videos, so no concept repeats an angle or a hook.
     "prior_videos",
+    # What the people reviewing videos have taught the team, kept by
+    # lesson_keeper and read at request time. Required so no run can
+    # ignore it.
+    "house_lessons",
 ]
 output = "json"
 
