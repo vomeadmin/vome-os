@@ -26,10 +26,14 @@ from sqlalchemy import text
 
 from database import DATABASE_URL, _get_engine
 
-# A thread moves forward only: idea -> drafting -> awaiting_review -> building
-# -> delivered. It can loop back to drafting any number of times while a
-# reviewer asks for changes, which is the normal case and not an error.
+# A thread moves forward only: idea -> concepting -> awaiting_concept ->
+# drafting -> awaiting_review -> building -> delivered. It can loop back to
+# concepting while a person gives direction on the concepts, and to drafting
+# any number of times while a reviewer asks for changes to the script. Both
+# loops are the normal case and not an error.
 STATE_IDEA = "idea"
+STATE_CONCEPTING = "concepting"
+STATE_AWAITING_CONCEPT = "awaiting_concept"
 STATE_DRAFTING = "drafting"
 STATE_AWAITING_REVIEW = "awaiting_review"
 STATE_BUILDING = "building"
@@ -47,6 +51,9 @@ CREATE TABLE IF NOT EXISTS video_threads (
   rounds         INTEGER NOT NULL DEFAULT 0,
   last_runtime   REAL    NULL,
   render_folder  TEXT    NOT NULL DEFAULT '',
+  positioning_json TEXT  NOT NULL DEFAULT '',
+  concepts_json  TEXT    NOT NULL DEFAULT '',
+  chosen_concept INTEGER NULL,
   created_at     TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_at     TIMESTAMP NOT NULL DEFAULT NOW()
 )
@@ -54,9 +61,20 @@ CREATE TABLE IF NOT EXISTS video_threads (
 
 # Columns added after the table first shipped. CREATE TABLE IF NOT EXISTS
 # does nothing to a table that already exists, so each needs its own ALTER.
+#
+# positioning_json is the strategist's brief, concepts_json the three
+# concepts last posted to the thread, and chosen_concept the number (1 to 3)
+# a person picked. NULL means nobody has picked yet, which is different from
+# a thread that predates concepts and has a storyboard with no concept.
 _ADD_COLUMNS = (
     "ALTER TABLE video_threads ADD COLUMN IF NOT EXISTS "
     "storyboard_json TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE video_threads ADD COLUMN IF NOT EXISTS "
+    "positioning_json TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE video_threads ADD COLUMN IF NOT EXISTS "
+    "concepts_json TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE video_threads ADD COLUMN IF NOT EXISTS "
+    "chosen_concept INTEGER NULL",
 )
 
 
@@ -109,7 +127,8 @@ def start(thread_ts: str, channel: str, feature_name: str = "",
 def update(thread_ts: str, **fields) -> None:
     """Set named columns on a thread. Unknown columns are ignored."""
     allowed = {"storyboard", "storyboard_json", "feature_name", "faq_url",
-               "state", "rounds", "last_runtime", "render_folder"}
+               "state", "rounds", "last_runtime", "render_folder",
+               "positioning_json", "concepts_json", "chosen_concept"}
     sets = {k: v for k, v in fields.items() if k in allowed}
     if not sets or not DATABASE_URL:
         return
@@ -138,6 +157,26 @@ def slugs_in_use(exclude_thread: str = "") -> set[str]:
             {"t": exclude_thread or ""},
         ).all()
     return {r[0] for r in rows}
+
+
+def recent_videos(exclude_thread: str = "", limit: int = 8) -> list[dict]:
+    """Other threads that got as far as a storyboard, newest first.
+
+    Read so the strategist and creative director can see what has already
+    been made and not make it again. Only the columns that describe a video
+    are returned; the caller turns them into a short text list.
+    """
+    if not DATABASE_URL:
+        return []
+    with _get_engine().begin() as conn:
+        rows = conn.execute(
+            text("SELECT feature_name, storyboard, storyboard_json, "
+                 "concepts_json, chosen_concept FROM video_threads "
+                 "WHERE storyboard_json <> '' AND thread_ts <> :t "
+                 "ORDER BY updated_at DESC LIMIT :n"),
+            {"t": exclude_thread or "", "n": int(limit)},
+        ).mappings().all()
+    return [dict(r) for r in rows]
 
 
 def bump_round(thread_ts: str) -> int:

@@ -79,15 +79,33 @@ class VomeStudio(Connector):
     # Operations. One method per thing the OS is allowed to ask for.
     # -----------------------------------------------------------------
 
-    def contract(self) -> IntegrationResult:
-        """What a storyboard must look like, from Studio itself.
+    def formats(self) -> IntegrationResult:
+        """The video formats Studio knows, and which of them it can build.
 
-        `{"schema", "example", "required_cues", "templates"}`. The example is
-        an approved storyboard: each template draws one specific mock, so a
-        new storyboard keeps its structure and `on_screen` keys and changes
-        the words and mock content. Free.
+        `{"formats": [{"name", "title", "seconds", "best_for",
+        "description", "ready"}, ...]}`. A format whose `ready` is false is
+        planned but has no templates yet, so nothing may be written for it.
+        Free.
         """
-        return self._call("contract", "GET", "/v1/contract")
+        return self._call("formats", "GET", "/v1/formats")
+
+    def contract(self, format: str = "explainer") -> IntegrationResult:
+        """What a storyboard in one format must look like, from Studio itself.
+
+        `{"format", "schema", "example", "required_cues", "templates"}`. The
+        example is an approved storyboard in that format: each template draws
+        one specific mock, so a new storyboard keeps its structure and
+        `on_screen` keys and changes the words and mock content. Free.
+
+        With no format, or "explainer", the request carries no query string,
+        which is exactly what a Studio older than formats expects. An unknown
+        format, or one that is not ready, comes back as HTTP 404, and the
+        caller must say so rather than quietly ask for another.
+        """
+        params = None
+        if format and format != "explainer":
+            params = {"format": format}
+        return self._call("contract", "GET", "/v1/contract", params=params)
 
     def validate(self, storyboard: dict) -> IntegrationResult:
         """Check a storyboard and estimate its runtime. Builds nothing.
@@ -96,6 +114,9 @@ class VomeStudio(Connector):
         script for review without calling this first. It catches the things
         that would otherwise be found after the money was spent: em dashes
         (the house copy rule), duplicate cues, unknown templates, empty lines.
+
+        The storyboard's optional top level `format` (default "explainer")
+        tells Studio which contract to check it against.
 
         Returns `{"ok", "estimated_runtime", "lines", "words", "warnings"}`.
         """
