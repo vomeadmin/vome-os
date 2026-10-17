@@ -3,10 +3,18 @@ slack_video_studio_handler.py
 
 The video studio channel, end to end.
 
-Someone posts a feature idea. The content_producer writes a storyboard. The
-script goes back into the thread for review. It is refined there over as many
-rounds as it takes, costing nothing. On an explicit greenlight, Vome Studio
-builds it and the result is posted into the same thread.
+Someone posts a feature idea. The strategist positions it and the creative
+director posts three concepts, numbered. A person picks one by number, or
+replies with direction and gets three new ones. The copywriter
+(content_producer) writes the storyboard for the pick, in its format, and
+the brand editor reads it once. The script goes back into the thread for
+review. It is refined there over as many rounds as it takes, costing
+nothing. On an explicit greenlight, Vome Studio builds it and the result is
+posted into the same thread.
+
+A concept pick is matched the same way as a greenlight: by pattern, in
+`video_concepts.match_concept_pick`, never inferred. "I like 2 but make it
+shorter" is direction, not a pick.
 
 THE ONE RULE THIS FILE EXISTS TO ENFORCE
 
@@ -29,6 +37,7 @@ import re
 import threading
 
 import slack
+import video_concepts
 import video_threads
 
 # Where the work actually happens. Studio is a separate repo and will be a
@@ -70,16 +79,34 @@ FAQ_URL = re.compile(r"https?://[^\s|<>]*(?:kb|support|faq)[^\s|<>]*", re.I)
 
 
 def classify(text: str, thread_state: str | None) -> str:
-    """What this message is asking for: new | note | greenlight | ignore.
+    """What this message is asking for.
+
+    new | pick | direction | busy | pick_first | note | greenlight | ignore
 
     `thread_state` is what we already know about this thread, and it matters:
     the same words mean different things at different points. "Go build it"
     before a script exists is not a greenlight, it is someone who has not
     seen a script yet.
+
+    While concepts await a choice, a message is a pick only if
+    `match_concept_pick` says so. A bare greenlight there gets a nudge to
+    pick first, because there is no script to build and regenerating
+    concepts from "go build it" would help nobody. Everything else is
+    direction for new concepts, including praise that names a number.
     """
     body = (text or "").strip().lower()
     if not body:
         return "ignore"
+
+    if thread_state == video_threads.STATE_AWAITING_CONCEPT:
+        if video_concepts.match_concept_pick(text) is not None:
+            return "pick"
+        if body.strip(" .!") in GREENLIGHT:
+            return "pick_first"
+        return "direction"
+
+    if thread_state == video_threads.STATE_CONCEPTING:
+        return "busy"
 
     if any(p in body for p in NOT_GREENLIGHT):
         return "note"
@@ -95,7 +122,9 @@ def classify(text: str, thread_state: str | None) -> str:
             return "new"
         return "greenlight"
 
-    if thread_state is None:
+    # No thread yet, or a thread where nothing came of the first attempt
+    # (concepts failed, so it is still an idea): a nudge starts it again.
+    if thread_state in (None, video_threads.STATE_IDEA):
         return "new"
     return "note"
 
@@ -139,11 +168,55 @@ def handle_video_studio_message(event: dict) -> None:
             feature_name=_guess_feature_name(text),
             faq_url=faq.group(0) if faq else "",
         )
+        if row and faq:
+            # A retry in a thread whose first attempt found nothing: the
+            # link posted now is the one to read.
+            video_threads.update(thread_ts, faq_url=faq.group(0))
+        video_threads.update(thread_ts, state=video_threads.STATE_CONCEPTING)
         _ack(thread_ts,
-             "On it. Reading the FAQ and drafting a script, back shortly "
-             "with it for review. Nothing gets built until you say so.")
+             "On it. Reading the FAQ and working out three ways to tell "
+             "this one, back shortly with concepts to pick from. Nothing "
+             "gets built until you say so.")
         threading.Thread(
-            target=_draft_script, args=(thread_ts, text), daemon=True
+            target=_develop_concepts, args=(thread_ts, text), daemon=True
+        ).start()
+        return
+
+    if intent == "busy":
+        _ack(thread_ts,
+             "Still working on the concepts for this one. Once they are "
+             "posted, reply with a number to pick one, or with direction.")
+        return
+
+    if intent == "pick_first":
+        _ack(thread_ts,
+             "There is no script to build yet. Reply with 1, 2 or 3 to pick "
+             "a concept first, and I will write it up for review.")
+        return
+
+    if intent == "pick":
+        number = video_concepts.match_concept_pick(text)
+        concepts = video_concepts.load_concepts(row or {})
+        title = (concepts[number - 1].get("title", "")
+                 if 1 <= number <= len(concepts) else "")
+        video_threads.update(thread_ts, state=video_threads.STATE_DRAFTING)
+        _ack(thread_ts,
+             "Going with concept %d%s. Writing the script now, back shortly "
+             "with it for review." % (number, ", *%s*" % title if title
+                                      else ""))
+        threading.Thread(
+            target=_draft_from_concept, args=(thread_ts, number), daemon=True
+        ).start()
+        return
+
+    if intent == "direction":
+        video_threads.update(thread_ts, state=video_threads.STATE_CONCEPTING)
+        _ack(thread_ts,
+             "Taking that as direction. Back shortly with three new "
+             "concepts.")
+        threading.Thread(
+            target=_develop_concepts, args=(thread_ts, text, text),
+            daemon=True,
         ).start()
         return
 
@@ -182,14 +255,19 @@ def _guess_feature_name(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# The three slow paths. Each runs on its own thread and posts its own result.
-# They are thin on purpose: the work belongs to the agent and to Studio, and
+# The slow paths. Each runs on its own thread and posts its own result.
+# They are thin on purpose: the work belongs to the agents and to Studio, and
 # this module's job is routing and money discipline.
 # ---------------------------------------------------------------------------
 
-def _draft_script(thread_ts: str, brief: str) -> None:
-    from video_studio_jobs import draft_script
-    draft_script(thread_ts, brief)
+def _develop_concepts(thread_ts: str, brief: str, direction: str = "") -> None:
+    from video_studio_jobs import develop_concepts
+    develop_concepts(thread_ts, brief, direction=direction)
+
+
+def _draft_from_concept(thread_ts: str, number: int) -> None:
+    from video_studio_jobs import draft_from_concept
+    draft_from_concept(thread_ts, number)
 
 
 def _revise_script(thread_ts: str, note: str) -> None:

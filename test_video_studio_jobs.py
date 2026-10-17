@@ -35,7 +35,8 @@ CONTRACT = {"schema": {}, "example": {"id": "x", "scenes": []},
 def _contract(jobs, monkeypatch):
     """Studio's contract, so the agent wiring tests reach the agent. And no
     database: unit tests must never ask production which ids are taken."""
-    monkeypatch.setattr(jobs, "_contract", lambda: dict(CONTRACT))
+    monkeypatch.setattr(jobs, "_contract",
+                        lambda format="explainer": dict(CONTRACT))
     monkeypatch.setattr(jobs.video_threads, "slugs_in_use",
                         lambda exclude="": set())
 
@@ -403,7 +404,7 @@ def test_agent_is_given_the_real_format(jobs, monkeypatch):
 
 
 def test_no_contract_means_no_guessing(jobs, monkeypatch):
-    monkeypatch.setattr(jobs, "_contract", lambda: None)
+    monkeypatch.setattr(jobs, "_contract", lambda format="explainer": None)
     monkeypatch.setattr(jobs, "_faq_text", lambda r, m: ("T", "body"))
     import vomeos.runner as runner
     monkeypatch.setattr(runner, "run_agent",
