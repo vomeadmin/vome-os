@@ -184,7 +184,6 @@ def world(monkeypatch):
 
     monkeypatch.setattr(rw, "CLICKUP_API_TOKEN", "tok")
     monkeypatch.delenv("RELEASE_WATCHER_ENABLED", raising=False)
-    monkeypatch.delenv("RELEASE_WATCHER_DRY_RUN", raising=False)
     monkeypatch.setattr(rw, "_list_on_dev_tasks", lambda: W.tasks)
     monkeypatch.setattr(rw, "_set_release_check",
                         lambda t, v: W.writes.append((t, v)))
@@ -447,11 +446,14 @@ def test_leaving_dry_run_announces_for_real(world):
     assert world.writes == [("p1", "live")]
 
 
-def test_dry_run_is_the_default(world):
+def test_the_scheduled_job_runs_live(world):
+    """No switch to forget: the job writes Release Check and posts."""
     world.github.runs = [gh_run(7, "a3a3a33")]
     world.tasks = [parent("p1", "web@a3a3a33")]
     summary = rw.run_release_watcher()
-    assert summary["dry_run"] is True and world.writes == []
+    assert summary["dry_run"] is False
+    assert world.writes == [("p1", "live")]
+    assert not world.posts[0].startswith("[dry run")
 
 
 def test_switched_off(monkeypatch, world):

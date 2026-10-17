@@ -114,6 +114,11 @@ store.register_table(
         repo                VARCHAR,
         stack               VARCHAR,
         clickup_task_id     VARCHAR,
+        -- One root cause, many Sentry issues: the birthday-email failures
+        -- arrived as seven issues with seven titles. Issues sharing a key
+        -- share one Agent Fixes task (sentry_agent_fixes.group_key).
+        group_key           VARCHAR,
+        filed_at            TIMESTAMP,
         slack_channel       VARCHAR,
         slack_ts            VARCHAR,
         pr_url              TEXT,
@@ -440,6 +445,7 @@ def update(issue_id: str, **fields) -> bool:
         "verdict", "severity", "triage_summary", "infrastructure",
         "root_cause", "proposed_fix", "fix_diff", "fix_reason",
         "repo", "clickup_task_id", "slack_channel", "slack_ts", "pr_url",
+        "group_key", "filed_at",
         "analysed_at", "analysed_sha", "analysed_times_seen",
         "suppressed_until", "run_ids",
     }

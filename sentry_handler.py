@@ -160,7 +160,16 @@ def handle_webhook(
     # The payload blob keeps the full treatment. Nothing downstream of this
     # line has seen an unredacted one.
     payload = sentry_redact.redact(body)
+    return _admit(signal, payload)
 
+
+def _admit(signal, payload) -> dict:
+    """Gate, record and queue one redacted signal.
+
+    Shared by the webhook and the daily backfill, so an issue found by
+    either path meets exactly the same rules. `signal` must already have its
+    prose fields redacted.
+    """
     decision = sentry_gate.check(signal)
     if decision.blocked:
         sentry_ledger.record(
@@ -321,7 +330,9 @@ def _investigate(signal, message: dict, triage: dict) -> dict:
     owner = message.get("repo_owner", "")
 
     trace = sentry_event.fetch_trace(issue_id)
-    code = sentry_code.gather(trace, repo, ref, host=host, owner=owner)
+    code = sentry_code.gather(
+        trace, repo, ref, host=host, owner=owner, message=signal.title,
+    )
     existing = _existing_tasks(signal)
 
     analysis = _analyse(signal, triage, trace, code, existing, repo, ref)
@@ -366,8 +377,18 @@ def _investigate(signal, message: dict, triage: dict) -> dict:
         )
         _report_proposal(issue, posted, proposal, pull_request)
 
+    # Where a person will actually see it. One task per root cause.
+    filed = {"action": "skipped", "reason": "no analysis"}
+    if analysis:
+        from sentry_agent_fixes import file_issue
+
+        filed = file_issue(issue, analysis, pull_request, proposal)
+        print(f"[SENTRY] Agent Fixes for {issue_id}: {filed.get('action')} "
+              f"{filed.get('task_id') or filed.get('reason') or ''}")
+
     return {
         "status": "analysed",
+        "agent_fixes": filed,
         "analysed": bool(analysis),
         "risk": (analysis or {}).get("risk", ""),
         "duplicate_of": (analysis or {}).get("duplicate_of", ""),
@@ -838,6 +859,66 @@ def run_regate_sweep(limit: int = 25) -> dict:
         "triaged": passed,
         "still_gated": regated,
         "failed": failed,
+    }
+
+
+def run_backfill(per_project: int = 25, max_new: int = 10) -> dict:
+    """Pick up issues the webhook never delivered. Daily.
+
+    Sentry sends `issue.created` once per group and nothing else, so three
+    kinds of issue never arrive: one created while the pipeline was down or
+    gated by an old rule set, one that regressed after being resolved, and
+    one that was quiet for weeks and then escalated. The profile-creation
+    incident (Oct 15) was caught; a regression of it would not have been.
+
+    Reads each triaged project's unresolved issues seen in the last 24h,
+    most frequent first, and admits any the ledger has never seen through
+    the exact path the webhook uses. Capped, so a noisy day costs a bounded
+    number of model calls.
+    """
+    from vomeos.integrations.sentry import Sentry, from_rest_issue
+
+    client = Sentry()
+    if not client.configured():
+        return {"status": "unconfigured"}
+
+    admitted, known, gated, errors = 0, 0, 0, []
+    for slug in sentry_projects.triaged_slugs():
+        result = client.list_issues(slug, limit=per_project)
+        if not result.ok:
+            errors.append(f"{slug}: {result.error[:120]}")
+            continue
+        for issue in result.data if isinstance(result.data, list) else []:
+            if admitted >= max_new:
+                break
+            issue_id = str(issue.get("id") or "")
+            if not issue_id or sentry_ledger.get(issue_id):
+                known += 1
+                continue
+            signal = from_rest_issue(issue, "backfill")
+            if signal is None:
+                continue
+            signal = replace(
+                signal,
+                title=sentry_redact.redact_text(signal.title),
+                culprit=sentry_redact.redact_text(signal.culprit),
+            )
+            outcome = _admit(signal, None)
+            if outcome.get("status") == "gated":
+                gated += 1
+            else:
+                admitted += 1
+
+    print(
+        f"[SENTRY] backfill: {admitted} admitted, {gated} gated, "
+        f"{known} already known, {len(errors)} project(s) unreadable"
+    )
+    return {
+        "status": "ok" if not errors else "partial",
+        "admitted": admitted,
+        "gated": gated,
+        "known": known,
+        "errors": errors,
     }
 
 

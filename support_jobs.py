@@ -37,6 +37,7 @@ from vomeos.worker import (
     CLAIM_MONTHLY,
     CLAIM_NONE,
     CLAIM_WEEKLY,
+    register_event_handler,
     register_job,
 )
 
@@ -230,6 +231,45 @@ def register_all() -> None:
         claim=CLAIM_NONE,
         time_limit=300,
         description="Mark agent fixes Live once every commit is deployed",
+    )
+
+    # The daily sprint thread in #support-sprints: the complete list at 10,
+    # 1, 4 and 7 on weekdays. Each update also triages a few open tickets
+    # that never got a card (a missed webhook, or the backlog from before
+    # shadow triage). Unclaimed: four runs a day has no claim period, and the
+    # job skips itself if it posted in the last 20 minutes.
+    from sprint_thread import COMMAND_KEY, handle_command, run_sprint_update
+
+    register_job(
+        "support.sprint_update",
+        run_sprint_update,
+        cron="0 10,13,16,19 * * 1-5",
+        queue=QUEUE,
+        claim=CLAIM_NONE,
+        time_limit=1800,
+        description="Post the sprint list in #support-sprints",
+    )
+
+    # Shadow triage: a card and a draft for every new ticket or customer
+    # reply, the moment it arrives. Idempotent on the customer message id.
+    from shadow_triage import HANDLER_KEY as SHADOW_KEY
+    from shadow_triage import handle as handle_shadow
+
+    register_event_handler(
+        SHADOW_KEY,
+        handle_shadow,
+        queue=QUEUE,
+        time_limit=600,
+        description="Triage one ticket into the sprint thread",
+    )
+
+    # Sam's replies in the sprint thread. Idempotent on the Slack message ts.
+    register_event_handler(
+        COMMAND_KEY,
+        handle_command,
+        queue=QUEUE,
+        time_limit=600,
+        description="Run Sam's sprint thread commands",
     )
 
 

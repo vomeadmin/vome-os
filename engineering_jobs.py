@@ -73,6 +73,27 @@ def _register_sentry() -> None:
         description="Re-decide issues gated by a rule that has changed",
     )
 
+    # Backfill, 08:15. Issues the webhook never delivered: regressions,
+    # escalations, and anything created while the pipeline was off. Sentry
+    # sends `issue.created` once per group and nothing else.
+    #
+    # Before the 08:30 re-gate and the 09:00 report, so what it finds is in
+    # the report. Daily claim, because it spends model calls.
+    from sentry_handler import run_backfill
+
+    register_job(
+        "engineering.sentry_backfill",
+        run_backfill,
+        cron=(
+            f"{os.environ.get('SENTRY_BACKFILL_MINUTE', '15')} "
+            f"{os.environ.get('SENTRY_BACKFILL_HOUR', '8')} * * *"
+        ),
+        queue=QUEUE,
+        claim=CLAIM_DAILY,
+        time_limit=900,
+        description="Admit Sentry issues the webhook never sent",
+    )
+
     # The daily report. One message a day and no interrupts.
     #
     # 09:00 rather than with the support digest at 17:00: this is a "what

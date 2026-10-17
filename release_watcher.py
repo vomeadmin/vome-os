@@ -62,9 +62,6 @@ redeploy never re-alerts.
 SWITCHES
 --------
     RELEASE_WATCHER_ENABLED   default on. "false" stops the job entirely.
-    RELEASE_WATCHER_DRY_RUN   default on. Posts what it WOULD change, marked
-                              "dry run", and writes nothing to ClickUp. Turn
-                              off once one real pass looks right.
     RELEASE_WATCHER_TIMEOUT_MINUTES  merged-but-not-deployed alarm, default 120
     SLACK_CHANNEL_SUPPORT_SPRINTS    default C0CA1QB2XSQ
 
@@ -177,10 +174,6 @@ def _flag(name: str) -> bool:
 
 def _enabled() -> bool:
     return _flag("RELEASE_WATCHER_ENABLED")
-
-
-def _dry_run_default() -> bool:
-    return _flag("RELEASE_WATCHER_DRY_RUN")
 
 
 def _timeout() -> timedelta:
@@ -831,17 +824,19 @@ def evaluate_task(
 
 
 def run_release_watcher(
-    dry_run: bool | None = None,
+    dry_run: bool = False,
     *,
     post: bool = True,
     task_id: str = "",
 ) -> dict:
-    """One pass over the Agent Fixes list. Safe to run as often as you like."""
+    """One pass over the Agent Fixes list. Safe to run as often as you like.
+
+    Live by default: the scheduled job sets Release Check and posts.
+    `dry_run=True` is the on-demand CLI's print-only mode, never the job's.
+    """
     if not _enabled():
         print("[RELEASE] RELEASE_WATCHER_ENABLED is false, skipping")
         return {"status": "disabled"}
-    if dry_run is None:
-        dry_run = _dry_run_default()
     if not CLICKUP_API_TOKEN:
         print("[RELEASE] CLICKUP_API_TOKEN not set")
         return {"status": "unconfigured"}

@@ -259,15 +259,31 @@ def build_context(ticket_row: dict) -> dict | None:
     if isinstance(attachments, (list, tuple)):
         attachments = ", ".join(str(a) for a in attachments) or "none"
 
+    # The pictures themselves, inline and attached. #9415 was triaged as
+    # "screenshot missing" because the screenshot was pasted, not attached.
+    images, image_note = [], ""
+    try:
+        from ticket_images import fetch_ticket_images
+
+        images, image_note = fetch_ticket_images(str(ticket_id))
+    except Exception as exc:
+        image_note = f"Images could not be read: {type(exc).__name__}."
+    if image_note:
+        attachments = f"{attachments}. {image_note}"
+
+    number = str(
+        ticket_row.get("ticketNumber") or fields.get("ticket_number")
+        or ticket_id
+    )
     return {
-        "ticket_number": str(ticket_row.get("ticketNumber") or ticket_id),
+        "ticket_number": number,
         "account": account,
         "thread": thread or "(no readable conversation)",
         "attachments": attachments,
         "existing_tasks": find_existing_tasks(
             fields.get("subject", ""),
             fields,
-            ticket_number=str(ticket_row.get("ticketNumber") or ""),
+            ticket_number=number if number != str(ticket_id) else "",
             zoho_ticket_id=str(ticket_id),
             account=account_name,
         ),
@@ -277,6 +293,8 @@ def build_context(ticket_row: dict) -> dict | None:
         "_ticket_id": ticket_id,
         "_subject": fields.get("subject", ""),
         "_arr": arr,
+        "_images": images,
+        "_status": fields.get("status", ""),
     }
 
 
@@ -380,12 +398,15 @@ def run(limit: int, ticket: str = "", out_path: str = "") -> int:
         subject = context.pop("_subject", "")
         ticket_id = context.pop("_ticket_id", "")
         context.pop("_arr", None)
+        context.pop("_status", None)
+        images = context.pop("_images", [])
 
         result = run_agent(
             AGENT,
             context=context,
             subject_type="zoho_ticket",
             subject_id=str(ticket_id),
+            images=images,
         )
         if not result.ok:
             print(f"  no card ({result.why()})")

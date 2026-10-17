@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 
 import anthropic
 
+from vomeos import images as image_tools
 from vomeos import tiers, trace
 from vomeos.composer import compose_system_prompt, render_context
 from vomeos.guards import GuardResult, run_guards
@@ -125,9 +126,12 @@ _DEPRECATED_PARAM_RE = re.compile(
 
 
 def _call_model(
-    manifest: AgentManifest, system: str, user: str, model: str
+    manifest: AgentManifest, system: str, user, model: str
 ) -> tuple[str, int, int, int]:
     """Call the API with backoff.
+
+    `user` is the message content: a string, or a list of blocks when the
+    agent is being shown images.
 
     Returns (text, input_tokens, output_tokens, attempts).
     """
@@ -201,6 +205,7 @@ def run_agent(
     subject_type: str = "",
     subject_id: str = "",
     guard_context: dict | None = None,
+    images=None,
 ) -> AgentResult:
     """Run one agent against one piece of work.
 
@@ -208,6 +213,11 @@ def run_agent(
     charter on disk. `subject_type` / `subject_id` tie the run to the thing it
     was about ("zoho_ticket", "8945") so the trace can answer "what did we
     decide about this ticket, and which agent decided it".
+
+    `images` is a list of `vomeos.images.Image`. They are shown only to an
+    agent whose manifest grants `job.images`, capped at that number, and
+    only in formats and sizes the model accepts. Anything dropped is logged
+    rather than silently lost.
     """
     manifest = get_agent(qualified)
     run_id = trace.new_run_id()
@@ -215,6 +225,18 @@ def run_agent(
 
     system = compose_system_prompt(manifest)
     user = render_context(manifest, context)
+    if images:
+        if manifest.job.images <= 0:
+            print(
+                f"[RUNTIME] {qualified} was handed {len(images)} image(s) "
+                "but its manifest grants none; sending text only"
+            )
+            shown: list = []
+        else:
+            shown, dropped = image_tools.prepare(images, manifest.job.images)
+            for reason in dropped:
+                print(f"[RUNTIME] {qualified} image dropped: {reason}")
+        user = image_tools.content_blocks(user, shown)
 
     started = time.monotonic()
     try:

@@ -22,7 +22,12 @@ skills = [
     "checking-for-existing-work",
     "writing-the-triage-card",
     "deciding-not-to-act",
+    "reading-ticket-images",
 ]
+# Screenshots are shown, not just counted. Six covers every real thread seen
+# so far once signatures are removed (#9415 had one, #9436 two). The kernel
+# drops anything past this, oversized, or a duplicate.
+images = 6
 requires_context = [
     "ticket_number",
     "account",
