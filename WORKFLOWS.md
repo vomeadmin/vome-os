@@ -139,6 +139,22 @@ flowchart TD
   NOFAQ["'Code, no FAQ' answers become<br/>article suggestions"]:::proposed
 ```
 
+<!-- map:diagram id=director title="7. Sam runs the sprint from batches (agreed 2026-10-17, not built)" -->
+```mermaid
+flowchart TD
+  WH["Zoho webhook, plus a queue sweep<br/>every 30 min for missed tickets"]:::proposed --> ST["Shadow triage stores card + draft<br/>(no card posted per ticket)"]:::proposed
+  RL["Fix proven live (Agent Fixes Live,<br/>or a linked task on prod)"]:::live --> RS["Prepared reply for every fixed ticket<br/>the client has not been told about"]:::proposed
+  ST & RS --> B["Batch: weekdays 9, 13, 17; weekends 11 if needed<br/>one top-level message, previous one superseded"]:::proposed
+  B --> FULL["Every ready reply shown in full,<br/>exactly as the client will receive it"]:::proposed
+  B --> SEC["Sections: ready to send, fix first, decisions,<br/>close quietly, in flight, waiting on a release"]:::proposed
+  FULL --> CMD["Sam: send ready / send 101 106 / edit / hold till /<br/>route / log / build / no / close quiet"]:::proposed
+  CMD -->|"send (his words)"| SE["Sent at once, any hour<br/>(no business-hours window)"]:::proposed
+  CMD --> CF["Anything open is in the next batch<br/>with its age; permanent item numbers"]:::proposed
+  CL["'clear the queue': batches of 10,<br/>important then oldest, next one pre-triaged"]:::proposed --> B
+  INC["Incident (high confidence)"]:::deployed -->|only interruption| PING["Immediate mention"]:::deployed
+  B --> ESC["What went to engineers and why<br/>(batch footer + Monday report)"]:::proposed
+```
+
 ## Schedule (America/Montreal, run by Celery beat on `vome-os-worker`)
 
 | When | Job | Status |
@@ -151,7 +167,9 @@ flowchart TD
 | 08:15 daily | `engineering.sentry_backfill` | deployed |
 | 08:30 daily | `engineering.sentry_regate` | live |
 | 09:00 daily | `engineering.sentry_report` | live |
-| 10, 13, 16, 19 weekdays | `support.sprint_update` | deployed |
+| 10, 13, 16, 19 weekdays | `support.sprint_update` (to be replaced by batches, G23) | deployed |
+| 9, 13, 17 weekdays; 11 Sat and Sun if needed | `support.sprint_batch` | proposed |
+| every 30 min | `support.queue_sweep` (G26) | proposed |
 | 17:00 daily | `support.daily_digest` | live |
 | Mon 07:00, Fri 16:45 | engineering reports | live |
 | Mon 09:30 | `support.autonomy_report` | built |
@@ -189,4 +207,12 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 | G17 | crm | CRM often finds no deal, so ARR shows 0 and tier "low" | broken | Important clients can look unimportant on cards | Map Zoho account to CRM account, not only by email | agent |
 | G18 | knowledge | "Source: code, no FAQ" answers do not become article suggestions | proposed | The same question is answered from code each time | Queue a help centre article draft for Sam | agent |
 | G19 | slack | First real message in the sprint thread not yet proven | deployed | If Slack does not deliver thread events, Sam's replies go nowhere | Sam replies in the thread once; check the agent answers | Sam |
+| G23 | director | Batches replace per-ticket cards and the 10/1/4/7 day thread (weekdays 9, 13, 17; weekends 11 if needed) | proposed | Sam scrolls cards to act; updates list items without the drafts | Build `sprint_batch.py`; shadow triage stops posting cards | agent |
+| G24 | director | Permanent item numbers across days | proposed | Carried items get new numbers and their cards stay in yesterday's thread, out of reach of commands | Global number per item; old day-thread numbers keep resolving during the switch | agent |
+| G25 | director | Clear-the-queue mode | proposed | 44 open on Oct 17 with only 2 carded; the backlog clears 8 per weekday update | Batches of 10, important then oldest, next batch triaged ahead | agent |
+| G26 | intake | Queue sweep every 30 min replaces the 8-per-update backfill | proposed | A missed webhook leaves a ticket invisible until a weekday update | Silent triage of any open ticket with no card, with a cap | agent |
+| G27 | director | What still goes to engineers, and why | proposed | Sam cannot see how much escalates or what would prevent it | `escalation_reason` on the card and route; batch footer; Monday report | agent |
+| G28 | learning | Trust tiers per category (order and report only) | proposed | Proven categories should need less of Sam | Full reply text is ALWAYS shown (Sam, 2026-10-17); tiers only rank and report | agent |
+| G29 | director | `close quiet` housekeeping lane | proposed | "Thanks, works now" and handled error reports still take a decision each | Triage `lane=housekeeping`; Zoho Closed with no closure email, on Sam's word | agent |
+| G31 | release | Every fixed ticket the client was not told about gets a prepared reply | proposed | Fixes ship and the client never hears (Oct 9: six closed tasks came back) | Sweep open and awaiting tickets with a live fix and no outbound since; "it has been updated, have a look and let us know" in the next batch | agent |
 | G20 | items 1-5 | Close the loop, code checks, ticket fixes, autonomy report, auto-ack off, Sam signature, resolution drafts | built | Not pushed yet | Review the diff, push | Sam |
