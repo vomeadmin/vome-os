@@ -8,9 +8,14 @@ carries the script through however many rounds of review, and ends when the
 build is delivered into it. Without this, a reply saying "make the hook a
 question" has no idea which video it is about.
 
-Deliberately small. The storyboard itself lives in Vome Studio and is the
-real artefact; this is only the pointer from a Slack thread to it, plus
-enough state to know whether a greenlight is allowed yet.
+Deliberately small: the pointer from a Slack thread to its video, the
+storyboard itself, and enough state to know whether a greenlight is allowed
+yet.
+
+The storyboard JSON is kept here, not only in Studio. Deployed, Studio is a
+separate service with a disk that is wiped on every redeploy, and this agent
+has no checkout to read. Without its own copy a revision has nothing to
+revise and a greenlight has nothing to send.
 
 Follows database.py: same engine, same create-if-missing on init.
 """
@@ -35,6 +40,7 @@ CREATE TABLE IF NOT EXISTS video_threads (
   thread_ts      VARCHAR PRIMARY KEY,
   channel        VARCHAR NOT NULL DEFAULT '',
   storyboard     VARCHAR NOT NULL DEFAULT '',
+  storyboard_json TEXT   NOT NULL DEFAULT '',
   feature_name   TEXT    NOT NULL DEFAULT '',
   faq_url        TEXT    NOT NULL DEFAULT '',
   state          VARCHAR NOT NULL DEFAULT 'idea',
@@ -46,6 +52,13 @@ CREATE TABLE IF NOT EXISTS video_threads (
 )
 """
 
+# Columns added after the table first shipped. CREATE TABLE IF NOT EXISTS
+# does nothing to a table that already exists, so each needs its own ALTER.
+_ADD_COLUMNS = (
+    "ALTER TABLE video_threads ADD COLUMN IF NOT EXISTS "
+    "storyboard_json TEXT NOT NULL DEFAULT ''",
+)
+
 
 def init() -> None:
     """Create the table. Safe to call on every boot."""
@@ -53,6 +66,8 @@ def init() -> None:
         return
     with _get_engine().begin() as conn:
         conn.execute(text(_CREATE))
+        for stmt in _ADD_COLUMNS:
+            conn.execute(text(stmt))
 
 
 def get(thread_ts: str) -> dict | None:
@@ -93,8 +108,8 @@ def start(thread_ts: str, channel: str, feature_name: str = "",
 
 def update(thread_ts: str, **fields) -> None:
     """Set named columns on a thread. Unknown columns are ignored."""
-    allowed = {"storyboard", "feature_name", "faq_url", "state", "rounds",
-               "last_runtime", "render_folder"}
+    allowed = {"storyboard", "storyboard_json", "feature_name", "faq_url",
+               "state", "rounds", "last_runtime", "render_folder"}
     sets = {k: v for k, v in fields.items() if k in allowed}
     if not sets or not DATABASE_URL:
         return

@@ -217,3 +217,96 @@ def test_missing_id_is_derived_not_untitled(jobs):
 def test_slugify(jobs):
     assert jobs._slugify("Kiosk check-in!") == "kiosk-check-in"
     assert jobs._slugify("") == "untitled"
+
+
+# ------------------------------------------- deployed: no checkout to lean on
+
+class _Conn:
+    """Stands in for the VomeStudio connector."""
+
+    def __init__(self, validate=None):
+        self.built = []
+        self._validate = validate or {"ok": True, "estimated_runtime": 40,
+                                      "review": "*Kiosk check-in*\nthe script"}
+
+    def validate(self, sb):
+        from types import SimpleNamespace
+        return SimpleNamespace(ok=True, data=self._validate, error="")
+
+    def build(self, sb, engine="elevenlabs"):
+        from types import SimpleNamespace
+        self.built.append(sb)
+        return SimpleNamespace(ok=False, data=None, error="stop here")
+
+
+def _use_http(jobs, monkeypatch, conn):
+    monkeypatch.setattr(jobs, "_studio", lambda: conn)
+    monkeypatch.setattr(jobs, "_local_studio", lambda: "")
+
+
+def test_saved_copy_is_read_before_any_checkout(jobs, monkeypatch):
+    """Deployed, the thread's own copy is the only one that exists."""
+    import json
+    monkeypatch.setattr(jobs, "_local_studio", lambda: "")
+    row = {"storyboard": "kiosk-check-in",
+           "storyboard_json": json.dumps(STORYBOARD)}
+    assert jobs._read_storyboard(row) == STORYBOARD
+    assert jobs._read_storyboard({"storyboard": "kiosk-check-in"}) is None
+
+
+def test_draft_is_remembered_on_the_thread(jobs, monkeypatch):
+    """Without this, the first revision on Railway said the storyboard file
+    was missing, because the only copy was on Studio's wiped disk."""
+    _use_http(jobs, monkeypatch, _Conn())
+    monkeypatch.setattr(jobs, "_faq_text", lambda r, m: ("T", "body"))
+    saved = {}
+    monkeypatch.setattr(jobs.video_threads, "update",
+                        lambda t, **f: saved.update(f, thread=t))
+    _patch_agent(jobs, monkeypatch, _Result("ok", data=dict(STORYBOARD)))
+    out = jobs.run_content_producer("brief", {"thread_ts": "123.4"})
+    assert out["ok"] is True
+    assert saved["thread"] == "123.4"
+    assert '"scenes"' in saved["storyboard_json"]
+    assert out["review"].startswith("*Kiosk check-in*")
+
+
+def test_review_text_is_posted_without_a_checkout(jobs, monkeypatch):
+    """review.py only runs where Studio is checked out. Deployed, the text
+    comes back from validate and must be used as is."""
+    posted = []
+    monkeypatch.setattr(jobs, "_post", lambda t, m: posted.append(m))
+    monkeypatch.setattr(jobs, "_studio_cli",
+                        lambda *a, **k: (False, "", "must not run"))
+    monkeypatch.setattr(jobs.video_threads, "bump_round", lambda t: 1)
+    monkeypatch.setattr(jobs.video_threads, "update", lambda *a, **k: None)
+    jobs._post_script_for_review("1.2", "First pass.", review="the script")
+    assert "the script" in posted[0] and "must not run" not in posted[0]
+
+
+def test_build_sends_the_whole_storyboard(jobs, monkeypatch):
+    """It once sent {"id": slug}: a build with no words in it."""
+    import json
+    conn = _Conn()
+    _use_http(jobs, monkeypatch, conn)
+    monkeypatch.setattr(jobs.video_threads, "get", lambda t: {
+        "thread_ts": t, "storyboard": "kiosk-check-in",
+        "storyboard_json": json.dumps(STORYBOARD)})
+    monkeypatch.setattr(jobs.video_threads, "update", lambda *a, **k: None)
+    monkeypatch.setattr(jobs, "_post", lambda *a: None)
+    jobs.build_video("1.2")
+    assert conn.built == [STORYBOARD]
+
+
+def test_build_without_a_storyboard_sends_nothing(jobs, monkeypatch):
+    """Lost script: say so. Never send a stub that spends credits or
+    overwrites the approved words."""
+    conn = _Conn()
+    _use_http(jobs, monkeypatch, conn)
+    monkeypatch.setattr(jobs.video_threads, "get",
+                        lambda t: {"thread_ts": t, "storyboard": "gone"})
+    monkeypatch.setattr(jobs.video_threads, "update", lambda *a, **k: None)
+    posted = []
+    monkeypatch.setattr(jobs, "_post", lambda t, m: posted.append(m))
+    jobs.build_video("1.2")
+    assert conn.built == []
+    assert posted and "lost the script" in posted[0]

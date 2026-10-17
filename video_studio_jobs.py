@@ -123,9 +123,18 @@ def _studio_json(args: list[str], timeout: int = 120):
 # Script: write, revise, post for review
 # ---------------------------------------------------------------------------
 
-def _post_script_for_review(thread_ts: str, note: str = "") -> None:
-    """Post the current script and park the thread on the human."""
-    ok, out, err = _studio_cli(["scripts/review.py"])
+def _post_script_for_review(thread_ts: str, note: str = "",
+                            review: str = "") -> None:
+    """Post the current script and park the thread on the human.
+
+    `review` is the script as Studio's validate call formatted it. Deployed,
+    that is the only way to get it: there is no checkout here to run
+    review.py in. Locally the CLI is the fallback.
+    """
+    if review:
+        ok, out, err = True, review, ""
+    else:
+        ok, out, err = _studio_cli(["scripts/review.py"])
     if not ok:
         _post(thread_ts,
               "I could not read the script back.\n```%s```" % (err or out)[-900:])
@@ -156,7 +165,8 @@ def draft_script(thread_ts: str, brief: str) -> None:
         return
     video_threads.update(thread_ts, storyboard=result.get("storyboard", ""),
                          feature_name=result.get("feature_name", ""))
-    _post_script_for_review(thread_ts, "Here is the first pass.")
+    _post_script_for_review(thread_ts, "Here is the first pass.",
+                            review=result.get("review", ""))
 
 
 def revise_script(thread_ts: str, note: str) -> None:
@@ -179,7 +189,8 @@ def revise_script(thread_ts: str, note: str) -> None:
               "I could not apply that change.\n```%s```"
               % str(result.get("error", "unknown"))[:900])
         return
-    _post_script_for_review(thread_ts, result.get("summary", "Updated."))
+    _post_script_for_review(thread_ts, result.get("summary", "Updated."),
+                            review=result.get("review", ""))
 
 
 def _faq_text(row: dict, brief: str) -> tuple[str, str]:
@@ -232,9 +243,26 @@ def _slugify(value: str) -> str:
     return out or "untitled"
 
 
-def _read_storyboard(slug: str) -> dict | None:
+def _read_storyboard(row: dict | str) -> dict | None:
+    """The thread's storyboard: its saved copy, else the local checkout.
+
+    The saved copy comes first because it is the one that exists when
+    deployed. A bare slug is accepted for the local-only callers.
+    """
+    if isinstance(row, dict):
+        raw = row.get("storyboard_json") or ""
+        if raw:
+            try:
+                sb = json.loads(raw)
+                if isinstance(sb, dict) and sb.get("scenes"):
+                    return sb
+            except ValueError:
+                pass
+        slug = row.get("storyboard") or ""
+    else:
+        slug = row or ""
     root = _local_studio()
-    if not root:
+    if not root or not slug:
         return None
     path = os.path.join(root, "storyboards", "%s.json" % slug)
     try:
@@ -255,6 +283,17 @@ def _write_storyboard(sb: dict) -> str:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(sb, f, indent=2)
     return slug
+
+
+def _remember_storyboard(thread_ts: str, sb: dict) -> None:
+    """Keep the whole storyboard on the thread row.
+
+    The thread is the one place both a revision and a greenlight can always
+    reach. Studio's copy is wiped on every redeploy.
+    """
+    if thread_ts:
+        video_threads.update(thread_ts, storyboard=sb.get("id", ""),
+                             storyboard_json=json.dumps(sb))
 
 
 def run_content_producer(message: str, row: dict, revise: bool = False) -> dict:
@@ -282,7 +321,7 @@ def run_content_producer(message: str, row: dict, revise: bool = False) -> dict:
         "brief": message,
     }
     if revise:
-        existing = _read_storyboard(row.get("storyboard") or "")
+        existing = _read_storyboard(row)
         if existing is None:
             return {"ok": False,
                     "error": "the storyboard file for this thread is missing"}
@@ -324,6 +363,7 @@ def run_content_producer(message: str, row: dict, revise: bool = False) -> dict:
         slug = _write_storyboard(storyboard)
     except OSError as exc:
         return {"ok": False, "error": "could not save the storyboard: %s" % exc}
+    _remember_storyboard(row.get("thread_ts", ""), storyboard)
 
     # Studio validates it properly: em dashes, duplicate cues, unknown
     # templates, timings that should not be there. Catching it now costs a
@@ -346,6 +386,7 @@ def run_content_producer(message: str, row: dict, revise: bool = False) -> dict:
         "storyboard": slug,
         "feature_name": storyboard.get("feature_name", ""),
         "estimated_runtime": check.get("estimated_runtime"),
+        "review": check.get("review", ""),
         "summary": ("Updated." if revise else "Here is the first pass.")
                    + " Estimated %ss."
                    % round(check.get("estimated_runtime") or 0),
@@ -367,7 +408,16 @@ def build_video(thread_ts: str) -> None:
 
     conn = _studio()
     if conn is not None:
-        report = _build_over_http(conn, slug)
+        storyboard = _read_storyboard(row)
+        if storyboard is None:
+            # Never send a stub. Studio would have nothing to build, and an
+            # older Studio would overwrite the real script with it.
+            report = {"ok": False,
+                      "error": "I have lost the script for this thread, so "
+                               "there is nothing to build. Post the feature "
+                               "again and I will redraft it."}
+        else:
+            report = _build_over_http(conn, storyboard)
     elif _local_studio():
         args = ["scripts/produce.py", "--engine", "elevenlabs"]
         if slug:
@@ -386,14 +436,13 @@ def build_video(thread_ts: str) -> None:
     )
 
 
-def _build_over_http(conn, slug: str) -> dict:
+def _build_over_http(conn, storyboard: dict) -> dict:
     """Start a build and poll it.
 
     A render is minutes long, which is why the endpoint returns an id instead
     of holding the request open. Polling here rather than in the handler
     keeps the Slack thread responsive the whole time.
     """
-    storyboard = _read_storyboard(slug) or {"id": slug}
     started = conn.build(storyboard, engine="elevenlabs")
     if not started.ok:
         return {"ok": False, "error": started.error or "Studio refused the build"}
