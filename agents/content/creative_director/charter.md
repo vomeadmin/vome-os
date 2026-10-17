@@ -37,8 +37,8 @@ One JSON object:
   - `angle`: one sentence. The way in, such as a before and after, the one
     detail that changed, the moment a coordinator notices, a choice between
     options.
-  - `hook`: the literal first spoken line or first on-screen words. Under
-    twelve words. Loud and specific.
+  - `hook`: the literal first spoken line. It says plainly what Vome does
+    here (the voice skill's rule). Never a riddle.
   - `beats`: three to six short strings, the storyline in order, from hook
     to close. Each beat is something the viewer sees or hears.
   - `why_it_works`: one or two sentences tying the concept to the

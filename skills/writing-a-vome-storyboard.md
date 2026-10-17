@@ -38,8 +38,8 @@ that part of the picture never moves.
 **What each scene is for, in the explainer format.** Other formats describe
 their scenes in their own schema and example; follow those.
 
-- **hook** one line. A question or an instruction naming the pain. It has to
-  land before anyone decides to scroll.
+- **hook** one line that says plainly what Vome does here: a question
+  naming the job, or a plain statement. Never a riddle.
 - **problem** the old way, shown on the example's form mock.
 - **ui_demo** the feature working, each line landing on something on screen.
   The mock is a list of rules, each a condition and an action. Keep the same

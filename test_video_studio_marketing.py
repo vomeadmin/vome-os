@@ -367,20 +367,33 @@ def test_blocked_strategist_stops_the_director(jobs, env, monkeypatch):
     assert agents.names() == ["feature_scout", "content_strategist"]
 
 
-def test_direction_keeps_the_positioning_and_shows_the_old_concepts(
+def test_direction_reaches_the_strategist_and_the_director(
         jobs, env, monkeypatch):
-    agents = Agents(creative_director={"concepts": [
-        _concept(4, "reveal"), _concept(5), _concept(6)]})
+    """The first real direction changed the angle ("an automations angle"),
+    and with the positioning held fixed all three new concepts stayed boxed
+    into the old claim. Direction now reaches the scout's research, the
+    strategist (with its previous positioning) and the director."""
+    moved = dict(POSITIONING, single_claim="Vome automates email campaigns.")
+    agents = Agents(feature_scout=SCOUT, content_strategist=moved,
+                    creative_director={"concepts": [
+                        _concept(4, "reveal"), _concept(5), _concept(6)]})
     _install(monkeypatch, agents)
     row = {"thread_ts": "1.2", "positioning_json": json.dumps(POSITIONING),
            "concepts_json": json.dumps(CONCEPTS)}
-    out = jobs.run_concepts("more human please", row,
-                            direction="more human please")
+    out = jobs.run_concepts("video please", row,
+                            direction="an automations angle")
     assert out["ok"] is True
-    assert agents.names() == ["creative_director"]
+    assert agents.names() == ["feature_scout", "content_strategist",
+                              "creative_director"]
+    assert "an automations angle" in agents.context("feature_scout")["brief"]
+    s = agents.context("content_strategist")
+    assert s["direction"] == "an automations angle"
+    assert json.loads(s["previous_positioning"]) == POSITIONING
     d = agents.context("creative_director")
-    assert d["direction"] == "more human please"
+    assert d["direction"] == "an automations angle"
     assert json.loads(d["previous_concepts"]) == CONCEPTS
+    assert json.loads(d["positioning"]) == moved
+    assert out["positioning"] == moved
 
 
 def test_develop_concepts_posts_and_waits_for_a_pick(jobs, env, monkeypatch):
@@ -414,6 +427,7 @@ def test_failed_first_concepts_leave_the_thread_open(jobs, env, monkeypatch):
 
 def test_failed_direction_keeps_the_earlier_concepts(jobs, env, monkeypatch):
     _install(monkeypatch, Agents(
+        feature_scout=SCOUT, content_strategist=POSITIONING,
         creative_director=_Result("error", reason="timeout")))
     env.row = {"thread_ts": "1.2", "positioning_json": json.dumps(POSITIONING),
                "concepts_json": json.dumps(CONCEPTS)}

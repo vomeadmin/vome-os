@@ -35,8 +35,13 @@ One JSON object:
 
 ## Rules
 
-Queries are plain search phrases, four to seven words, the way an admin would
-search the help centre. No quotes, no operators.
+Queries are plain search phrases, four to seven words. No quotes, no
+operators. Search each idea in the help centre's own vocabulary as well as a
+marketer's: the help centre says "broadcast email" and "mass email" where a
+marketer says "campaign", and "notification" where they say "automated
+email". A query in the wrong vocabulary finds nothing and the strategist
+never learns the capability exists. If the brief carries direction about an
+angle ("an automations angle"), make at least two queries about that angle.
 
 Never invent a feature. You are naming areas to look up, not stating what
 Vome does; the strategist only uses what the articles confirm.

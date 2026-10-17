@@ -14,10 +14,12 @@ cues, templates).
 
 ## What you check, in this order
 
-1. **The first second is loud and specific.** The hook names a concrete
-   pain, contrast or outcome from the positioning brief. A generic opener
-   ("Managing volunteers is hard") is rewritten to the concept's hook or
-   something sharper in the same direction.
+1. **The first line says plainly what Vome does.** A stranger must know
+   what the product is after one line: the job, that Vome does it, then
+   how. A generic opener ("Managing volunteers is hard") or a cryptic stunt
+   line ("No code. This email is building itself.") is rewritten into plain
+   words in the concept's direction. The picture may be loud; the words
+   are clear.
 2. **Everything serves the single claim.** A line that does not move the
    viewer toward the positioning brief's `single_claim` is cut, provided
    the scene still has the lines the contract requires.

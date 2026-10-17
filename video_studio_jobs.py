@@ -164,11 +164,11 @@ def _post_script_for_review(thread_ts: str, note: str = "",
 def develop_concepts(thread_ts: str, brief: str, direction: str = "") -> None:
     """An idea, or direction on earlier concepts, becomes three concepts.
 
-    First time: the strategist positions the video, then the creative
-    director offers three concepts. With direction: the positioning stands
-    and the creative director tries again, shown the concepts it is moving
-    away from. Either way the concepts are posted and the thread waits for
-    a person to pick one.
+    The scout and the strategist position the video, then the creative
+    director offers three concepts. With direction, the strategist sees its
+    previous positioning and may move the claim, and the director sees the
+    concepts it is moving away from. Either way the concepts are posted and
+    the thread waits for a person to pick one.
     """
     row = video_threads.get(thread_ts) or {}
     had_concepts = bool(video_concepts.load_concepts(row))
@@ -618,9 +618,12 @@ def run_concepts(brief: str, row: dict, direction: str = "") -> dict:
     "feature_name"} or {"ok": False, "error"}. Persisting and posting are the
     caller's.
 
-    On direction the positioning already on the thread is kept. Direction is
-    about how to tell the story; what the video claims was settled from the
-    FAQ and does not move because a hook was not liked.
+    On direction the strategist runs again, shown its previous positioning
+    and the direction. It used to be kept fixed, on the theory that direction
+    is only about how to tell the story; then the first real direction
+    ("an automations angle: sending bulk volunteer email campaigns") changed
+    what the video is about, and three concepts came back still boxed into
+    the old claim. The strategist decides whether the claim moves.
     """
     thread_ts = row.get("thread_ts", "")
     title, body = _faq_text(row, brief)
@@ -640,34 +643,44 @@ def run_concepts(brief: str, row: dict, direction: str = "") -> dict:
         video_threads.recent_videos(thread_ts))
     prior_text = video_concepts.prior_videos_text(prior)
 
-    positioning = video_concepts.load_positioning(row) if direction else None
-    if not positioning:
-        # Step back first. The strategist used to see only this article and
-        # positioned a narrow setting to viewers who do not know Vome sends
-        # email at all. The scout names the wider capability and what to
-        # look up; the related articles are what the strategist may use.
-        scout, err = _run("content.feature_scout", {
-            "feature_name": feature_name,
-            "faq_text": body,
-            "brief": brief,
-        }, thread_ts)
-        if err:
-            return {"ok": False, "error": err}
-        related = _related_articles(scout.get("queries") or [],
-                                    exclude_title=feature_name)
-        positioning, err = _run("content.content_strategist", {
-            "feature_name": feature_name,
-            "faq_text": body,
-            "brief": brief,
-            "prior_videos": prior_text,
-            "scout": json.dumps(scout, indent=2),
-            "related_articles": related or "(none found)",
-        }, thread_ts)
-        if err:
-            return {"ok": False, "error": err}
-        if not str(positioning.get("single_claim") or "").strip():
-            return {"ok": False,
-                    "error": "the positioning brief came back with no claim"}
+    previous = video_concepts.load_positioning(row) if direction else None
+    # Direction steers the research too: "an automations angle" should send
+    # the scout looking for automations.
+    steer = brief + ("\n\nDirection from the person: %s" % direction
+                     if direction else "")
+
+    # Step back first. The strategist used to see only this article and
+    # positioned a narrow setting to viewers who do not know Vome sends
+    # email at all. The scout names the wider capability and what to look
+    # up; the related articles are what the strategist may use.
+    scout, err = _run("content.feature_scout", {
+        "feature_name": feature_name,
+        "faq_text": body,
+        "brief": steer,
+    }, thread_ts)
+    if err:
+        return {"ok": False, "error": err}
+    related = _related_articles(scout.get("queries") or [],
+                                exclude_title=feature_name)
+    s_context = {
+        "feature_name": feature_name,
+        "faq_text": body,
+        "brief": brief,
+        "prior_videos": prior_text,
+        "scout": json.dumps(scout, indent=2),
+        "related_articles": related or "(none found)",
+    }
+    if direction:
+        s_context["direction"] = direction
+        s_context["previous_positioning"] = json.dumps(previous or {},
+                                                       indent=2)
+    positioning, err = _run("content.content_strategist", s_context,
+                            thread_ts)
+    if err:
+        return {"ok": False, "error": err}
+    if not str(positioning.get("single_claim") or "").strip():
+        return {"ok": False,
+                "error": "the positioning brief came back with no claim"}
 
     context = {
         "positioning": json.dumps(positioning, indent=2),

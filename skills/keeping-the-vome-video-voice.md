@@ -1,6 +1,6 @@
 ---
 name: keeping-the-vome-video-voice
-description: The Vome video brand voice and claim discipline shared by the marketing team: tone, the loud first second, banned devices, sourcing every fact, and not repeating earlier videos.
+description: The Vome video brand voice and claim discipline shared by the marketing team: say what it is plainly, step back before the new detail, banned devices, sourcing every fact, and not repeating earlier videos.
 owner: content
 ---
 
@@ -10,11 +10,21 @@ Every Vome video sounds like the same company. This is that company.
 the one thing worth seeing. Not playful, not hype, not cute. Confidence is
 shown by saying less.
 
-**The first second is loud, everything after it is calm.** Loud means
-specific and arresting, not shouted: a concrete pain, a surprising contrast,
-a visible before and after, a number the FAQ supports. "Managing volunteers
-is hard" is not loud, it is wallpaper. After the first second the video
-slows down and earns trust.
+**Say what it is, plainly.** Sammy's rule, 2026-10-17. The first line tells
+a stranger what Vome does here, in the words a coordinator would use: the
+job, then that Vome does it, then how. A relatable question naming the job
+is fine. Riddles, fragments and stunt lines are not.
+
+- Good: "Stuck sending volunteer email campaigns manually? Vome helps you
+  automate them, with all the flexibility you need out of the box."
+- Good: "Vome makes it easy to send bulk volunteer email campaigns, and to
+  automate them."
+- Wrong: "No code. This email is building itself." "Desktop. Mobile. Dark
+  mode." Catchy, but a stranger cannot tell what the product is.
+
+The PICTURE may be loud in the first second (a hard cut, large type, the
+dark beat). The WORDS are clear and descriptive from the first one. "Managing
+volunteers is hard" is still wrong: it says nothing about what Vome does.
 
 **Never use** emoji, confetti, exclamation marks, "game changer",
 "revolutionary", "seamless", "supercharge", "unlock", "level up", "magic",
@@ -39,10 +49,11 @@ for good."). The closing line names the outcome and the product, plainly.
 Never a real customer, a real person or a real organisation, even one the
 FAQ names.
 
-**Name what is genuinely new.** Vome may already have done part of this
-before. The video is about the difference, not about the whole area. If Vome
-already sent emails and the new thing is how they look, the video is about
-how they look.
+**Step back, then name what is new.** Most viewers have never used Vome.
+Say briefly what Vome does in this area (it sends email to volunteers, from
+your own address, automatically), then land what is new (and now every email
+can look the way you want). Never claim the whole area is new when only part
+of it is; never open on the new detail with no context.
 
 **Do not repeat an earlier video.** You may be given a list of earlier
 videos with their format, angle and hook. A new video does not reuse an
