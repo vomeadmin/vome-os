@@ -713,7 +713,7 @@ def test_anything_else_while_concepts_wait_is_direction(handler, text):
 
 
 @pytest.mark.parametrize("text", ["go build it", "Approve.", "ship it!",
-                                  "make it"])
+                                  "ok, go build the video"])
 def test_a_greenlight_before_a_pick_asks_for_a_pick(handler, text):
     """There is no script. Nothing is built, and the concepts are not
     regenerated from "go build it"."""
