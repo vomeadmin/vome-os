@@ -235,6 +235,17 @@ def test_a_wholly_blank_extra_concept_is_dropped():
     assert "exactly three" in err
 
 
+def test_hooks_may_not_share_an_opening():
+    """The third real run: every hook began 'Vome sends email to your
+    users'. Plain, but one formula three times."""
+    same = "Vome sends email to your users, and %s"
+    data = {"concepts": [_concept(1, "reveal", hook=same % "one"),
+                         _concept(2, hook=same % "two"),
+                         _concept(3, hook="A different opening line")]}
+    _, err = vc.check_concepts(data, ["explainer", "reveal"])
+    assert "open with the same words" in err
+
+
 def test_one_format_needs_a_reason_when_two_are_ready():
     data = {"concepts": [_concept(1), _concept(2), _concept(3)]}
     _, err = vc.check_concepts(data, ["explainer", "reveal"])

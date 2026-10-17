@@ -351,6 +351,25 @@ def test_a_concept_in_a_format_that_is_not_ready_is_refused(jobs, env,
     assert out["ok"] is False and "trio" in out["error"]
 
 
+def test_a_refused_set_is_retried_once_with_the_reason(jobs, env,
+                                                      monkeypatch):
+    """Two hooks opening alike is fixable, so the director gets one retry
+    with the reason rather than the person getting no concepts."""
+    alike = [dict(_concept(1, "reveal"),
+                  hook="Vome sends email to your users A"),
+             dict(_concept(2), hook="Vome sends email to your users B"),
+             _concept(3)]
+    answers = iter([{"concepts": alike, "notes": "n"},
+                    {"concepts": CONCEPTS, "notes": "n"}])
+    agents = Agents(feature_scout=SCOUT, content_strategist=POSITIONING,
+                    creative_director=lambda ctx: next(answers))
+    _install(monkeypatch, agents)
+    out = jobs.run_concepts("brief", {"thread_ts": "1.2"})
+    assert out["ok"] is True and out["concepts"] == CONCEPTS
+    second = [c for n, c in agents.calls if n.endswith("creative_director")][1]
+    assert "same words" in second["check_failed"]
+
+
 def test_no_ready_format_means_no_agents(jobs, env, monkeypatch):
     env.studio = Studio(formats=[dict(CATALOGUE[2])])
     _install(monkeypatch, Agents())

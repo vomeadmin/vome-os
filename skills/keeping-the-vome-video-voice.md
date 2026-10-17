@@ -22,6 +22,11 @@ is fine. Riddles, fragments and stunt lines are not.
 - Wrong: "No code. This email is building itself." "Desktop. Mobile. Dark
   mode." Catchy, but a stranger cannot tell what the product is.
 
+Plain is not one formula. Three concepts in one round open three different
+ways: a question naming the job, a plain statement of what Vome does, a
+concrete moment ("Saturday, 9am, and every volunteer already has their
+reminder."). Never three lines starting "Vome sends email to your users".
+
 The PICTURE may be loud in the first second (a hard cut, large type, the
 dark beat). The WORDS are clear and descriptive from the first one. "Managing
 volunteers is hard" is still wrong: it says nothing about what Vome does.

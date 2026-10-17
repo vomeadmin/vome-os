@@ -701,7 +701,20 @@ def run_concepts(brief: str, row: dict, direction: str = "") -> dict:
     concepts, err = video_concepts.check_concepts(
         data, [f["name"] for f in ready], [p["hook"] for p in prior])
     if err:
-        return {"ok": False, "error": err}
+        # One retry with the reason. A check that fails on something the
+        # director can fix (two hooks opening alike) should cost a second
+        # call, not leave the person with no concepts at all.
+        context["check_failed"] = (
+            "Your previous answer was refused: %s. Fix that and return three "
+            "concepts again." % err)
+        context["refused_answer"] = json.dumps(data, indent=2)
+        data, err2 = _run("content.creative_director", context, thread_ts)
+        if err2:
+            return {"ok": False, "error": err2}
+        concepts, err = video_concepts.check_concepts(
+            data, [f["name"] for f in ready], [p["hook"] for p in prior])
+        if err:
+            return {"ok": False, "error": err}
     return {"ok": True, "positioning": positioning, "concepts": concepts,
             "notes": data.get("notes", ""), "catalogue": catalogue,
             "feature_name": feature_name}

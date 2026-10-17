@@ -268,6 +268,13 @@ def check_concepts(data, ready_names: list[str],
     hooks = [_norm(c["hook"]) for c in concepts]
     if len(set(hooks)) != len(hooks):
         return [], "two concepts share a hook"
+    # Plain hooks drifted into one formula: all three opened "Vome sends
+    # email to your users, and...". Three concepts are three ways in.
+    openings = [" ".join(h.split()[:4]) for h in hooks]
+    if len(set(openings)) != len(openings):
+        return [], ("two hooks open with the same words (%r); three "
+                    "concepts need three different first lines"
+                    % next(o for o in openings if openings.count(o) > 1))
     # Variety is the default, not a rule: a ready format that cannot show
     # the feature would make a broken concept. The first real run used one
     # format because the explainer cannot draw an email at all, and said so.
