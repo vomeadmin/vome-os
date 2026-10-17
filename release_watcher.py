@@ -680,14 +680,28 @@ def _set_release_check(task_id: str, value: str) -> None:
 
 
 def _post(text: str) -> bool:
+    """Into the day's #support-sprints thread, beside the cards it names.
+
+    The first live release posted to the channel itself, so each fix showed
+    up as its own stray thread away from the sprint.
+    """
     from slack_sdk import WebClient
     from slack_sdk.errors import SlackApiError
 
     try:
+        import sprint_thread
+
+        thread = sprint_thread.ensure_thread()
+    except Exception as exc:
+        print(f"[RELEASE] no sprint thread, posting to the channel: {exc}")
+        thread = ""
+    try:
         client = WebClient(token=os.environ.get("SLACK_BOT_TOKEN", ""))
-        client.chat_postMessage(
-            channel=SPRINTS_CHANNEL, text=text, unfurl_links=False,
-        )
+        kwargs = {"channel": SPRINTS_CHANNEL, "text": text,
+                  "unfurl_links": False}
+        if thread:
+            kwargs["thread_ts"] = thread
+        client.chat_postMessage(**kwargs)
         return True
     except SlackApiError as exc:
         print(f"[RELEASE] Slack post failed: {exc.response['error']}")
@@ -723,7 +737,7 @@ def _pair_line(check: PairCheck) -> str:
 
 def _message(
     state: str, task: dict, checks: list[PairCheck], children: list[dict],
-    errors: list[str], dry_run: bool,
+    errors: list[str], dry_run: bool, resolutions: list[dict] | None = None,
 ) -> str:
     title = f"<{task.get('url')}|{task.get('name')}>"
     prefix = "[dry run, nothing written] " if dry_run else ""
@@ -735,11 +749,15 @@ def _message(
         if count:
             noun = "client" if count == 1 else "clients"
             lines.append(f"*{count} {noun} to notify:*")
-            lines += [_client_line(c) for c in children]
-            lines.append(
-                "Resolution drafts come to Sam for approval. Nothing has been "
-                "sent, and the tasks stay at on dev until the replies go out."
-            )
+            if resolutions:
+                import release_resolutions
+
+                lines += release_resolutions.lines(resolutions)
+                lines.append("When a reply is sent, the ticket and its tasks "
+                             "close on their own.")
+            else:
+                lines += [_client_line(c) for c in children]
+                lines.append("Resolution drafts follow in this thread.")
         else:
             lines.append("No client tickets are linked, so nobody to notify.")
         lines.append(
@@ -903,6 +921,18 @@ def run_release_watcher(
             changed = ledger.last_alerted(task["id"], dry_run) != state
         else:
             changed = field_changed
+        # A live fix owes each client a resolution: draft it now (and send
+        # it, if RELEASE_AUTO_SEND is on), once per client ticket. This also
+        # picks up fixes that went live before drafting existed.
+        resolutions: list[dict] = []
+        if state == FIX_LIVE and post and not dry_run and children:
+            try:
+                import release_resolutions
+
+                resolutions = release_resolutions.prepare(task, children)
+            except Exception as exc:
+                print(f"[RELEASE] resolutions failed for {task['id']}: {exc}")
+
         alerted = False
         if not post:
             print(_message(state, task, checks, children, errors, dry_run))
@@ -910,8 +940,17 @@ def run_release_watcher(
             alerted = changed
         elif changed:
             alerted = _post(
-                _message(state, task, checks, children, errors, dry_run)
+                _message(state, task, checks, children, errors, dry_run,
+                         resolutions)
             )
+        elif resolutions:
+            import release_resolutions
+
+            _post("\n".join(
+                [f":memo: *Resolution drafts ready:* <{task.get('url')}|"
+                 f"{task.get('name')}>"]
+                + release_resolutions.lines(resolutions)
+            ))
 
         if post:
             ledger.record_fix(

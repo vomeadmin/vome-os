@@ -65,12 +65,13 @@ flowchart TD
   OD --> PROMO["Human promotes dev -> master<br/>(batched)"]:::live
   PROMO --> BUILD["Prod build green<br/>(GitHub Actions / Bitbucket pipeline)"]:::live
   BUILD --> W["Release watcher every 15 min<br/>merged + built + live stamp"]:::live
-  W -->|all commits live| LIVE["Release Check Live +<br/>'Fix live, N clients' post"]:::live
+  W -->|all commits live| LIVE["Release Check Live +<br/>'Fix live' post in the day thread"]:::built
   W -->|build failed / 2h stuck| FAIL["Release Check Failed + alert"]:::deployed
-  LIVE --> RD["Resolution drafts made<br/>automatically for each child"]:::proposed
-  LIVE --> SAM["Sam: 'retriage N' or the next<br/>customer message redrafts"]:::deployed
-  RD & SAM --> SEND["Sam sends from the thread"]:::deployed
-  SEND --> CLOSE["Zoho Closed (no closure email)<br/>child + parent Closed"]:::built
+  LIVE --> RD["Resolution draft per client,<br/>as a numbered card (once per ticket)"]:::built
+  RD --> AUTO{"RELEASE_AUTO_SEND on?<br/>(off; never needs_human)"}:::decide
+  AUTO -->|off| SEND["Sam says 'send N'<br/>in the thread"]:::deployed
+  AUTO -->|on, draft passed guards| AS["Sent automatically"]:::decide
+  SEND & AS --> CLOSE["Zoho Closed (no closure email)<br/>child + parent Closed"]:::built
 ```
 
 <!-- map:diagram id=sentry title="3. A production error, from Sentry to a fix" -->
@@ -133,7 +134,7 @@ flowchart LR
 
 | When | Job | Status |
 |---|---|---|
-| every 15 min | `support.release_watcher` (also promotes merged fix PRs) | live |
+| every 15 min | `support.release_watcher` (also promotes merged fix PRs and drafts resolutions) | live |
 | hourly :30 | `support.clickup_webhook_health` | live |
 | 02:00 daily | `support.kb_sync` | live |
 | 07:30 daily | `support.stale_sweep` | live |
@@ -158,7 +159,8 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 <!-- map:register -->
 | id | area | item | status | why it matters | next step | owner |
 |---|---|---|---|---|---|---|
-| G1 | release | Resolution drafts made automatically when a fix goes Live | proposed | Today Sam has to say "retriage N" or wait for the customer to write again | On Live, re-run the drafter for each child with the release state | agent |
+| G1 | release | Resolution drafts made automatically when a fix goes Live | built | The first live release posted "1 client to notify" and stopped | Push; the three live fixes (#9415, #9436, #9500) get drafts on the first pass | Sam |
+| G21 | release | Auto-send resolutions once a fix is proven live (`RELEASE_AUTO_SEND`) | decide | Removes the last manual step for clean resolutions | Turn on once the Monday autonomy report shows resolutions going out unedited; never applies to needs_human | Sam |
 | G2 | engineer | Engineer-triggered replies still auto-send (on prod, needs client info, user education) | decide | They skip Sam's review; the playbook text says nothing auto-sends | Keep as is, or turn them into sprint thread drafts | Sam |
 | G3 | intake | #vome-tickets brief and legacy classifier run beside shadow triage | decide | Two cards per ticket, two places to look | Retire once the sprint thread is trusted (the old reply handling depends on it) | Sam |
 | G4 | sentry | vome-react sends nothing to Sentry | broken | Frontend crashes reach us only as tickets | Put REACT_APP_SENTRY_DSN into the build (CRA inlines it at build time) | Sanjay |
@@ -177,4 +179,4 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 | G17 | crm | CRM often finds no deal, so ARR shows 0 and tier "low" | broken | Important clients can look unimportant on cards | Map Zoho account to CRM account, not only by email | agent |
 | G18 | knowledge | "Source: code, no FAQ" answers do not become article suggestions | proposed | The same question is answered from code each time | Queue a help centre article draft for Sam | agent |
 | G19 | slack | First real message in the sprint thread not yet proven | deployed | If Slack does not deliver thread events, Sam's replies go nowhere | Sam replies in the thread once; check the agent answers | Sam |
-| G20 | items 1-5 | Close the loop, code checks, ticket fixes, autonomy report, auto-ack off, Sam signature | built | Not pushed yet | Review the diff, push | Sam |
+| G20 | items 1-5 | Close the loop, code checks, ticket fixes, autonomy report, auto-ack off, Sam signature, resolution drafts | built | Not pushed yet | Review the diff, push | Sam |

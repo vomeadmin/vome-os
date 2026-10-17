@@ -46,6 +46,13 @@ QUEUE = "support"
 
 OPEN_STATUSES = ("New", "Processing")
 
+RESOLUTION_NOTES = (
+    "This is a resolution reply: the linked fix is live. Say only that the "
+    "update is live, what they will notice, and invite them to try it. Do "
+    "not apologise, do not refer to anything we sent before, and do not "
+    "bring up any other topic from the thread."
+)
+
 # Categories that get a drafted reply. The rest wait for Sam's decision:
 # a feature request may already exist, needs_human needs a person, an
 # escalation is an engineer asking Sam, and awaiting_client owes nothing.
@@ -208,6 +215,27 @@ def match_incident(ticket_number: str, account: str, card: dict,
             "confidence": data.get("confidence") or ""}
 
 
+def _drop_known_different(incident: dict, release: dict) -> dict:
+    """Remove tickets already tied to a different fix.
+
+    The rehearsal paired #9415 (PDF highlighting) with #9436 (a note that
+    would not delete): same customer, both forms, different bugs, and each
+    already has its own Agent Fixes parent. Linked work is a fact; the
+    matcher's similarity is a guess, so the fact wins.
+    """
+    if not incident or not release.get("task_id"):
+        return incident
+    keep = []
+    for number in incident.get("same_as") or []:
+        other = release_state(str(number), "")
+        if other.get("task_id") and other["task_id"] != release["task_id"]:
+            continue
+        keep.append(number)
+    if not keep and not incident.get("sentry_issue"):
+        return {}
+    return {**incident, "same_as": keep}
+
+
 # ---------------------------------------------------------------------------
 # Drafting
 # ---------------------------------------------------------------------------
@@ -294,7 +322,14 @@ def handle(message: dict) -> dict:
         return {"status": "error", "error": str(exc)}
 
 
-def _handle(ticket_id: str, reason: str, force: bool = False) -> dict:
+def _handle(ticket_id: str, reason: str, force: bool = False,
+            release: dict | None = None) -> dict:
+    """`release` is the release state when the caller already knows it.
+
+    The release watcher passes the fix it just proved live, so a second
+    ClickUp lookup cannot lose it: in the 2026-10-17 rehearsal a throttled
+    lookup came back empty and #9500 got no resolution draft at all.
+    """
     import zoho_actions
     from vomeos import run_agent
 
@@ -321,10 +356,15 @@ def _handle(ticket_id: str, reason: str, force: bool = False) -> dict:
     ticket_number = context.get("ticket_number") or ticket_id
     subject = context.pop("_subject", "")
     images = context.pop("_images", [])
-    arr = context.pop("_arr", 0) or 0
+    # The CRM sometimes returns ARR as text ("7000"); a comparison on that
+    # crashed the whole triage when the card itself was empty.
+    try:
+        arr = float(context.pop("_arr", 0) or 0)
+    except (TypeError, ValueError):
+        arr = 0.0
     context.pop("_ticket_id", None)
 
-    release = release_state(ticket_number, ticket_id)
+    release = release or release_state(ticket_number, ticket_id)
     if release.get("task_id"):
         context["existing_tasks"] = (
             f"{context.get('existing_tasks', '')}\n\nRELEASE STATE: "
@@ -350,15 +390,34 @@ def _handle(ticket_id: str, reason: str, force: bool = False) -> dict:
     try:
         incident = match_incident(ticket_number, context.get("account", ""),
                                   card, when)
+        incident = _drop_known_different(incident, release)
     except Exception as exc:
         print(f"[SHADOW] incident check failed on {ticket_number}: {exc}")
 
     category = str(card.get("category") or "")
     draft = {"text": "", "status": "none", "why": ""}
-    if category in DRAFT_CATEGORIES and not is_error_report(subject):
+    # A fix proven live owes the customer a resolution whatever the card's
+    # category (#9500 was needs_human because of an earlier wrong reply;
+    # the resolution is exactly what she is waiting for). Sam still reviews
+    # it, and release_resolutions never auto-sends a needs_human ticket.
+    owed = category in DRAFT_CATEGORIES or (
+        release.get("live") and category not in ("misdirected",
+                                                 "account_deletion",
+                                                 "email_update"))
+    if owed and not is_error_report(subject):
+        resolution_card = card
+        notes = ""
+        if release.get("live"):
+            # The "unbacked claim" note exists to stop a draft repeating a
+            # promise. Once the fix is live it only pulls the draft backwards
+            # ("Apologies for that, the note was not removed before", the
+            # #9436 rehearsal). A resolution is the fix, nothing else.
+            resolution_card = {**card, "blocking_claims": ""}
+            notes = RESOLUTION_NOTES
         draft = draft_reply(
-            ticket_number, card, context, rcpt, release,
+            ticket_number, resolution_card, context, rcpt, release,
             language=_language(context.get("thread", "")),
+            sam_notes=notes,
         )
 
     item = sprint_store.upsert_ticket(

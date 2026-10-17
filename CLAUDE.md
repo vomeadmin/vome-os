@@ -86,6 +86,8 @@ zoho_actions.py    recipients, sendReply, silent status changes
 ticket_images.py   inline screenshots + attachments for the agents
 ticket_fix.py      code-check bug -> fix PR -> Agent Fixes -> on dev on merge
 release_watcher.py proves an Agent Fix live, posts "Fix live, N clients"
+release_resolutions.py  a live fix -> one resolution draft per client, as a
+                   card in the day thread (RELEASE_AUTO_SEND sends clean ones)
 sentry_agent_fixes.py  actionable Sentry issue -> one Agent Fixes task/cause
 autonomy_report.py weekly: how often drafts go out unedited, per category
 WORKFLOWS.md       the workflow map + gap register (source of truth)
@@ -225,7 +227,11 @@ needs go on `vome-os-worker`, not the web service.
   sprint_partner (senior). Text agents are scored with contains /
   not_contains / status / max_words (vomeos/evaluate.py).
 - Release watcher (every 15 min, always live) proves Agent Fixes live and
-  first promotes merged agent fix PRs to `on dev`. Nothing ever sets `on prod`
+  first promotes merged agent fix PRs to `on dev`. On Live it drafts a
+  resolution per client (`release_resolutions`, once per ticket) and posts
+  in the day's sprint thread with the item numbers to send.
+  `RELEASE_AUTO_SEND=true` sends clean drafts itself (never needs_human);
+  off by default, Sam's call. Nothing ever sets `on prod`
   from these paths: the on-prod handler would email the customer again.
 - Retired: blind auto-ack (`ENABLE_AUTO_ACK` unset = off), email
   completeness gate (removed), "Vic" signatures (engineer-triggered replies

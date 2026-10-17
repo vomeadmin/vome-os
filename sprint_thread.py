@@ -225,7 +225,8 @@ def render_card(item: dict, release: dict | None = None) -> str:
         )
     if item.get("fix_pr"):
         lines.append(f":hammer_and_wrench: *Proposed fix:* {item['fix_pr']}")
-    if release and release.get("task_id"):
+    if release and (release.get("task_id")
+                    or "could not be read" in (release.get("text") or "")):
         lines.append(f"*Release:* {release.get('text')}")
     if card.get("blocking_claims"):
         lines.append(f":warning: *Unbacked claim in thread:* "

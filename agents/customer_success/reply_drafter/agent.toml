@@ -10,7 +10,9 @@ hired = "2026-10-17"
 # by the triage director on senior; this writes four sentences in a fixed
 # voice from that card. The guards, not the tier, are what keep it safe.
 tier = "standard"
-max_tokens = 900
+# 2000, not 900: the drafter may think before it writes, and on a long
+# thread (#9500, 2026-10-17) 900 left nothing for the reply itself.
+max_tokens = 2000
 
 [job]
 charter = "charter.md"

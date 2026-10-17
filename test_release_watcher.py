@@ -196,6 +196,14 @@ def world(monkeypatch):
     import ticket_fix
 
     monkeypatch.setattr(ticket_fix, "run_promotion", lambda: {})
+    import release_resolutions
+
+    W.resolutions = []
+    W.prepared = []
+    monkeypatch.setattr(
+        release_resolutions, "prepare",
+        lambda task, children: W.prepared.append(task["id"])
+        or list(W.resolutions))
     return W
 
 
@@ -267,8 +275,48 @@ def test_web_fix_goes_live_and_names_the_clients(world):
     post = world.posts[0]
     assert "Fix live" in post and "1 client to notify" in post
     assert "Zoho #9415" in post
-    assert "Nothing has been sent" in post
+    assert "drafts follow" in post
     assert chr(0x2014) not in post  # no em dashes
+
+
+def test_live_fix_drafts_each_client_and_names_the_item(world):
+    """2026-10-17: the post said '1 client to notify' and stopped there."""
+    world.github.runs = [gh_run(7, "a3a3a33")]
+    world.stamp = "a3a3a33"
+    world.tasks = [parent("p1", "web@a2a2a22"), child("k1", "p1", "9415")]
+    world.resolutions = [{"ticket": "9415", "item": 3, "outcome": "drafted",
+                          "detail": ""}]
+    rw.run_release_watcher(dry_run=False)
+    assert world.prepared == ["p1"]
+    post = world.posts[0]
+    assert "item 3" in post and "`send 3`" in post
+    assert "close on their own" in post
+
+
+def test_a_fix_already_live_gets_its_drafts_once(world):
+    """The first three went live before drafting existed."""
+    world.github.runs = [gh_run(7, "a3a3a33")]
+    world.stamp = "a3a3a33"
+    world.tasks = [parent("p1", "web@a2a2a22", release_check=2),
+                   child("k1", "p1", "9436")]
+    world.ledger.fixes["p1"] = {"real": rw.FIX_LIVE}
+    world.resolutions = [{"ticket": "9436", "item": 4, "outcome": "drafted",
+                          "detail": ""}]
+    rw.run_release_watcher(dry_run=False)
+    assert len(world.posts) == 1
+    assert "Resolution drafts ready" in world.posts[0]
+    assert "`send 4`" in world.posts[0]
+    world.resolutions = []
+    rw.run_release_watcher(dry_run=False)
+    assert len(world.posts) == 1
+
+
+def test_dry_run_and_print_only_never_draft(world):
+    world.github.runs = [gh_run(7, "a3a3a33")]
+    world.tasks = [parent("p1", "web@a3a3a33"), child("k1", "p1", "9415")]
+    rw.run_release_watcher(dry_run=True)
+    rw.run_release_watcher(dry_run=True, post=False)
+    assert world.prepared == []
 
 
 def test_green_build_the_site_is_not_serving_is_not_live(world):
