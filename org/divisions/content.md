@@ -20,6 +20,10 @@ video that is slightly wrong is downloaded, reposted and quoted back at us.
   copied from the product's own strings, never paraphrased. A customer who
   knows the product spots a wrong label immediately, and then nothing else in
   the video is trusted either.
+- **A person picks the concept.** The strategist positions the video, the
+  creative director offers three concepts, and a script is written only
+  for the one a person picks by number. Each video gets its own angle and
+  format; none copies the structure of the last.
 - **Vome Studio builds it.** You write a storyboard; it returns MP4s. It will
   not invent a screen it does not have a template for, and you should not ask.
 
