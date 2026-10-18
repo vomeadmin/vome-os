@@ -39,7 +39,7 @@ flowchart TD
   T --> I["Incident matcher (fast)<br/>last 24h tickets + Sentry"]:::deployed
   I -->|high confidence| IA["Immediate mention to Sam<br/>in the day thread"]:::deployed
   T --> D["Reply drafter (standard)<br/>every outbound guard"]:::deployed
-  T --> F["Ticket fix ladder<br/>bug + high + low risk -> PR"]:::built
+  T --> F["Ticket fix ladder<br/>bug + high/medium + low risk -> PR"]:::deployed
   D & F --> C["Numbered card in today's<br/>#support-sprints thread"]:::deployed
   C --> P["Sam talks to the sprint partner<br/>(questions, edits, decisions)"]:::deployed
   P -->|"send (his words)"| SE["Zoho sendReply to sender,<br/>their cc + secondary contacts"]:::deployed
@@ -53,15 +53,15 @@ flowchart TD
 <!-- map:diagram id=fix title="2. A bug, from code check to customer told" -->
 ```mermaid
 flowchart TD
-  CC["Code check says bug,<br/>high confidence, low risk"]:::built --> FA["Fix author writes a diff<br/>(or declines)"]:::built
+  CC["Code check says bug, high or medium<br/>confidence, low risk (design question: Sam)"]:::deployed --> FA["Fix author writes a diff<br/>(or declines)"]:::deployed
   FA --> PS["Patch safety: no migrations,<br/>auth, billing, deps, CI, tests"]:::live
   PS --> PR["PR into development / develop<br/>(never merged by an agent)"]:::built
   PR --> AF["Agent Fixes parent + child<br/>Merge Owner set, status in progress"]:::built
-  AF --> MG["OnlyG (core) / Sanjay (web)<br/>review and merge"]:::live
+  AF --> MG["Sam merges agent PRs into dev<br/>(they carry no migrations)"]:::live
   MG --> PM["PR merged: Fix Commit filled,<br/>parent + children to on dev"]:::built
   HM["Fix made in a Claude Code session<br/>(hotfix, merged to dev branch)"]:::live --> OD
   PM --> OD["Agent Fixes parent at on dev<br/>with Fix Commit"]:::live
-  OD --> PROMO["Human promotes dev -> master<br/>(batched)"]:::live
+  OD --> PROMO["Production: Sam deploys web,<br/>OnlyG merges core"]:::live
   PROMO --> BUILD["Prod build green<br/>(GitHub Actions / Bitbucket pipeline)"]:::live
   BUILD --> W["Release watcher every 15 min<br/>merged + built + live stamp"]:::live
   W -->|all commits live| LIVE["Release Check Live +<br/>'Fix live' post in the day thread"]:::live
@@ -138,20 +138,20 @@ flowchart TD
   NOFAQ["'Code, no FAQ' answers become<br/>article suggestions"]:::proposed
 ```
 
-<!-- map:diagram id=director title="7. Sam runs the sprint from batches (agreed 2026-10-17, not built)" -->
+<!-- map:diagram id=director title="7. Sam runs the sprint from batches (deployed 2026-10-18)" -->
 ```mermaid
 flowchart TD
-  WH["Zoho webhook, plus a queue sweep<br/>every 30 min for missed tickets"]:::proposed --> ST["Shadow triage stores card + draft<br/>(no card posted per ticket)"]:::proposed
-  RL["Fix proven live (Agent Fixes Live,<br/>or a linked task on prod)"]:::live --> RS["Prepared reply for every fixed ticket<br/>the client has not been told about"]:::proposed
-  ST & RS --> B["Batch: weekdays 9, 13, 17; weekends 11 if needed<br/>one top-level message, previous one superseded"]:::proposed
-  B --> FULL["Every ready reply shown in full,<br/>exactly as the client will receive it"]:::proposed
-  B --> SEC["Sections: ready to send, fix first, decisions,<br/>close quietly, in flight, waiting on a release"]:::proposed
-  FULL --> CMD["Sam: send ready / send 101 106 / edit / hold till /<br/>route / log / build / no / close quiet"]:::proposed
-  CMD -->|"send (his words)"| SE["Sent at once, any hour<br/>(no business-hours window)"]:::proposed
-  CMD --> CF["Anything open is in the next batch<br/>with its age; permanent item numbers"]:::proposed
-  CL["'clear the queue': batches of 10,<br/>important then oldest, next one pre-triaged"]:::proposed --> B
+  WH["Zoho webhook, plus a queue sweep<br/>every 30 min for missed tickets"]:::deployed --> ST["Shadow triage stores card + draft<br/>(no card posted per ticket)"]:::deployed
+  RL["Fix proven live (Agent Fixes Live,<br/>or a linked task on prod)"]:::live --> RS["Prepared reply for every fixed ticket<br/>the client has not been told about"]:::deployed
+  ST & RS --> B["Batch: weekdays 9, 13, 17; weekends 11 if needed<br/>one top-level message, previous one superseded"]:::deployed
+  B --> FULL["Every ready reply shown in full,<br/>exactly as the client will receive it"]:::deployed
+  B --> SEC["Sections: ready to send, fix first, decisions,<br/>close quietly, in flight, waiting on a release"]:::deployed
+  FULL --> CMD["Sam: send ready / send 101 106 / edit / hold till /<br/>route / log / build / no / close quiet"]:::deployed
+  CMD -->|"send (his words)"| SE["Sent at once, any hour<br/>(no business-hours window)"]:::deployed
+  CMD --> CF["Anything open is in the next batch<br/>with its age; permanent item numbers"]:::deployed
+  CL["'clear the queue': batches of 10,<br/>important then oldest, next one pre-triaged"]:::deployed --> B
   INC["Incident (high confidence)"]:::deployed -->|only interruption| PING["Immediate mention"]:::deployed
-  B --> ESC["What went to engineers and why<br/>(batch footer + Monday report)"]:::proposed
+  B --> ESC["What went to engineers and why<br/>(batch footer + Monday report)"]:::deployed
 ```
 
 ## Schedule (America/Montreal, run by Celery beat on `vome-os-worker`)
@@ -185,7 +185,7 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 <!-- map:register -->
 | id | area | item | status | why it matters | next step | owner |
 |---|---|---|---|---|---|---|
-| G1 | release | Resolution drafts made automatically when a fix goes Live | broken | First production pass (Oct 17 14:00 ET) failed for #9415, #9436, #9500: sprint tables did not exist yet | Push the pending batch (table setup + retry up to 3); the next pass drafts all three | Sam |
+| G1 | release | Resolution drafts made automatically when a fix goes Live | live | Proven Oct 17: #9436 and #9500 drafted on the retry; #9415 held by a guard for the word placeholders | None; the guard match on placeholders is worth narrowing | agent |
 | G21 | release | Auto-send resolutions once a fix is proven live (`RELEASE_AUTO_SEND`) | decide | Removes the last manual step for clean resolutions | Turn on once the Monday autonomy report shows resolutions going out unedited; never applies to needs_human | Sam |
 | G2 | engineer | Engineer-triggered replies still auto-send (on prod, needs client info, user education) | decide | They skip Sam's review; the playbook text says nothing auto-sends | Keep as is, or turn them into sprint thread drafts | Sam |
 | G3 | intake | Legacy intake (classifier, CRM tier, Zoho auto-assignment, ClickUp queue task, #vome-tickets brief) and the blind auto-ack removed | built | Two cards per ticket, and a second ClickUp task whenever Sam routed one | Push; new tickets then reach engineers only through `route`. Reply handling is unchanged | Sam |
@@ -199,20 +199,21 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 | G10 | feature | No duplicate check before logging a feature request | proposed | Risk of duplicate backlog items | Run check_existing_work before creating | agent |
 | G11 | feature | Client not told when a Sam Accepted request ships | proposed | Promise loop never closes | Watch Sam Accepted for closed tasks, draft the update | agent |
 | G12 | incident | Incident alert does not create the fix parent with one child per ticket | proposed | Grouping is manual | On a confirmed incident, create the parent and children | agent |
-| G13 | learning | Every correction becomes a live lesson (thread edits, conversation, Claude Code) | built | The same correction kept coming back | Push; then say `lessons` in the thread to see them | Sam |
+| G13 | learning | Every correction becomes a live lesson (thread edits, conversation, Claude Code) | deployed | The same correction kept coming back | L1 recorded 2026-10-18 (triage: bug vs how-to vs design question); first thread edit still to come | Sam |
 | G22 | learning | Lesson promotion into charters is done by hand weekly | proposed | Live lessons pile up if nobody promotes them | Have the Monday job open a PR with the proposed charter and answer-key changes | agent |
 | G14 | learning | Earned auto-send per category | proposed | The goal state; needs data first | After 50 sent at 95% unedited, Sam approves a category | Sam |
-| G15 | triage | Triage answer key was written by an agent, not reviewed | broken | 88% agreement against an unreviewed key | Sam reviews 16 cases once | Sam |
+| G15 | triage | Triage answer key was written by an agent, not reviewed | broken | 2026-10-18: 14/17 (82%), under the 85% threshold, the same with or without the new skill. Misses: tri-04 (feature_request vs needs_human), tri-13 (vague_bug vs clear_bug), tri-16 (vague/user_education vs admin_action) | Sam reviews the 17 cases once; fix the key or the charter | Sam |
 | G16 | docs | CLAUDE.md "state of play" predates the broker cutover | built | New sessions start from wrong facts | Refreshed 2026-10-17 (see CLAUDE.md) | agent |
 | G17 | crm | CRM often finds no deal, so ARR shows 0 and tier "low" | broken | Important clients can look unimportant on cards | Map Zoho account to CRM account, not only by email | agent |
 | G18 | knowledge | "Source: code, no FAQ" answers do not become article suggestions | proposed | The same question is answered from code each time | Queue a help centre article draft for Sam | agent |
 | G19 | slack | First real message in the sprint thread not yet proven | deployed | If Slack does not deliver thread events, Sam's replies go nowhere | Sam replies in the thread once; check the agent answers | Sam |
-| G23 | director | Batches replace per-ticket cards and the 10/1/4/7 day thread (weekdays 9, 13, 17; weekends 11 if needed) | proposed | Sam scrolls cards to act; updates list items without the drafts | Build `sprint_batch.py`; shadow triage stops posting cards | agent |
-| G24 | director | Permanent item numbers across days | proposed | Carried items get new numbers and their cards stay in yesterday's thread, out of reach of commands | Global number per item; old day-thread numbers keep resolving during the switch | agent |
-| G25 | director | Clear-the-queue mode | proposed | 44 open on Oct 17 with only 2 carded; the backlog clears 8 per weekday update | Batches of 10, important then oldest, next batch triaged ahead | agent |
-| G26 | intake | Queue sweep every 30 min replaces the 8-per-update backfill | proposed | A missed webhook leaves a ticket invisible until a weekday update | Silent triage of any open ticket with no card, with a cap | agent |
+| G23 | director | Batches replace per-ticket cards and the 10/1/4/7 day thread (weekdays 9, 13, 17; weekends 11 if needed) | deployed | Sam scrolled cards to act; updates listed items without the drafts | First scheduled batch Mon Oct 19 9:00, or `catch me up` in a sprint thread | agent |
+| G24 | director | Permanent item numbers across days | deployed | Carried items got new numbers and their cards stayed in yesterday's thread | Prove on the first weekday batch | agent |
+| G25 | director | Clear-the-queue mode | deployed | 44 open on Oct 17 with only 2 carded | Rounds of 25, most important then oldest; `clear the queue` in a batch thread | agent |
+| G26 | intake | Queue sweep every 30 min replaces the 8-per-update backfill | deployed | A missed webhook left a ticket invisible until a weekday update | First sweep ran Oct 18 12:30 ET; 10 tickets per run | agent |
 | G27 | director | What still goes to engineers, and why | proposed | Sam cannot see how much escalates or what would prevent it | `escalation_reason` on the card and route; batch footer; Monday report | agent |
 | G28 | learning | Trust tiers per category (order and report only) | proposed | Proven categories should need less of Sam | Full reply text is ALWAYS shown (Sam, 2026-10-17); tiers only rank and report | agent |
 | G29 | director | `close quiet` housekeeping lane | proposed | "Thanks, works now" and handled error reports still take a decision each | Triage `lane=housekeeping`; Zoho Closed with no closure email, on Sam's word | agent |
 | G31 | release | Every fixed ticket the client was not told about gets a prepared reply | proposed | Fixes ship and the client never hears (Oct 9: six closed tasks came back) | Sweep open and awaiting tickets with a live fix and no outbound since; "it has been updated, have a look and let us know" in the next batch | agent |
-| G20 | items 1-5 | Close the loop, code checks, ticket fixes, autonomy report, Sam signature, resolution drafts | built | Not pushed yet | Review the diff, push | Sam |
+| G32 | fix | Ticket bugs become fix PRs on their own | deployed | Never fired before Oct 18: it needed high confidence (0 of 16 cards) and VOMEOS_CODE_WRITE_REPOS was unset, so no repo was writable (Sentry PRs too) | Gate is now medium; allowlist set Oct 18 (core, database, web). Watch for the first PR | agent |
+| G20 | items 1-5 | Close the loop, code checks, ticket fixes, autonomy report, Sam signature, resolution drafts | deployed | Pushed Oct 17/18 | Prove each on a real ticket | agent |
