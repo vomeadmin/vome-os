@@ -323,7 +323,8 @@ def handle(message: dict) -> dict:
 
 
 def _handle(ticket_id: str, reason: str, force: bool = False,
-            release: dict | None = None, ignore_cap: bool = False) -> dict:
+            release: dict | None = None, ignore_cap: bool = False,
+            refresh: bool = False) -> dict:
     """`release` is the release state when the caller already knows it.
 
     The release watcher passes the fix it just proved live, so a second
@@ -342,7 +343,10 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
     rcpt = zoho_actions.recipients(ticket_id)
     thread_id = rcpt.get("thread_id") or ""
     existing = sprint_store.by_ticket(ticket_id)
-    if (not force and existing and thread_id
+    # `refresh` triages an item again under today's rules ("clear the queue
+    # fresh") but, unlike `force`, still respects a ticket that is no longer
+    # open.
+    if (not force and not refresh and existing and thread_id
             and existing.get("last_thread_id") == thread_id
             and existing.get("status") in sprint_store.CARRIES):
         return {"status": "skipped", "reason": "already triaged"}

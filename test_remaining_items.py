@@ -330,3 +330,103 @@ def test_trust_tiers():
     assert "`user_education` proven" in text
     assert "What still escalates" in text and "data lookup 1" in text
     assert chr(0x2014) not in text
+
+
+# ---------------------------------------------------------------------------
+# A full test of the queue: catch me up now, clear the queue fresh, and
+# tickets handled outside the sprint
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "catch me up", "Catch me up now", "catch me up please", "batch",
+    "please catch me up",
+])
+def test_catch_me_up_wording(text):
+    assert sprint_thread._CATCH_UP.match(text)
+
+
+@pytest.mark.parametrize("text,fresh", [
+    ("clear the queue", False), ("clear the queue now", False),
+    ("clear the queue fresh", True), ("Clear the pipeline again", True),
+    ("clear the queue from scratch", True),
+])
+def test_clear_wording(text, fresh):
+    match = sprint_thread._CLEAR.match(text)
+    assert match and bool(match.group("fresh")) is fresh
+
+
+def test_fresh_clear_retriages_open_items_triaged_before_it(monkeypatch):
+    cutoff = NOW
+    items = {"T1": None,                                       # untriaged
+             "T2": {"status": "open", "updated_at": NOW - timedelta(days=1)},
+             "T3": {"status": "open", "updated_at": NOW + timedelta(hours=1)},
+             "T4": {"status": "sent", "updated_at": NOW - timedelta(days=1)}}
+    monkeypatch.setattr(sprint_store, "by_ticket",
+                        lambda t: items.get(t) or {})
+    picked = [t for t in items
+              if sprint_batch._needs_triage({"id": t}, cutoff)]
+    # Old open card: again. Already refreshed, or already sent: not again.
+    assert picked == ["T1", "T2"]
+    plain = [t for t in items if sprint_batch._needs_triage({"id": t}, None)]
+    assert plain == ["T1"]
+
+
+def test_refresh_respects_a_closed_ticket():
+    import shadow_triage
+
+    src = open(shadow_triage.__file__, encoding="utf-8").read()
+    # refresh skips only the "already triaged" check, never the status one.
+    assert "if (not force and not refresh and existing" in src
+    assert "if status and status not in OPEN_STATUSES and not force" in src
+
+
+@pytest.fixture
+def zoho_status(monkeypatch):
+    import zoho_actions
+
+    statuses = {}
+    decided = []
+    monkeypatch.setattr(zoho_actions, "ticket_status",
+                        lambda t: statuses.get(t, ""))
+    monkeypatch.setattr(sprint_store, "decide",
+                        lambda i, s, d: decided.append((i, s, d)))
+    monkeypatch.setattr(sprint_batch, "_resolution_tickets",
+                        lambda: {"RES"})
+    return statuses, decided
+
+
+def test_a_ticket_closed_in_zoho_leaves_the_batch(zoho_status):
+    statuses, decided = zoho_status
+    statuses.update({"CLOSED": "Closed", "OLD_OPEN": "Processing",
+                     "ROUTED": "In Progress"})
+    items = [_item(1, ticket_id="CLOSED"), _item(2, ticket_id="OLD_OPEN"),
+             _item(3, ticket_id="ROUTED"), _item(4, ticket_id="IN_QUEUE")]
+    finished = sprint_batch.sync_handled_elsewhere(items, {"IN_QUEUE"})
+    assert finished == 2
+    assert [d[0] for d in decided] == [101, 103]
+    assert decided[0][2] == "handled outside the sprint (Zoho: Closed)"
+    # Old but still open in Zoho (beyond the queue read): kept.
+    assert items[1]["status"] == "open"
+
+
+def test_resolutions_and_fix_prs_are_never_synced_away(zoho_status):
+    statuses, decided = zoho_status
+    statuses.update({"RES": "In Progress", "PR": "In Progress"})
+    items = [_item(1, ticket_id="RES"),
+             _item(2, ticket_id="PR", fix_pr="https://bb/pr/1")]
+    assert sprint_batch.sync_handled_elsewhere(items, set()) == 0
+    assert decided == []
+
+
+def test_an_unreadable_status_finishes_nothing(monkeypatch, zoho_status):
+    import zoho_actions
+
+    _, decided = zoho_status
+
+    def boom(t):
+        raise RuntimeError("Zoho 500")
+
+    monkeypatch.setattr(zoho_actions, "ticket_status", boom)
+    assert sprint_batch.sync_handled_elsewhere(
+        [_item(1, ticket_id="X")], set()) == 0
+    assert decided == []

@@ -530,22 +530,24 @@ def _prs_open() -> int:
     return int(rows[0]["n"]) if rows else 0
 
 
-def _untriaged() -> tuple[int | None, str]:
+def _queue_state(items: list[dict]) -> tuple[int | None, str]:
+    """Read the Zoho queue once: finish items handled outside the sprint,
+    and count open tickets with no item. (None, why) when Zoho is
+    unreadable, and then nothing is finished."""
     try:
-        import sprint
-
-        tickets = sprint.fetch_open_tickets(200)
+        tickets = _queue()
     except Exception as exc:
         return None, _short(str(exc), 80)
-    ids = [str(t.get("id")) for t in tickets]
-    if not ids:
-        return 0, ""
-    rows = store.query(
-        f"SELECT ticket_id FROM {sprint_store.ITEMS}"
-        " WHERE ticket_id = ANY(:ids)", {"ids": ids},
-    )
-    known = {str(r["ticket_id"]) for r in rows}
-    return len([i for i in ids if i not in known]), ""
+    open_ids = {str(t.get("id")) for t in tickets}
+    sync_handled_elsewhere(items, open_ids)
+    known = {str(i.get("ticket_id")) for i in sprint_store.working_set()}
+    missing = [i for i in open_ids if i not in known]
+    if missing:
+        rows = store.query(
+            f"SELECT ticket_id FROM {sprint_store.ITEMS}"
+            " WHERE ticket_id = ANY(:ids)", {"ids": missing})
+        known |= {str(r["ticket_id"]) for r in rows}
+    return len([i for i in open_ids if i not in known]), ""
 
 
 def fill_received(items: list[dict], limit: int = 40) -> int:
@@ -632,6 +634,7 @@ def run_batch(kind: str = "scheduled", exclude: set | None = None,
     sprint_store.carry_forward()
     now = _now()
     items = sprint_store.working_set()
+    untriaged, queue_error = _queue_state(items)
     fill_received(items)
     picked = select(items, exclude=exclude, now=now)
     chosen = picked[READY] + picked[FIX] + picked[DECIDE]
@@ -650,7 +653,6 @@ def run_batch(kind: str = "scheduled", exclude: set | None = None,
         return {"status": "unchanged", "batch": prev.get("id")}
 
     release = _release_context(prev.get("posted_at") if prev else None)
-    untriaged, queue_error = _untriaged()
     context = {
         "resolutions": _resolution_tickets(),
         "since": _since_line(items, prev, release) if prev else "",
@@ -710,35 +712,59 @@ def _lease(name: str, minutes: int) -> bool:
     return bool(rows)
 
 
-def triage_untriaged(limit: int, ignore_cap: bool = False) -> dict:
-    """Triage open tickets that have no item yet, oldest first, silently.
+CLEAR_PAGES = 10
 
-    A per-ticket lease keeps the sweep, clear mode and a second worker from
-    triaging the same ticket twice at once.
+
+def _queue(pages: int | None = None) -> list[dict]:
+    """Open (New / Processing) tickets. Raises when Zoho cannot be read:
+    an unreadable queue is not an empty one."""
+    import sprint
+
+    return sprint.fetch_open_tickets(1000, max_pages=pages)
+
+
+def _needs_triage(ticket: dict, fresh_since: datetime | None) -> bool:
+    item = sprint_store.by_ticket(str(ticket.get("id")))
+    if not item:
+        return True
+    if fresh_since is None:
+        return False
+    updated = item.get("updated_at")
+    return (item.get("status") in sprint_store.CARRIES
+            and isinstance(updated, datetime) and updated < fresh_since)
+
+
+def triage_untriaged(limit: int, ignore_cap: bool = False,
+                     fresh_since: datetime | None = None,
+                     pages: int | None = None) -> dict:
+    """Triage open tickets silently, oldest activity first.
+
+    Normally only tickets with no item. With `fresh_since` ("clear the queue
+    fresh"), also every open item last triaged before then, so the whole
+    queue is judged by today's rules. A per-ticket lease keeps the sweep,
+    clear mode and a second worker from triaging the same ticket at once.
     """
     import shadow_triage
-    import sprint
 
     if not sprint_store.ready():
         return {"status": "no database"}
     try:
-        tickets = sprint.fetch_open_tickets(200)
+        tickets = _queue(pages)
     except Exception as exc:
-        # An unreadable queue is not an empty one.
         return {"status": "queue unreadable", "error": str(exc)}
-    pending = [t for t in tickets
-               if not sprint_store.by_ticket(str(t.get("id")))]
+    pending = [t for t in tickets if _needs_triage(t, fresh_since)]
     triaged = failed = 0
     for ticket in pending:
         if triaged >= limit:
             break
         ticket_id = str(ticket.get("id"))
-        if sprint_store.by_ticket(ticket_id) or \
+        if not _needs_triage(ticket, fresh_since) or \
                 not _lease(f"triage:{ticket_id}", 20):
             continue
         try:
-            outcome = shadow_triage._handle(ticket_id, "sweep",
-                                            ignore_cap=ignore_cap)
+            outcome = shadow_triage._handle(
+                ticket_id, "clear_fresh" if fresh_since else "sweep",
+                ignore_cap=ignore_cap, refresh=fresh_since is not None)
         except Exception as exc:
             print(f"[BATCH] triage of {ticket_id} failed: {exc}")
             outcome = {"status": "error"}
@@ -756,62 +782,118 @@ def run_queue_sweep() -> dict:
     return triage_untriaged(SWEEP_CAP)
 
 
-def start_clear(message_ts: str, thread: str) -> str:
-    """Sam said `clear the queue`. Queue the work and say what happens."""
-    untriaged, error = _untriaged()
-    if untriaged is None:
-        return (f"I could not read the Zoho queue ({error}), so I cannot "
+def sync_handled_elsewhere(items: list[dict], open_ids: set) -> int:
+    """Finish items whose ticket was handled outside the sprint.
+
+    Someone closed it in Zoho, or moved it to In Progress or Awaiting
+    Client Response: it no longer needs Sam here. The queue read only covers
+    recent tickets, so a ticket missing from it is asked about directly
+    before anything is finished. A resolution waiting to be sent, or a
+    ticket with an agent fix PR, stays: those tickets usually sit In
+    Progress while the fix is built, and the client is still owed a reply.
+    """
+    import zoho_actions
+
+    keep = _resolution_tickets()
+    finished = 0
+    for item in items:
+        ticket_id = str(item.get("ticket_id") or "")
+        if (item.get("status") not in sprint_store.CARRIES
+                or ticket_id in open_ids or ticket_id in keep
+                or item.get("fix_pr")):
+            continue
+        try:
+            status = zoho_actions.ticket_status(ticket_id)
+        except Exception as exc:
+            print(f"[BATCH] status of {ticket_id} unreadable: {exc}")
+            continue
+        if not status or status in ("New", "Processing"):
+            continue
+        sprint_store.decide(item["id"], sprint_store.DONE,
+                            f"handled outside the sprint (Zoho: {status})")
+        item["status"] = sprint_store.DONE
+        finished += 1
+    return finished
+
+
+def start_clear(message_ts: str, thread: str, fresh: bool = False) -> str:
+    """Sam said `clear the queue` (or `clear the queue fresh`)."""
+    try:
+        tickets = _queue(CLEAR_PAGES)
+    except Exception as exc:
+        return (f"I could not read the Zoho queue ({exc}), so I cannot "
                 "clear it. Try again in a few minutes.")
+    since = _now()
+    todo = [t for t in tickets if _needs_triage(t, since if fresh else None)]
     try:
         from vomeos.worker import enqueue_event
 
-        enqueue_event(CLEAR_KEY, {"ts": message_ts, "thread": thread,
-                                  "round": 1}, queue="support")
+        enqueue_event(CLEAR_KEY, {
+            "ts": message_ts, "thread": thread, "round": 1,
+            "fresh_since": since.isoformat() if fresh else ""},
+            queue="support")
     except Exception as exc:
         return f"Could not start clearing the queue ({exc})."
-    if not untriaged:
+    if not todo:
         return ("Every open ticket is already triaged. Posting a fresh "
                 "batch of what needs you now.")
-    rounds = -(-untriaged // BATCH_SIZE)
-    return (f"Clearing the queue: {untriaged} untriaged ticket(s). I triage "
-            f"them {BATCH_SIZE} at a time, most important then oldest, and "
-            f"post each batch when it is ready (about {rounds} round(s), "
-            "roughly a minute per ticket). Nothing is sent until you say "
-            "send.")
+    rounds = -(-len(todo) // BATCH_SIZE)
+    if fresh:
+        return (f"Triaging all {len(todo)} open ticket(s) again under "
+                f"today's rules, {BATCH_SIZE} per round (about {rounds} "
+                f"round(s), roughly a minute per ticket). I post progress "
+                "here and the batch when the last round is done. Nothing is "
+                "sent until you say send.")
+    return (f"Clearing the queue: {len(todo)} untriaged ticket(s). I triage "
+            f"them {BATCH_SIZE} at a time, oldest first, and post the batch "
+            f"after the first round (about {rounds} round(s), roughly a "
+            "minute per ticket). Nothing is sent until you say send.")
 
 
 def handle_queue_clear(message: dict) -> dict:
-    """One round of clear mode: triage up to a batch, post it, and queue the
-    next round while untriaged tickets remain. Idempotent on Sam's message
-    ts and the round."""
+    """One round of clear mode. Idempotent on Sam's message ts and round.
+
+    Plain clear: the first round posts the batch Sam works from, later
+    rounds only say the next tickets are ready (a new batch every few
+    minutes would bury the one he is in). Fresh: every round reports
+    progress, and the batch posts once, when the last round is done, so it
+    is judged entirely by today's rules.
+    """
     import sprint_thread
 
     key = f"clear:{message.get('ts')}:{message.get('round')}"
     if not _lease(key, 24 * 60):
         return {"status": "duplicate"}
-    result = triage_untriaged(BATCH_SIZE, ignore_cap=True)
+    fresh_since = _parse_time(message.get("fresh_since")) \
+        if message.get("fresh_since") else None
+    result = triage_untriaged(BATCH_SIZE, ignore_cap=True,
+                              fresh_since=fresh_since, pages=CLEAR_PAGES)
+    thread = message.get("batch_ts") or message.get("thread") or ""
     if result.get("status") != "ok":
         sprint_thread._post(
             f"Clearing stopped: {result.get('status')} "
-            f"({result.get('error') or ''}).",
-            thread_ts=message.get("thread") or "")
+            f"({result.get('error') or ''}).", thread_ts=thread)
         return result
     round_number = int(message.get("round") or 1)
     left = result.get("untriaged") or 0
-    if round_number == 1:
-        # The first round posts the batch Sam works from. Later rounds only
-        # tell him the next ones are ready: a new batch every few minutes
-        # would bury the one he is in the middle of.
-        posted = run_batch("clear", reply_thread=message.get("thread") or "")
+    more = bool(left and result.get("triaged") and round_number < 10)
+    posted: dict = {}
+    if fresh_since is not None:
+        if more:
+            sprint_thread._post(
+                f"Round {round_number}: {result.get('triaged')} triaged, "
+                f"{left} to go.", thread_ts=thread)
+        else:
+            posted = run_batch("clear", reply_thread=thread)
+    elif round_number == 1:
+        posted = run_batch("clear", reply_thread=thread)
         message = {**message, "batch_ts": _batch_ts(posted)}
     else:
-        posted = {}
         sprint_thread._post(
             f"Round {round_number}: {result.get('triaged')} more triaged"
             + (f", {left} still to go" if left else ", the queue is clear")
-            + ". Say `next` for the batch.",
-            thread_ts=message.get("batch_ts") or message.get("thread") or "")
-    if left and result.get("triaged") and round_number < 10:
+            + ". Say `next` for the batch.", thread_ts=thread)
+    if more:
         from vomeos.worker import enqueue_event
 
         enqueue_event(CLEAR_KEY, {**message, "round": round_number + 1},

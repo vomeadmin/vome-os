@@ -400,7 +400,7 @@ def db(monkeypatch):
         return "" if thread_ts else f"{len(posts)}.0"
 
     monkeypatch.setattr(sprint_thread, "_post", post)
-    monkeypatch.setattr(sprint_batch, "_untriaged", lambda: (3, ""))
+    monkeypatch.setattr(sprint_batch, "_queue_state", lambda items: (3, ""))
     import zoho_actions
 
     monkeypatch.setattr(zoho_actions, "latest_inbound", lambda tid: {})

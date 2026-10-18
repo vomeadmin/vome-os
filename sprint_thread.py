@@ -737,11 +737,14 @@ _CLOSE_QUIET = re.compile(
     r"\s*[.!]?\s*$", re.I)
 _NEXT = re.compile(r"^\s*(next|next batch|more)\s*[.!?]?\s*$", re.I)
 _CATCH_UP = re.compile(
-    r"^\s*(catch me up|batch|new batch|fresh batch|refresh)\s*[.!?]?\s*$",
-    re.I)
+    r"^\s*(?:please\s+)?(catch me up|batch|new batch|fresh batch|refresh)"
+    r"(?:\s+(?:now|please))?\s*[.!?]?\s*$", re.I)
+# "clear the queue fresh" triages every open ticket again under today's
+# rules, not only the untriaged ones.
 _CLEAR = re.compile(
-    r"^\s*clear(?:\s+the)?(?:\s+(?:queue|pipeline|backlog))?\s*[.!]?\s*$",
-    re.I)
+    r"^\s*clear(?:\s+the)?(?:\s+(?:queue|pipeline|backlog))?"
+    r"(?P<fresh>\s+(?:fresh|again|from scratch|all))?"
+    r"(?:\s+(?:now|please))?\s*[.!]?\s*$", re.I)
 
 
 def _batch_command(text: str, thread: str, batch: dict,
@@ -769,8 +772,10 @@ def _batch_command(text: str, thread: str, batch: dict,
         return _batch_result(result)
     if _CATCH_UP.match(text or ""):
         return _batch_result(sprint_batch.run_batch("catch_up"))
-    if _CLEAR.match(text or ""):
-        return sprint_batch.start_clear(message_ts, thread)
+    match = _CLEAR.match(text or "")
+    if match:
+        return sprint_batch.start_clear(message_ts, thread,
+                                        fresh=bool(match.group("fresh")))
     return None
 
 
