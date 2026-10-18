@@ -56,6 +56,58 @@ def test_sections():
     assert sprint_batch.section(_item(4, status="sent")) == ""
 
 
+def test_a_ready_draft_with_no_recipient_is_not_ready():
+    # #9538, the first production preview: "To: ?" under READY TO SEND.
+    item = _item(1, recipients={"cc": []})
+    assert sprint_batch.section(item) == sprint_batch.FIX
+    top, parts = sprint_batch.render(
+        7, sprint_batch.select([item], now=NOW), {}, NOW)
+    assert "READY TO SEND" not in top
+    assert sprint_batch.NO_RECIPIENT in "\n".join(parts)
+
+
+def test_send_refuses_a_reply_with_no_recipient(monkeypatch):
+    import zoho_actions
+
+    calls = []
+    monkeypatch.setattr(zoho_actions, "latest_inbound",
+                        lambda tid: {"id": "T-LATEST"})
+    monkeypatch.setattr(zoho_actions, "send_reply",
+                        lambda *a: calls.append(a))
+    item = _item(1, last_thread_id="T-LATEST", recipients={"cc": []})
+    out = sprint_thread._send(item)
+    assert calls == [] and "no recipient" in out
+
+
+def test_nothing_owed_is_one_line_not_a_decision():
+    owed = _item(11, category="awaiting_client", draft="",
+                 draft_status="none")
+    picked = sprint_batch.select([owed, _item(1)], now=NOW)
+    assert picked[sprint_batch.DECIDE] == []
+    assert picked[sprint_batch.OWED_NOTHING] == [owed]
+    top, _ = sprint_batch.render(7, picked, {}, NOW)
+    assert "*NOTHING OWED (1)*" in top and "`done 11`" in top
+    assert "*1 need you*" in top
+
+
+def test_missing_customer_times_are_looked_up_once(monkeypatch):
+    import zoho_actions
+
+    looked, stored = [], []
+    monkeypatch.setattr(zoho_actions, "latest_inbound",
+                        lambda tid: looked.append(tid)
+                        or {"createdTime": "2026-09-01T10:00:00.000Z"})
+    monkeypatch.setattr(sprint_store, "set_received_at",
+                        lambda i, v: stored.append((i, v)))
+    old = _item(1, recipients={"to": "a@b.co"},
+                arrived_at=NOW - timedelta(hours=1))
+    known = _item(2)
+    assert sprint_batch.fill_received([old, known]) == 1
+    assert looked == [old["ticket_id"]]
+    assert stored == [(old["id"], "2026-09-01T10:00:00.000Z")]
+    assert sprint_batch.age(old, NOW).endswith("d")
+
+
 def test_a_hold_comes_back_when_it_wakes():
     held = _item(5, status="held", wake_at=NOW + timedelta(hours=1))
     assert sprint_batch.section(held, NOW) == sprint_batch.HELD
@@ -65,10 +117,13 @@ def test_a_hold_comes_back_when_it_wakes():
 
 def test_important_first_then_longest_waiting():
     items = [
-        _item(1, recipients={"received_at": "2026-10-18T10:00:00Z"}),
-        _item(2, recipients={"received_at": "2026-10-10T10:00:00Z"}),
+        _item(1, recipients={"to": "a@b.co",
+                             "received_at": "2026-10-18T10:00:00Z"}),
+        _item(2, recipients={"to": "a@b.co",
+                             "received_at": "2026-10-10T10:00:00Z"}),
         _item(3, important=True,
-              recipients={"received_at": "2026-10-18T12:00:00Z"}),
+              recipients={"to": "a@b.co",
+                          "received_at": "2026-10-18T12:00:00Z"}),
     ]
     picked = sprint_batch.select(items, now=NOW)
     assert [i["number"] for i in picked[sprint_batch.READY]] == [3, 2, 1]
@@ -114,7 +169,7 @@ def test_the_top_message_lists_everything_and_the_thread_has_each_reply():
     thread = "\n".join(parts)
     assert thread.count(DRAFT) == 2
     assert "To: phanda@mlhs.org · cc: boss@mlhs.org" in thread
-    assert "Held by a guard: client_message: placeholders" in thread
+    assert "Held: client_message: placeholders" in thread
     assert "*Waiting on:* Is the note gone?" in thread
 
 
@@ -274,6 +329,9 @@ def db(monkeypatch):
 
     monkeypatch.setattr(sprint_thread, "_post", post)
     monkeypatch.setattr(sprint_batch, "_untriaged", lambda: (3, ""))
+    import zoho_actions
+
+    monkeypatch.setattr(zoho_actions, "latest_inbound", lambda tid: {})
     superseded = []
     monkeypatch.setattr(sprint_batch, "_supersede",
                         lambda prev, ts, n: superseded.append(prev["id"]))

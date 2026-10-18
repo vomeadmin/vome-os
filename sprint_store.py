@@ -411,6 +411,16 @@ def decide(item_id: int, status: str, decision: str) -> None:
     )
 
 
+def set_received_at(item_id: int, value: str) -> None:
+    """When the customer last wrote, for an item stored before it was."""
+    store.execute(
+        f"UPDATE {ITEMS} SET recipients = COALESCE(recipients,"
+        " '{}'::jsonb) || jsonb_build_object('received_at',"
+        " CAST(:v AS TEXT)) WHERE id = :i",
+        {"v": value, "i": item_id},
+    )
+
+
 def hold(item_id: int, wake_at: datetime, decision: str) -> None:
     """Out of the batches until `wake_at` (naive UTC), then back on top."""
     store.execute(

@@ -70,6 +70,9 @@ store.register_table(
 )
 
 READY, FIX, DECIDE, HELD = "ready", "fix", "decide", "held"
+# Nothing is owed (we asked, they have not answered): one line, `done N`.
+OWED_NOTHING = "owed_nothing"
+NO_RECIPIENT = "no recipient: the latest customer message has no sender"
 
 CATEGORY_LABELS = {
     "clear_bug": "bug", "vague_bug": "needs info",
@@ -170,10 +173,21 @@ def section(item: dict, now: datetime | None = None) -> str:
         return HELD
     draft = (item.get("draft") or "").strip()
     if draft and item.get("draft_status") == "ok":
+        # A reply with nowhere to go is not ready (#9538, 2026-10-18).
+        if not (item.get("recipients") or {}).get("to"):
+            return FIX
         return READY
     if draft and item.get("draft_status") == "blocked":
         return FIX
+    if item.get("category") == "awaiting_client":
+        return OWED_NOTHING
     return DECIDE
+
+
+def _fix_reason(item: dict) -> str:
+    if item.get("draft_status") == "ok":
+        return NO_RECIPIENT
+    return str(item.get("draft_why") or "")
 
 
 def _priority(item: dict):
@@ -191,12 +205,15 @@ def select(items: list[dict], exclude: set | None = None,
     actionable.sort(key=_priority)
     chosen = actionable[:limit]
     held = [i for i in items if section(i, now) == HELD]
+    owed = sorted((i for i in items if section(i, now) == OWED_NOTHING),
+                  key=_priority)
     return {
         READY: [i for i in chosen if section(i, now) == READY],
         FIX: [i for i in chosen if section(i, now) == FIX],
         DECIDE: [i for i in chosen if section(i, now) == DECIDE],
         "more": len(actionable) - len(chosen),
         "held": held,
+        OWED_NOTHING: owed,
     }
 
 
@@ -237,8 +254,8 @@ def _index_line(item: dict, resolutions: set, now: datetime) -> str:
             f"{_account(item)} · {_label(item, resolutions)}"
             + (f" · waiting {waited}" if waited else ""))
     if section(item, now) == FIX:
-        why = _short(item.get("draft_why"), 120)
-        line += f"\n      held by a guard: {why}"
+        why = _short(_fix_reason(item), 120)
+        line += f"\n      held: {why}"
     elif section(item, now) == DECIDE:
         card = item.get("card") or {}
         line += ("\n      " + _short(card.get("live_question")
@@ -264,8 +281,7 @@ def detail(item: dict, resolutions: set, now: datetime) -> str:
     if kind in (READY, FIX):
         lines.append(_recipients(item))
         if kind == FIX:
-            lines.append(f":no_entry: Held by a guard: "
-                         f"{item.get('draft_why')}")
+            lines.append(f":no_entry: Held: {_fix_reason(item)}")
         lines.append("```" + (item.get("draft") or "").strip() + "```")
         if kind == READY:
             lines.append(f"`send {n}` · `edit {n}: ...` · `redraft {n}: ...` "
@@ -343,6 +359,15 @@ def render(batch_number: int, picked: dict, context: dict,
     if picked.get("more"):
         top.append(f"\n_{picked['more']} more need you after these. "
                    "Say `next` for them._")
+
+    owed = picked.get(OWED_NOTHING) or []
+    if owed:
+        numbers = " ".join(str(i.get("number")) for i in owed)
+        top.append(f"\n*NOTHING OWED ({len(owed)})* · we asked, they have not "
+                   f"answered · `done {numbers}` clears them")
+        top += [f"*{i.get('number')}* {_zoho(i)} {_account(i)}"
+                + (f" · waiting {age(i, now)}" if age(i, now) else "")
+                for i in owed]
 
     quiet = []
     held = picked.get("held") or []
@@ -429,6 +454,33 @@ def _untriaged() -> tuple[int | None, str]:
     return len([i for i in ids if i not in known]), ""
 
 
+def fill_received(items: list[dict], limit: int = 40) -> int:
+    """Look up when the customer last wrote, once, for items stored before
+    that was recorded. Without it a months-old ticket triaged today shows
+    as "new" (the first batch preview, #7688)."""
+    import zoho_actions
+
+    filled = 0
+    for item in items:
+        rcpt = item.get("recipients") or {}
+        if rcpt.get("received_at") or filled >= limit:
+            continue
+        if item.get("status") not in sprint_store.CARRIES:
+            continue
+        try:
+            latest = zoho_actions.latest_inbound(item["ticket_id"])
+        except Exception as exc:
+            print(f"[BATCH] no received time for {item.get('id')}: {exc}")
+            continue
+        value = str(latest.get("createdTime") or "")
+        if not value:
+            continue
+        sprint_store.set_received_at(item["id"], value)
+        item["recipients"] = {**rcpt, "received_at": value}
+        filled += 1
+    return filled
+
+
 def _since_line(items: list[dict], prev: dict, release: dict) -> str:
     when = prev.get("posted_at")
     if not isinstance(when, datetime):
@@ -486,6 +538,7 @@ def run_batch(kind: str = "scheduled", exclude: set | None = None,
     sprint_store.carry_forward()
     now = _now()
     items = sprint_store.working_set()
+    fill_received(items)
     picked = select(items, exclude=exclude, now=now)
     chosen = picked[READY] + picked[FIX] + picked[DECIDE]
     shown = {str(i["id"]): draft_hash(i.get("draft")) for i in chosen}

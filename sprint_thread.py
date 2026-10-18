@@ -1275,6 +1275,12 @@ def _send(item: dict) -> str:
 
     rcpt = item.get("recipients") or {}
     to, cc = rcpt.get("to") or "", list(rcpt.get("cc") or [])
+    if not to:
+        # #9538 (2026-10-18): a ready draft whose latest message had no
+        # readable sender. Never guess an address.
+        return (f"*{n}.* has no recipient (no sender on the latest customer "
+                "message), so nothing was sent. Reply from Zoho, or say "
+                f"`retriage {n}`.")
     zoho_actions.send_reply(item["ticket_id"], to, cc, draft)
     sprint_store.decide(item["id"], sprint_store.SENT, "sent by Sam")
     sprint_store.record_sent(item["id"], draft)
