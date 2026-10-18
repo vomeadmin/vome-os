@@ -457,3 +457,38 @@ def test_new_draft_never_takes_an_existing_videos_id(jobs, monkeypatch):
     free = dict(STORYBOARD, id="brand-new")
     jobs._claim_fresh_id(free, CONTRACT, "1.2")
     assert free["id"] == "brand-new" and "review_notes" not in free
+
+
+# ------------------------------------------------------- the delivery post
+
+def test_delivery_post_leads_with_a_link_to_tap_on_a_phone(jobs,
+                                                           monkeypatch):
+    """Sammy, 2026-10-18: the link to open on a phone, not a folder on a
+    Railway disk that the next deploy wipes."""
+    monkeypatch.setattr(jobs, "_local_studio", lambda: "")
+    base = "https://pub-x.r2.dev/email/2026-10-18/email_%s_2026-10-18.mp4"
+    report = {"ok": True, "feature_name": "Email formats", "runtime": 34.7,
+              "folder": "renders/email/2026-10-18", "warnings": [],
+              "outputs": [{"aspect": a, "path": "renders/x/%s.mp4" % a,
+                           "where": "w", "bytes": 4e6, "url": base % a}
+                          for a in ("9x16", "4x5", "1x1", "16x9")]}
+    post = jobs._delivery_post(report)
+    lines = post.splitlines()
+    assert lines[2] == (":arrow_forward: *Watch on your phone:* "
+                        + base % "9x16")
+    for a in ("4x5", "1x1", "16x9"):
+        assert "<%s|watch or download>" % (base % a) in post
+    assert "Folder:" not in post
+
+
+def test_delivery_post_without_links_still_names_the_files(jobs,
+                                                           monkeypatch):
+    monkeypatch.setattr(jobs, "_local_studio", lambda: "")
+    report = {"ok": True, "feature_name": "X", "runtime": 30, "warnings": [],
+              "folder": "renders/x/d", "outputs": [
+                  {"aspect": "9x16", "path": "renders/x/d/x_9x16.mp4",
+                   "where": "w", "bytes": 1e6}]}
+    post = jobs._delivery_post(report)
+    assert "Watch on your phone" not in post
+    assert "Folder: `vome-studio/renders/x/d`" in post
+    assert "x_9x16.mp4" in post

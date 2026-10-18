@@ -1143,16 +1143,30 @@ def _delivery_post(report: dict) -> str:
                 % (report.get("feature_name", "This video"),
                    str(report.get("error", "unknown error"))[:1200]))
 
+    outputs = report.get("outputs", [])
     lines = ["*%s* is built. :white_check_mark:"
              % report.get("feature_name", "Your video"), ""]
+    # Sammy, 2026-10-18: the link to tap on a phone, first. The 9:16 is the
+    # one that plays well there. Deployed, the folder is on a disk wiped by
+    # every deploy, so the published link is the only lasting way in.
+    phone = next((o for o in outputs
+                  if o.get("aspect") == "9x16" and o.get("url")), None)
+    if phone:
+        lines += [":arrow_forward: *Watch on your phone:* %s" % phone["url"],
+                  ""]
     if report.get("runtime"):
         lines.append("_%.0f seconds, %d formats._"
-                     % (report["runtime"], len(report.get("outputs", []))))
-    if report.get("folder"):
+                     % (report["runtime"], len(outputs)))
+    if report.get("folder") and not any(o.get("url") for o in outputs):
         lines.append("Folder: `vome-studio/%s`" % report["folder"])
     lines.append("")
-    for o in report.get("outputs", []):
-        lines.append("*%s*  `%s`" % (o["aspect"], o["path"].rsplit("/", 1)[-1]))
+    for o in outputs:
+        if o.get("url"):
+            lines.append("*%s*  <%s|watch or download>" % (o["aspect"],
+                                                          o["url"]))
+        else:
+            lines.append("*%s*  `%s`" % (o["aspect"],
+                                         o["path"].rsplit("/", 1)[-1]))
         lines.append("    %s  (%.1f MB)" % (o.get("where", ""),
                                             o.get("bytes", 0) / 1e6))
     for w in report.get("warnings", []):
