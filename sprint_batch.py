@@ -248,11 +248,16 @@ def _star(item: dict) -> str:
     return ":star: " if item.get("important") else ""
 
 
+def _merge_owner(pr_url: str) -> str:
+    return "OnlyG" if "bitbucket" in (pr_url or "") else "Sanjay"
+
+
 def _index_line(item: dict, resolutions: set, now: datetime) -> str:
     waited = age(item, now)
     line = (f"*{item.get('number')}* {_star(item)}{_zoho(item)} "
             f"{_account(item)} · {_label(item, resolutions)}"
-            + (f" · waiting {waited}" if waited else ""))
+            + (f" · waiting {waited}" if waited else "")
+            + (" · fix PR open" if item.get("fix_pr") else ""))
     if section(item, now) == FIX:
         why = _short(_fix_reason(item), 120)
         line += f"\n      held: {why}"
@@ -278,6 +283,12 @@ def detail(item: dict, resolutions: set, now: datetime) -> str:
             + (f" · waiting {age(item, now)}" if age(item, now) else ""))
     kind = section(item, now)
     lines = [head]
+    if item.get("fix_pr"):
+        # The agent opened a fix for this ticket. The client hears about it
+        # when the release watcher proves it live, as a resolution here.
+        lines.append(f":hammer_and_wrench: Fix PR opened, waiting on "
+                     f"{_merge_owner(item['fix_pr'])} to merge: "
+                     f"{item['fix_pr']}")
     if kind in (READY, FIX):
         lines.append(_recipients(item))
         if kind == FIX:
@@ -376,6 +387,9 @@ def render(batch_number: int, picked: dict, context: dict,
                  if isinstance(i.get("wake_at"), datetime)]
         quiet.append(f"{len(held)} held" + (
             f" (next back {_clock(min(wakes))})" if wakes else ""))
+    if context.get("prs_open"):
+        quiet.append(f"{context['prs_open']} agent fix PR(s) waiting on a "
+                     "merge")
     if context.get("release_waiting"):
         quiet.append(f"{context['release_waiting']} fix(es) waiting on a "
                      "release")
@@ -434,6 +448,17 @@ def _release_context(since: datetime | None) -> dict:
     waiting = [r for r in rows if r.get("state") == "waiting"]
     return {"shipped": shipped, "problems": problems,
             "waiting": len(waiting)}
+
+
+def _prs_open() -> int:
+    """Agent fix PRs opened for tickets and not merged yet (their parent
+    has no Fix Commit, so the release watcher has not started on it)."""
+    rows = store.query(
+        "SELECT COUNT(*) AS n FROM vomeos_ticket_fixes tf"
+        " WHERE tf.outcome = 'pr_opened' AND NOT EXISTS (SELECT 1 FROM"
+        " vomeos_release_fixes rf WHERE rf.task_id = tf.parent_task)"
+    )
+    return int(rows[0]["n"]) if rows else 0
 
 
 def _untriaged() -> tuple[int | None, str]:
@@ -561,6 +586,7 @@ def run_batch(kind: str = "scheduled", exclude: set | None = None,
         "resolutions": _resolution_tickets(),
         "since": _since_line(items, prev, release) if prev else "",
         "release_waiting": release["waiting"],
+        "prs_open": _prs_open(),
         "release_problems": release["problems"],
         "week": sprint_store.week_counts(),
         "untriaged": untriaged,

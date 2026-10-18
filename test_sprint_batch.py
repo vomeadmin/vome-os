@@ -199,6 +199,18 @@ def test_an_unreadable_queue_is_never_reported_as_clear():
     assert "could not be read" in top and "0 open" not in top
 
 
+def test_an_open_fix_pr_is_shown_with_who_merges_it():
+    item = _item(1, fix_pr="https://github.com/vomeadmin/vome-react/pull/790")
+    top, parts = _render([item], prs_open=1)
+    assert "fix PR open" in top
+    assert "1 agent fix PR(s) waiting on a merge" in top
+    assert "waiting on Sanjay to merge: https://github.com" in parts[0]
+    core = _item(2, fix_pr="https://bitbucket.org/vomedjango/x/"
+                           "pull-requests/9")
+    _, parts = _render([core])
+    assert "waiting on OnlyG to merge" in parts[0]
+
+
 def test_resolutions_are_labelled():
     top, _ = _render([_item(1)], resolutions={"56941"})
     assert "resolution (fix is live)" in top
