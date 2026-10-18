@@ -315,8 +315,13 @@ def handle(message: dict) -> dict:
         return {"status": "skipped", "reason": "disabled or no ticket"}
     if not sprint_store.ready():
         return {"status": "skipped", "reason": "no database"}
+    # Sam asking for a first pass from Claude.ai (sprint_tools) triages the
+    # ticket again even when its card is current, and is not held to the
+    # daily cap: he is looking at it right now.
+    asked = bool(message.get("refresh"))
     try:
-        return _handle(ticket_id, message.get("reason") or "")
+        return _handle(ticket_id, message.get("reason") or "",
+                       refresh=asked, ignore_cap=asked)
     except Exception as exc:
         print(f"[SHADOW] {ticket_id} failed: {type(exc).__name__}: {exc}")
         return {"status": "error", "error": str(exc)}

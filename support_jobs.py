@@ -274,6 +274,18 @@ def register_all() -> None:
         description="Triage untriaged open tickets for the next batch",
     )
 
+    # Sam asked for an agent fix from Claude.ai (sprint_tools.propose_fix).
+    # Idempotent on a per-ticket lease.
+    import sprint_tools
+
+    register_event_handler(
+        sprint_tools.PROPOSE_FIX_KEY,
+        sprint_tools.handle_propose_fix,
+        queue=QUEUE,
+        time_limit=900,
+        description="Write a fix and open a PR for one ticket, on Sam's ask",
+    )
+
     # Work that shipped (Priority Queue `on prod`, Sam Accepted done) for a
     # client nobody told: a prepared reply in the next batch. Hourly; claims
     # each task in vomeos_release_resolutions, so it drafts once.

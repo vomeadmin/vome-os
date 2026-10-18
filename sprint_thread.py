@@ -1318,7 +1318,7 @@ def _send(item: dict) -> str:
     sprint_store.record_sent(item["id"], draft)
     copied = f" cc {', '.join(cc)}" if cc else ""
     _post(f"Sent #{item.get('ticket_number')} to {to}{copied} on Sam's "
-          "approval in the sprint thread.", channel=AGENT_LOG)
+          "approval in the sprint.", channel=AGENT_LOG)
     after = _after_send(item)
     return f"*{n}.* sent to {to}{copied}." + (f" {after}" if after else "")
 
@@ -1424,7 +1424,7 @@ def _task_description(item: dict) -> str:
     card = item.get("card") or {}
     import zoho_actions
 
-    return "\n".join([
+    lines = [
         f"**Zoho:** {zoho_actions.ticket_url(item.get('ticket_id'))}",
         f"**Account:** {item.get('account') or ''}",
         f"**Waiting on:** {card.get('live_question') or ''}",
@@ -1432,9 +1432,27 @@ def _task_description(item: dict) -> str:
         f"**Situation:** {card.get('situation') or ''}",
         f"**Existing work:** {card.get('existing_work') or 'none found'}",
         f"**Recommended:** {card.get('recommended_action') or ''}",
-        "",
-        "_Filed from the sprint thread on Sam's instruction._",
-    ])
+    ]
+    # The engineer summary the playbook asks for (VomeOS Code Access page):
+    # what the agent's code check found, so the engineer starts from a lead.
+    code = card.get("code_check") or {}
+    if isinstance(code, dict) and code.get("verdict") not in (
+            None, "", "not_checked"):
+        reason = card.get("escalation_reason") or ""
+        lines += [
+            "",
+            "**Agent first pass (code check)**",
+            f"Likely cause: {code.get('finding') or 'not settled'}",
+            f"Where: {code.get('where') or 'not located'}",
+            f"Potential fix: {code.get('fix') or 'none proposed'}",
+            f"Confidence: {code.get('confidence') or '?'} (verdict "
+            f"{code.get('verdict')}, fix risk {code.get('fix_risk') or '?'})",
+            "Not verified: " + (f"why it needs an engineer: {reason}"
+                                if reason else "anything beyond the code "
+                                "read on the live branch"),
+        ]
+    lines += ["", "_Filed from the support sprint on Sam's instruction._"]
+    return "\n".join(lines)
 
 
 def _route(item: dict, who: str) -> str:

@@ -686,11 +686,26 @@ def run_batch(kind: str = "scheduled", exclude: set | None = None,
             "ready": len(ready), "more": picked["more"]}
 
 
+def batches_enabled() -> bool:
+    """Scheduled Slack batches. Paused at Sam's request on 2026-10-18: he
+    runs sprints in Claude.ai through the Vome OS connector
+    (sprint_tools.py) until he wants Slack back. Triage, the sweep, the
+    release watcher and fix PRs keep running either way, and `catch me up`
+    in a sprint thread still posts a batch on demand.
+    SPRINT_BATCHES_ENABLED=true turns the schedule back on."""
+    value = os.environ.get("SPRINT_BATCHES_ENABLED", "").strip().lower()
+    return value in ("true", "1", "on", "yes")
+
+
 def run_scheduled_batch() -> dict:
+    if not batches_enabled():
+        return {"status": "paused", "reason": "SPRINT_BATCHES_ENABLED off"}
     return run_batch("scheduled")
 
 
 def run_weekend_batch() -> dict:
+    if not batches_enabled():
+        return {"status": "paused", "reason": "SPRINT_BATCHES_ENABLED off"}
     return run_batch("weekend")
 
 

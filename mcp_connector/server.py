@@ -78,7 +78,14 @@ described only as "logged with the product team".
 - When a source says NOT searched, the answer is unknown, not no.
 - What exists on the live branch can still be hidden by plan or role.
 - No em dashes. Use periods, commas, parentheses, or "and".
-- These tools never send anything to a customer. A person sends.
+- These tools never send anything to a customer on their own. A person \
+sends: send_ticket_reply runs only on Sam's explicit word, passed verbatim.
+
+Support sprint (Sam): sprint_queue lists every open ticket with the agents' \
+first pass; ticket_first_pass runs the triage agent on one; fix_status and \
+sprint_followups show agent fixes and what is owed after a release; \
+propose_fix, send_ticket_reply, route_ticket, close_ticket_quietly and \
+log_ticket_request act, Sam only. Show every reply in full before sending.
 """
 
 READ = ToolAnnotations(read_only_hint=True, open_world_hint=True)
@@ -462,6 +469,147 @@ def build() -> MCPServer:
     async def list_kb_categories() -> dict:
         """Help centre categories that accept articles, with ids."""
         return await _run("list_kb_categories", tools.list_kb_categories)
+
+    # -- the support sprint (sprint_tools.py) -------------------------------
+    # The agents' first pass on every ticket, and Sam's actions on it, over
+    # the same guarded paths as the sprint thread. Writes are Sam only.
+
+    import sprint_tools
+
+    @server.tool(annotations=READ)
+    async def sprint_queue(
+        include_finished: Annotated[bool, Field(
+            description="Also list items decided in the last day")] = False,
+    ) -> dict:
+        """Every open support ticket with the agents' first pass, grouped:
+        ready to send (full drafts), fix first, needs a decision, close
+        quietly, nothing owed, held. Start a sprint here."""
+        return await _run("sprint_queue", sprint_tools.sprint_queue,
+                          include_finished=include_finished)
+
+    @server.tool(annotations=READ)
+    async def ticket_first_pass(
+        ticket: Annotated[str, Field(description="Ticket number, e.g. 9500")],
+        refresh: Annotated[bool, Field(
+            description="Run the triage agent again even if the card is "
+            "current")] = False,
+    ) -> dict:
+        """The agents' first pass on one ticket: category, lane, the code
+        check on the live branch (bug, works as designed, or design
+        question), the recommended action and the draft. Runs the triage
+        director again when the card is missing or out of date."""
+        return await _run("ticket_first_pass", sprint_tools.ticket_first_pass,
+                          ticket=ticket, refresh=refresh)
+
+    @server.tool(annotations=READ)
+    async def fix_status(
+        ticket: Annotated[str, Field(description="Ticket number")],
+    ) -> dict:
+        """Where an agent fix for a ticket stands (PR open, merged to dev,
+        live, resolution drafted) and whose move it is."""
+        return await _run("fix_status", sprint_tools.fix_status,
+                          ticket=ticket)
+
+    @server.tool(annotations=READ)
+    async def sprint_followups() -> dict:
+        """Follow-ups since the last sprint: replies owed for fixes and
+        features that shipped, agent PRs waiting on Sam's merge, fixes
+        waiting on production, failed release checks."""
+        return await _run("sprint_followups", sprint_tools.sprint_followups)
+
+    @server.tool(annotations=WRITE)
+    async def propose_fix(
+        ticket: Annotated[str, Field(description="Ticket number")],
+    ) -> dict:
+        """Ask the agent to write the fix and open a PR into the dev branch
+        (Sam only). Only low-risk fixes are opened; never merged by an
+        agent. Check the result with fix_status."""
+        return await _run("propose_fix", sprint_tools.propose_fix,
+                          ticket=ticket, caller=caller())
+
+    @server.tool(annotations=ToolAnnotations(
+        read_only_hint=False, destructive_hint=True, idempotent_hint=False,
+        open_world_hint=True))
+    async def send_ticket_reply(
+        ticket: Annotated[str, Field(description="Ticket number")],
+        sam_said: Annotated[str, Field(
+            description="Sam's own words approving this send, verbatim")],
+        text: Annotated[str, Field(
+            description="Sam's edited reply. Empty sends the agent's draft "
+            "exactly as shown")] = "",
+    ) -> dict:
+        """Email the customer (Sam only, on his explicit word). Every
+        outbound guard runs again, recipients are the latest sender, their
+        cc and the ticket's secondary contacts, and it refuses if the
+        customer wrote since the draft. Zoho status and Agent Fixes follow.
+        An edit teaches the drafter."""
+        return await _run("send_ticket_reply",
+                          sprint_tools.send_ticket_reply, ticket=ticket,
+                          sam_said=sam_said, text=text, caller=caller())
+
+    @server.tool(annotations=WRITE)
+    async def route_ticket(
+        ticket: Annotated[str, Field(description="Ticket number")],
+        engineer: Annotated[Literal["onlyg", "sanjay"], Field(
+            description="onlyg: backend (data, API, auth, notifications, "
+            "imports). sanjay: frontend and mobile")],
+    ) -> dict:
+        """Hand a ticket to an engineer (Sam only): Priority Queue task with
+        the agent's findings as the engineer summary, Slack notice, Zoho In
+        Progress with the team as owner. Sends nothing to the customer."""
+        return await _run("route_ticket", sprint_tools.route_ticket,
+                          ticket=ticket, engineer=engineer, caller=caller())
+
+    @server.tool(annotations=WRITE)
+    async def close_ticket_quietly(
+        ticket: Annotated[str, Field(description="Ticket number")],
+    ) -> dict:
+        """Close a ticket in Zoho with no closure email, when nothing is
+        owed (Sam only)."""
+        return await _run("close_ticket_quietly",
+                          sprint_tools.close_ticket_quietly, ticket=ticket,
+                          caller=caller())
+
+    @server.tool(annotations=WRITE)
+    async def log_ticket_request(
+        ticket: Annotated[str, Field(description="Ticket number")],
+        build: Annotated[bool, Field(
+            description="True puts it in Sam Accepted (Build Now)")] = False,
+        existing_task_id: Annotated[str, Field(
+            description="Add this client to an existing request instead")
+        ] = "",
+        confirm_new: Annotated[bool, Field(
+            description="Log it even though similar requests exist")] = False,
+    ) -> dict:
+        """Log a ticket's feature request (Sam only): checks for an existing
+        request first, and posts the decision to #vome-feature-requests
+        with the client. Tells the customer nothing."""
+        return await _run("log_ticket_request",
+                          sprint_tools.log_ticket_request, ticket=ticket,
+                          build=build, existing_task_id=existing_task_id,
+                          confirm_new=confirm_new, caller=caller())
+
+    @server.tool(annotations=WRITE)
+    async def teach_agents(
+        rule: Annotated[str, Field(
+            description="One imperative sentence the agent should follow "
+            "from now on, e.g. 'In a resolution reply, never mention an "
+            "earlier reply.'")],
+        agent: Annotated[Literal["drafter", "triage", "partner",
+                                 "incidents", "all"], Field(
+            description="drafter writes client replies; triage writes the "
+            "card and code check")],
+        sam_said: Annotated[str, Field(
+            description="Sam's own words, verbatim")],
+        ticket: Annotated[str, Field(
+            description="The ticket that prompted it, if any")] = "",
+    ) -> dict:
+        """Record Sam's general correction as a live lesson for an agent
+        (Sam only). Use for rules that apply beyond one ticket; for one
+        reply, edit it with send_ticket_reply instead."""
+        return await _run("teach_agents", sprint_tools.teach_agents,
+                          rule=rule, agent=agent, sam_said=sam_said,
+                          ticket=ticket, caller=caller())
 
     @server.tool(annotations=READ)
     async def connector_status() -> dict:

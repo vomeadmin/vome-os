@@ -40,6 +40,8 @@ SOURCES
     slack_edit      Sam edited a draft in the sprint thread
     slack_feedback  Sam said something general in the thread
     claude_code     corrected in a Claude Code session (recorded with the CLI)
+    claude_ai       corrected in a Claude.ai sprint (connector teach_agents,
+                    or an edit sent with send_ticket_reply)
     rehearsal       found by a person testing the agents
     manual          added by hand
 

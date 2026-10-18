@@ -138,7 +138,7 @@ flowchart TD
   NOFAQ["'Code, no FAQ' answers become<br/>article suggestions"]:::proposed
 ```
 
-<!-- map:diagram id=director title="7. Sam runs the sprint from batches (deployed 2026-10-18)" -->
+<!-- map:diagram id=director title="7. Sprint batches in Slack (deployed 2026-10-18, schedule paused: Sam runs sprints in Claude.ai, see G34)" -->
 ```mermaid
 flowchart TD
   WH["Zoho webhook, plus a queue sweep<br/>every 30 min for missed tickets"]:::deployed --> ST["Shadow triage stores card + draft<br/>(no card posted per ticket)"]:::deployed
@@ -216,4 +216,5 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 | G29 | director | `close quiet` housekeeping lane | built | "Thanks, works now" and handled error reports still take a decision each | Push; housekeeping lane gets no draft, batch shows CLOSE QUIETLY, `close quiet` / `close N` close in Zoho with no email | agent |
 | G31 | release | Every fixed ticket the client was not told about gets a prepared reply | built | Fixes ship and the client never hears (Oct 9: six closed tasks came back) | Push; hourly `support.shipped_untold` drafts a resolution for Priority Queue `on prod` tasks with no reply since | agent |
 | G33 | fix | Ticket bugs become fix PRs on their own | deployed | Never fired before Oct 18: it needed high confidence (0 of 16 cards) and VOMEOS_CODE_WRITE_REPOS was unset, so no repo was writable (Sentry PRs too) | Gate is now medium; allowlist set Oct 18 (core, database, web). Watch for the first PR | agent |
+| G34 | director | Sprints run in Claude.ai through the Vome OS connector | built | Sam works sprints in Claude.ai (2026-10-18); Slack batches paused until he wants them back (SPRINT_BATCHES_ENABLED) | Push; paste handoffs/CLAUDE_AI_SPRINT_PROMPT.md into the Claude.ai project; tools sprint_queue, ticket_first_pass, fix_status, sprint_followups, propose_fix, send_ticket_reply, route_ticket, close_ticket_quietly, log_ticket_request, teach_agents | Sam |
 | G20 | items 1-5 | Close the loop, code checks, ticket fixes, autonomy report, Sam signature, resolution drafts | deployed | Pushed Oct 17/18 | Prove each on a real ticket | agent |
