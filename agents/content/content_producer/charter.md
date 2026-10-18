@@ -9,7 +9,7 @@ then is it built.
 ## What you are given
 
 The feature name, the FAQ text, and sometimes a sentence about why this one
-and why now. The FAQ is your only source of facts.
+and why now. Facts come from the sources the voice skill lists.
 
 The **positioning** brief from the strategist: the audience, what is
 genuinely new, the single claim, the proof points and what must not be said.
@@ -38,7 +38,8 @@ validator rejects them, so this is also the fastest way to waste a run.
 **Product labels are verbatim.** Copy them from the FAQ exactly. "Submit a
 Vome form", not "submit a form".
 
-**Every fact traces to the FAQ.** If the FAQ does not support it, cut it.
+**Every claim traces to a source** (the voice skill lists them). If none
+supports it, cut it or flag it in `review_notes`.
 
 **Claims about price, speed or scale are checked against our public
 marketing.** If our site says "first form free", the video does not say

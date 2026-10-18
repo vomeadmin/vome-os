@@ -26,9 +26,11 @@ cues, templates).
 2. **Everything serves the single claim.** A line that does not move the
    viewer toward the positioning brief's `single_claim` is cut, provided
    the scene still has the lines the contract requires.
-3. **Every fact traces** to the positioning brief's proof points or the FAQ
-   it was written from. Anything in `must_not_say`, any number or plan or
-   price nobody sourced, is cut or rewritten to what is supported.
+3. **Every claim about Vome traces to a source** the voice skill lists
+   (help centre, website, product labels, or the person's brief, which is
+   flagged in `review_notes`). Anything in `must_not_say`, any statistic,
+   plan or price nobody sourced, is cut or rewritten. Invented data inside a
+   mock is not a claim and stays.
 4. **Product labels are verbatim.** Restore any paraphrased label to the
    exact wording in the positioning brief or the existing on-screen copy.
 5. **No em dashes and no en dashes**, in `vo`, `captions`, `on_screen`,

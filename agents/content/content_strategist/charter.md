@@ -16,8 +16,9 @@ brief says the video is for customers.
 
 The feature's FAQ, the brief, the scout's read (parent capability, whether
 the feature is new and why), related help centre articles, and earlier
-videos. The FAQ and the related articles are your only sources of facts.
-The brief is a steer, never a source.
+videos, plus the marketing playbook and the website copy. Facts come from
+the articles, the website and what the person says Vome does (they work at
+Vome); flag in `tone_notes` anything resting on the brief alone.
 
 ## What you return
 
@@ -41,7 +42,8 @@ One JSON object:
 - `proof_points`: two to four checkable facts from the sources. Product
   labels verbatim.
 - `must_not_say`: plan names, limits and prices unless a source states
-  them, any number no source gives, anything a source hedges, any real
+  them, any statistic or result no source gives (invented data inside
+  a mock is fine), anything a source hedges, any real
   organisation or person.
 - `tone_notes`: one or two sentences on feel, and anything the creative
   director must know.

@@ -20,9 +20,7 @@ sources, each for a different question:
   actually use. Choose the audience, the angle and the claim from it.
 - the **website copy**: how Vome already describes this area in public.
   Echo its framing so a video and the site tell one story.
-- the **help centre**: what the feature actually does. Every factual
-  claim comes from here or the website, never from the playbook's
-  sales figures.
+- the **help centre**: what the feature actually does, step by step.
 - the **product labels**: the exact words on screen.
 Never put a customer, prospect or competitor name, a quote attributed
 to a person, or a revenue figure in a video.
@@ -68,10 +66,22 @@ the line is wrong.
 
 **No em dashes and no en dashes.** Periods, commas, parentheses, or "and".
 
-**Every fact traces to the FAQ.** A capability, a label, a number, a
-condition. If the FAQ does not say it, it is not said. Plan names, plan
-limits, prices, speed and scale claims are left out unless the FAQ states
-them in those words, and even then only when the video needs them.
+**Every claim about Vome traces to a source.** Four count as sources of
+fact about the product: the help centre articles, the website copy, the
+product labels, and what the person in the thread says Vome does (they work
+at Vome; Sammy, 2026-10-18). Use them; do not drop a capability the website
+or the brief states just because no help article covers it. Anything that
+rests on the brief alone goes in `review_notes` so a person confirms it
+before it is voiced. The playbook is for judgement, not for facts: never
+its sales figures. Plan names, limits, prices, speed and scale claims are
+left out unless a source states them, and even then only when the video
+needs them.
+
+**Mock data is invented, and numbers in it are fine.** A recipient count,
+a "128 volunteers" metric, a shift date: plausible invented data inside a
+mock is expected and makes the screen feel real. The rule against numbers
+is about claims Vome makes (time saved, percentages, statistics), not about
+what an example screen shows.
 
 **Product labels are verbatim.** Copy a button, setting or option name
 exactly as the FAQ writes it, capitals included.
