@@ -31,7 +31,8 @@ eight shallow ones.
 
 ```
 "code_check": {
-  "verdict": "bug" | "works_as_designed" | "unclear" | "not_checked",
+  "verdict": "bug" | "works_as_designed" | "design_question" | "unclear"
+             | "not_checked",
   "finding": "<what the code does, in one or two sentences>",
   "where": "<repo:path:line>",
   "fix": "<what a fix would change, or ''>",
@@ -40,8 +41,24 @@ eight shallow ones.
 }
 ```
 
-`fix_risk` is low only when the change is small, local, has no migration,
-and does not touch auth, billing, permissions or shared data paths.
+**The verdict decides whether a fix is made (Sam, 2026-10-18).**
+
+- **bug**: the code does not do what it was built to do. A low-risk bug at
+  high or medium confidence becomes a pull request with no one asking.
+- **works_as_designed**: it does what it was built to do; the customer
+  expected something else. That is a how-to answer, never a fix.
+- **design_question**: it does what it was built to do, but that behaviour
+  contradicts how the feature is set up elsewhere (one setting overrides
+  another, a rule applies in one place and not the next). Nothing is
+  changed until Sam decides: change it, log it as a request, or answer it.
+
+When unsure between bug and works_as_designed, prefer works_as_designed:
+a wrong fix changes the product for everyone.
+
+`where` is exactly `repo:path:line`, nothing after it; commentary goes in
+`finding`. `fix_risk` is low only when the change is small, local, has no
+migration, and does not touch auth, billing, permissions or shared data
+paths.
 
 **Let it change your call.** works_as_designed with high confidence makes a
 "bug" a user_education. A bug the code confirms belongs in clear_bug even if

@@ -484,7 +484,7 @@ def parse(text: str) -> list[dict]:
                              "arg": match.group(2).lower()})
             continue
         match = re.match(
-            r"^(send|hold|done|skip|log|build)\s+([\d,\s\-and]+)$",
+            r"^(send|hold|done|skip|log|build|fix)\s+([\d,\s\-and]+)$",
             line, re.IGNORECASE,
         )
         if match:
@@ -875,6 +875,10 @@ _GATES = {
     "route": re.compile(r"\b(onlyg|only g|sanjay|backend|frontend)\b", re.I),
     "log": re.compile(r"\b(log|feature|backlog|intake)\b", re.I),
     "build": re.compile(r"\bbuild\b", re.I),
+    # Opens a fix PR on Sam's word (a design question, or a fix the
+    # agent did not make on its own). Never merges.
+    "fix": re.compile(
+        r"\b(fix|make the (pr|change|update)|open (a|the) pr)\b", re.I),
 }
 _FREE = ("edit", "redraft", "retriage")
 _TICKET = re.compile(r"#?\b(\d{4,6})\b")
@@ -1184,6 +1188,8 @@ def _execute(command: dict, item: dict) -> str:
         return _route(item, command["arg"])
     if verb in ("log", "build"):
         return _feature(item, verb)
+    if verb == "fix":
+        return _fix(item)
     return f"*{n}.* unknown command."
 
 
@@ -1446,6 +1452,29 @@ def _route(item: dict, who: str) -> str:
     sprint_store.decide(item["id"], sprint_store.ROUTED, f"routed to {key}")
     return (f"*{n}.* routed to {key}: {url}. Zoho set In Progress. No reply "
             "was sent; say `send` on a draft if one is owed.")
+
+
+def _fix(item: dict) -> str:
+    """Sam said `fix N`: write the fix and open the PR, for a design
+    question he decided to change or a bug the agent did not fix on its own
+    call. The low-risk bar and patch safety still apply; nothing merges."""
+    import ticket_fix
+    import zoho_actions
+
+    n = item.get("number")
+    out = ticket_fix.propose_for_ticket(
+        item["ticket_id"], str(item.get("ticket_number") or ""),
+        item.get("account") or "", item.get("card") or {},
+        zoho_actions.ticket_url(item.get("ticket_id")), sam_approved=True)
+    if out.get("outcome") == "pr_opened":
+        sprint_store.set_fix_pr(item["id"], out["pr_url"])
+        owner = "OnlyG" if "bitbucket" in out["pr_url"] else "Sanjay"
+        return (f"*{n}.* fix PR opened: {out['pr_url']} (waiting on {owner} "
+                "to merge). Once it is proven live, the resolution comes "
+                "back to you here, ready to send.")
+    return (f"*{n}.* no PR: {out.get('reason') or out.get('outcome')}. "
+            f"`route {n} to onlyg` or `route {n} to sanjay` hands it to an "
+            "engineer instead.")
 
 
 def _feature(item: dict, verb: str) -> str:

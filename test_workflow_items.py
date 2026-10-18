@@ -282,9 +282,13 @@ GOOD = {"code_check": {"verdict": "bug", "confidence": "high",
 
 @pytest.mark.parametrize("change,reason", [
     ({"verdict": "works_as_designed"}, "verdict"),
-    ({"confidence": "medium"}, "confidence"),
+    ({"verdict": "design_question"}, "Sam's decision"),
+    ({"confidence": "low"}, "confidence"),
     ({"fix_risk": "medium"}, "risk"),
     ({"fix": ""}, "fix"),
+    # #9415's card: a path with commentary is not a location to fix at.
+    ({"where": "web:src/views/org/orgSequences (exact render path not "
+               "located)"}, "not exact"),
 ])
 def test_the_ladder_stops_early(change, reason):
     card = {"code_check": {**GOOD["code_check"], **change}}
@@ -294,6 +298,43 @@ def test_the_ladder_stops_early(change, reason):
 
 def test_a_small_certain_bug_qualifies():
     assert ticket_fix.should_attempt(GOOD)[0] is True
+
+
+def test_medium_confidence_is_enough_for_a_low_risk_bug():
+    # Sam, 2026-10-18: #9500 and #9415 were real bugs at medium.
+    card = {"code_check": {**GOOD["code_check"], "confidence": "medium"}}
+    assert ticket_fix.should_attempt(card)[0] is True
+
+
+def test_sam_can_ask_for_a_design_question_fix_but_not_a_risky_one():
+    question = {"code_check": {**GOOD["code_check"],
+                               "verdict": "design_question",
+                               "confidence": "low"}}
+    assert ticket_fix.should_attempt(question)[0] is False
+    assert ticket_fix.should_attempt(question, sam_approved=True)[0] is True
+    risky = {"code_check": {**question["code_check"], "fix_risk": "medium"}}
+    assert ticket_fix.should_attempt(risky, sam_approved=True)[0] is False
+
+
+def test_sams_fix_may_retry_and_skips_the_daily_cap(monkeypatch):
+    import sentry_code
+    import sentry_fix
+
+    monkeypatch.setenv("TICKET_FIX_ENABLED", "true")
+    monkeypatch.setattr(ticket_fix, "_attempted", lambda t: True)
+    monkeypatch.setattr(ticket_fix, "_opened_today", lambda: 99)
+    monkeypatch.setattr(ticket_fix, "_record", lambda *a, **k: None)
+    monkeypatch.setattr(sentry_code, "gather",
+                        lambda *a, **k: {"files": "src"})
+    monkeypatch.setattr(sentry_fix, "propose",
+                        lambda a, c: {"attempted": True, "diff": "d"})
+    monkeypatch.setattr(sentry_fix, "open_pull_request",
+                        lambda i, p, c: {"opened": True,
+                                         "url": "https://bb/pr/8"})
+    monkeypatch.setattr(ticket_fix, "_file_tasks", lambda *a: ("P", "C"))
+    out = ticket_fix.propose_for_ticket("T1", "9500", "x", GOOD, "u",
+                                        sam_approved=True)
+    assert out["outcome"] == "pr_opened"
 
 
 def test_parse_where():

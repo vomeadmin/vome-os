@@ -211,6 +211,64 @@ def test_an_open_fix_pr_is_shown_with_who_merges_it():
     assert "waiting on OnlyG to merge" in parts[0]
 
 
+QUESTION = {"verdict": "design_question", "confidence": "medium",
+            "finding": "A waitlist promotion skips the 48h reservation "
+                       "cutoff that a direct reservation obeys.",
+            "fix": "Apply the cutoff to waitlist promotions too.",
+            "where": "core:opportunity_app/waitlist.py:88",
+            "fix_risk": "low"}
+
+
+def test_a_design_question_waits_for_sam_even_with_a_draft():
+    item = _item(9, category="user_education",
+                 card={"live_question": "Is that right?",
+                       "code_check": QUESTION})
+    assert sprint_batch.section(item) == sprint_batch.DECIDE
+    top, parts = _render([item])
+    assert "READY TO SEND" not in top
+    assert "design question: change it?" in top
+    assert "waitlist promotion skips" in top
+    thread = "\n".join(parts)
+    assert "*If you change it:* Apply the cutoff" in thread
+    assert DRAFT in thread and "`fix 9` opens the PR" in thread
+    assert "`send 9` sends the answer" in thread
+
+
+def test_fix_command_opens_a_pr_on_sams_word(monkeypatch):
+    import ticket_fix
+
+    assert sprint_thread.parse("fix 9") == [
+        {"verb": "fix", "numbers": [9], "arg": ""}]
+    calls, stored = [], []
+    monkeypatch.setattr(ticket_fix, "propose_for_ticket",
+                        lambda *a, **k: calls.append(k) or
+                        {"outcome": "pr_opened",
+                         "pr_url": "https://bitbucket.org/v/x/pull/3"})
+    monkeypatch.setattr(sprint_store, "set_fix_pr",
+                        lambda i, u: stored.append((i, u)))
+    item = _item(9, card={"code_check": QUESTION})
+    out = sprint_thread._execute({"verb": "fix", "numbers": [9], "arg": ""},
+                                 item)
+    assert calls == [{"sam_approved": True}]
+    assert stored == [(item["id"], "https://bitbucket.org/v/x/pull/3")]
+    assert "waiting on OnlyG to merge" in out
+
+
+def test_fix_that_cannot_be_made_says_why():
+    item = _item(9, card={"code_check": {**QUESTION, "fix_risk": "high"}})
+    out = sprint_thread._fix(item)
+    assert "no PR" in out and "risk" in out and "route 9" in out
+
+
+def test_the_answer_key_can_check_a_nested_field():
+    from vomeos.evaluate import compare
+
+    card = {"category": "user_education",
+            "code_check": {"verdict": "works_as_designed"}}
+    assert compare({"code_check.verdict": "works_as_designed"}, card) == []
+    assert compare({"code_check.verdict": "bug"}, card) != []
+
+
 def test_resolutions_are_labelled():
     top, _ = _render([_item(1)], resolutions={"56941"})
     assert "resolution (fix is live)" in top

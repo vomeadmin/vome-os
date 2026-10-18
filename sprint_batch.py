@@ -155,6 +155,11 @@ def _clock(moment: datetime) -> str:
 # What needs Sam
 # ---------------------------------------------------------------------------
 
+def is_design_question(item: dict) -> bool:
+    code = (item.get("card") or {}).get("code_check")
+    return isinstance(code, dict) and code.get("verdict") == "design_question"
+
+
 def held_is_due(item: dict, now: datetime | None = None) -> bool:
     """A held item comes back when its wake time passes. A hold from
     before wake times existed comes back the next day."""
@@ -171,6 +176,10 @@ def section(item: dict, now: datetime | None = None) -> str:
         return ""
     if status == sprint_store.HELD and not held_is_due(item, now):
         return HELD
+    # Works as built, but maybe not as it should: Sam decides whether to
+    # change it, log it, or answer it, even when a how-to draft exists.
+    if is_design_question(item):
+        return DECIDE
     draft = (item.get("draft") or "").strip()
     if draft and item.get("draft_status") == "ok":
         # A reply with nowhere to go is not ready (#9538, 2026-10-18).
@@ -235,6 +244,8 @@ def _account(item: dict) -> str:
 def _label(item: dict, resolutions: set) -> str:
     if str(item.get("ticket_id")) in resolutions:
         return "resolution (fix is live)"
+    if is_design_question(item):
+        return "design question: change it?"
     category = item.get("category") or ""
     return CATEGORY_LABELS.get(category, category or "?")
 
@@ -261,6 +272,9 @@ def _index_line(item: dict, resolutions: set, now: datetime) -> str:
     if section(item, now) == FIX:
         why = _short(_fix_reason(item), 120)
         line += f"\n      held: {why}"
+    elif is_design_question(item):
+        code = (item.get("card") or {}).get("code_check") or {}
+        line += "\n      " + _short(code.get("finding"), 160)
     elif section(item, now) == DECIDE:
         card = item.get("card") or {}
         line += ("\n      " + _short(card.get("live_question")
@@ -318,6 +332,19 @@ def detail(item: dict, resolutions: set, now: datetime) -> str:
         lines.append(f"*Why you:* {card['why_human']}")
     if card.get("recommended_action"):
         lines.append(f"*Recommended:* {card['recommended_action']}")
+    if is_design_question(item):
+        if (code or {}).get("fix"):
+            lines.append(f"*If you change it:* {code['fix']}")
+        draft = (item.get("draft") or "").strip()
+        if draft:
+            lines.append("*If you answer it as how it works instead:* "
+                         + _recipients(item))
+            lines.append("```" + draft + "```")
+        lines.append(f"`fix {n}` opens the PR · `log {n}` logs it as a "
+                     f"request · " + (f"`send {n}` sends the answer · "
+                                      if draft else "")
+                     + f"`edit {n}: <reply>` · `hold {n}`")
+        return "\n".join(lines)
     lines.append(f"`route {n} to onlyg` · `route {n} to sanjay` · "
                  f"`log {n}` · `build {n}` · `edit {n}: <reply>` · "
                  f"`hold {n}` · `done {n}`")

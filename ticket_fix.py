@@ -90,19 +90,48 @@ def daily_cap() -> int:
     return int(os.environ.get("TICKET_FIX_DAILY_CAP", "3"))
 
 
-def should_attempt(card: dict) -> tuple[bool, str]:
+# "core:form_app/s.py:120" or "web:src/x.js". A location with commentary
+# after it ("web:src/views/org/orgSequences (exact render path not
+# located...)", #9415) is not one a fix can be written against.
+_EXACT_WHERE = re.compile(r"^[\w-]+:[^\s:()]+(:\d+(-\d+)?)?$")
+
+
+def should_attempt(card: dict, sam_approved: bool = False
+                   ) -> tuple[bool, str]:
+    """Whether to write a fix and open a PR for this card.
+
+    Sam, 2026-10-18: medium confidence is enough. The first 16 production
+    cards had no high-confidence bug at all, while #9500 and #9415 (both
+    medium) were real bugs that were then fixed by hand. A PR is a proposal
+    OnlyG or Sanjay reviews, so a medium call costs a review, not a release.
+
+    What is never fixed on the agent's own call: works_as_designed (the
+    customer misread the feature: a how-to) and design_question (the code
+    does what it was built to do, but that contradicts how the feature
+    should work: Sam decides whether to change it, log it, or answer it).
+    `sam_approved` is Sam saying `fix N`: it lifts the verdict and
+    confidence bar, never the risk bar or the patch safety guard.
+    """
     code = card.get("code_check") if isinstance(card, dict) else None
     if not isinstance(code, dict):
         return False, "no code check on the card"
-    if code.get("verdict") != "bug":
-        return False, f"code check verdict is {code.get('verdict')!r}"
-    if code.get("confidence") != "high":
-        return False, "code check confidence is not high"
+    verdict = code.get("verdict")
+    if not sam_approved:
+        if verdict == "design_question":
+            return False, "design question: needs Sam's decision"
+        if verdict != "bug":
+            return False, f"code check verdict is {verdict!r}"
+        if code.get("confidence") not in ("high", "medium"):
+            return False, "code check confidence is low"
     if code.get("fix_risk") != "low":
         return False, f"fix risk is {code.get('fix_risk')!r}, not low"
     if not code.get("fix") or not code.get("where"):
         return False, "no described fix or location"
-    return True, "small, certain bug"
+    if not _EXACT_WHERE.match(str(code.get("where")).strip()):
+        return False, f"location is not exact: {code.get('where')!r}"
+    if sam_approved:
+        return True, "Sam asked for the fix"
+    return True, "small bug the code confirms"
 
 
 def parse_where(where: str) -> tuple[str, str, int]:
@@ -155,29 +184,33 @@ def _record(ticket_id: str, number: str, outcome: str, reason: str,
 # ---------------------------------------------------------------------------
 
 def propose_for_ticket(ticket_id: str, ticket_number: str, account: str,
-                       card: dict, zoho_url: str) -> dict:
+                       card: dict, zoho_url: str,
+                       sam_approved: bool = False) -> dict:
     """Returns {"outcome", "reason", "pr_url"}. Never raises.
 
-    One attempt per ticket, ever: a ticket that comes back with a new reply
-    is not a reason to open a second pull request for the same bug.
+    One attempt per ticket on the agent's own call: a ticket that comes back
+    with a new reply is not a reason to open a second pull request for the
+    same bug. Sam's `fix N` may retry, and is not held to the daily cap.
     """
     try:
-        return _propose(ticket_id, ticket_number, account, card, zoho_url)
+        return _propose(ticket_id, ticket_number, account, card, zoho_url,
+                        sam_approved)
     except Exception as exc:
         print(f"[TICKET FIX] #{ticket_number} failed: {exc}")
         return {"outcome": "error", "reason": str(exc), "pr_url": ""}
 
 
-def _propose(ticket_id, ticket_number, account, card, zoho_url) -> dict:
+def _propose(ticket_id, ticket_number, account, card, zoho_url,
+             sam_approved=False) -> dict:
     if not enabled():
         return {"outcome": "skipped", "reason": "disabled", "pr_url": ""}
-    ok, reason = should_attempt(card)
+    ok, reason = should_attempt(card, sam_approved=sam_approved)
     if not ok:
         return {"outcome": "skipped", "reason": reason, "pr_url": ""}
-    if _attempted(ticket_id):
+    if not sam_approved and _attempted(ticket_id):
         return {"outcome": "skipped", "reason": "already attempted",
                 "pr_url": ""}
-    if _opened_today() >= daily_cap():
+    if not sam_approved and _opened_today() >= daily_cap():
         return {"outcome": "skipped", "reason": "daily cap reached",
                 "pr_url": ""}
 
@@ -203,7 +236,8 @@ def _propose(ticket_id, ticket_number, account, card, zoho_url) -> dict:
         "root_cause": code.get("finding") or "",
         "proposed_fix": code.get("fix") or "",
         "risk": "low",
-        "confidence": "high",
+        # The real call, so the fix author weighs a medium one accordingly.
+        "confidence": code.get("confidence") or "medium",
         "needs_migration": False,
         "files": [path],
     }
