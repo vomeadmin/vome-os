@@ -111,9 +111,9 @@ flowchart LR
   CARD --> DEC["Sam: log / build / no"]:::deployed
   DEC -->|log| RI["Raw Intake"]:::deployed
   DEC -->|build| SA["Sam Accepted (Build Now)"]:::deployed
-  DEC --> POST["Post in #vome-feature-requests<br/>with client, ARR, ticket"]:::proposed
-  CARD --> DUP["Duplicate check before logging<br/>(check_existing_work)"]:::proposed
-  SA --> SHIP["When it ships, draft the<br/>client update for Sam"]:::proposed
+  DEC --> POST["Post in #vome-feature-requests<br/>with client, ARR, ticket"]:::built
+  CARD --> DUP["Duplicate check before logging<br/>(log N to task / log N new)"]:::built
+  SA --> SHIP["When it ships, draft the<br/>client update for Sam"]:::built
 ```
 
 <!-- map:diagram id=learning title="6. Every correction teaches the agents" -->
@@ -195,9 +195,9 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 | G6 | code | Mobile source is unreadable (VomeApp 403) | deployed | Code checks cannot read the app | VomeApp moved to vomeadmin; all GitHub reads use `vome-os-sentry-write-web`, `mobile=` added to the default repo map. Live on push | Sam |
 | G7 | creds | vomeadmin GitHub token expires 2026-10-31 | broken | Release watcher web checks and web code reads stop | Renew, update VOMEOS_GITHUB_TOKEN_VOMEADMIN on worker and web | Sam |
 | G8 | data | content_mode email failures (Oct 15 20:11 to Oct 16 16:01 UTC) | broken | Some birthday, bulk and enrollment emails may not have sent | Confirm it stopped; count what failed; add db_default on new NOT NULL columns | OnlyG |
-| G9 | feature | Feature requests are not posted to #vome-feature-requests | proposed | Sam's single list of decisions misses them | Post on log/build with client, ARR, ticket | agent |
-| G10 | feature | No duplicate check before logging a feature request | proposed | Risk of duplicate backlog items | Run check_existing_work before creating | agent |
-| G11 | feature | Client not told when a Sam Accepted request ships | proposed | Promise loop never closes | Watch Sam Accepted for closed tasks, draft the update | agent |
+| G9 | feature | Feature requests are not posted to #vome-feature-requests | built | Sam's single list of decisions misses them | Push; every log/build posts with client, tier/ARR and ticket | agent |
+| G10 | feature | No duplicate check before logging a feature request | built | Risk of duplicate backlog items | Push; `log N` stops on a possible duplicate, `log N to <task>` adds the client, `log N new` logs anyway | agent |
+| G11 | feature | Client not told when a Sam Accepted request ships | built | Promise loop never closes | Push; hourly `support.shipped_untold` drafts the update when a Sam Accepted task closes | agent |
 | G12 | incident | Incident alert does not create the fix parent with one child per ticket | proposed | Grouping is manual | On a confirmed incident, create the parent and children | agent |
 | G13 | learning | Every correction becomes a live lesson (thread edits, conversation, Claude Code) | deployed | The same correction kept coming back | L1 recorded 2026-10-18 (triage: bug vs how-to vs design question); first thread edit still to come | Sam |
 | G22 | learning | Lesson promotion into charters is done by hand weekly | proposed | Live lessons pile up if nobody promotes them | Have the Monday job open a PR with the proposed charter and answer-key changes | agent |
@@ -211,9 +211,9 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 | G24 | director | Permanent item numbers across days | deployed | Carried items got new numbers and their cards stayed in yesterday's thread | Prove on the first weekday batch | agent |
 | G25 | director | Clear-the-queue mode | deployed | 44 open on Oct 17 with only 2 carded | Rounds of 25, most important then oldest; `clear the queue` in a batch thread | agent |
 | G26 | intake | Queue sweep every 30 min replaces the 8-per-update backfill | deployed | A missed webhook left a ticket invisible until a weekday update | First sweep ran Oct 18 12:30 ET; 10 tickets per run | agent |
-| G27 | director | What still goes to engineers, and why | proposed | Sam cannot see how much escalates or what would prevent it | `escalation_reason` on the card and route; batch footer; Monday report | agent |
-| G28 | learning | Trust tiers per category (order and report only) | proposed | Proven categories should need less of Sam | Full reply text is ALWAYS shown (Sam, 2026-10-17); tiers only rank and report | agent |
-| G29 | director | `close quiet` housekeeping lane | proposed | "Thanks, works now" and handled error reports still take a decision each | Triage `lane=housekeeping`; Zoho Closed with no closure email, on Sam's word | agent |
-| G31 | release | Every fixed ticket the client was not told about gets a prepared reply | proposed | Fixes ship and the client never hears (Oct 9: six closed tasks came back) | Sweep open and awaiting tickets with a live fix and no outbound since; "it has been updated, have a look and let us know" in the next batch | agent |
+| G27 | director | What still goes to engineers, and why | built | Sam cannot see how much escalates or what would prevent it | Push; triage sets lane and escalation_reason (skill choosing-the-lane), routes record it, batch footer and Monday report show it | agent |
+| G28 | learning | Trust tiers per category (order and report only) | built | Proven categories should need less of Sam | Push; Monday report labels each category proven / learning; drafts are always shown in full | agent |
+| G29 | director | `close quiet` housekeeping lane | built | "Thanks, works now" and handled error reports still take a decision each | Push; housekeeping lane gets no draft, batch shows CLOSE QUIETLY, `close quiet` / `close N` close in Zoho with no email | agent |
+| G31 | release | Every fixed ticket the client was not told about gets a prepared reply | built | Fixes ship and the client never hears (Oct 9: six closed tasks came back) | Push; hourly `support.shipped_untold` drafts a resolution for Priority Queue `on prod` tasks with no reply since | agent |
 | G33 | fix | Ticket bugs become fix PRs on their own | deployed | Never fired before Oct 18: it needed high confidence (0 of 16 cards) and VOMEOS_CODE_WRITE_REPOS was unset, so no repo was writable (Sentry PRs too) | Gate is now medium; allowlist set Oct 18 (core, database, web). Watch for the first PR | agent |
 | G20 | items 1-5 | Close the loop, code checks, ticket fixes, autonomy report, Sam signature, resolution drafts | deployed | Pushed Oct 17/18 | Prove each on a real ticket | agent |

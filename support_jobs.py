@@ -274,6 +274,21 @@ def register_all() -> None:
         description="Triage untriaged open tickets for the next batch",
     )
 
+    # Work that shipped (Priority Queue `on prod`, Sam Accepted done) for a
+    # client nobody told: a prepared reply in the next batch. Hourly; claims
+    # each task in vomeos_release_resolutions, so it drafts once.
+    from shipped_untold import run_shipped_untold
+
+    register_job(
+        "support.shipped_untold",
+        run_shipped_untold,
+        cron="45 * * * *",
+        queue=QUEUE,
+        claim=CLAIM_NONE,
+        time_limit=1500,
+        description="Prepare replies for shipped work nobody told",
+    )
+
     # `clear the queue`: one round of 25 per event, chaining itself until
     # nothing is untriaged. Idempotent on Sam's message ts and the round.
     register_event_handler(

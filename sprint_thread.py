@@ -468,6 +468,13 @@ def parse(text: str) -> list[dict]:
             commands.append({"verb": match.group(1).lower(),
                              "numbers": [int(match.group(2))], "arg": rest})
             break
+        match = re.match(r"^(log|build)\s+(\d+)\s+(?:to\s+)?(new|\w{6,12})"
+                         r"\s*$", line, re.IGNORECASE)
+        if match:
+            commands.append({"verb": match.group(1).lower(),
+                             "numbers": [int(match.group(2))],
+                             "arg": match.group(3)})
+            continue
         match = re.match(
             r"^hold\s+([\d,\s\-and]+?)\s+(?:till|until|to)\s+(\w+)\s*$",
             line, re.IGNORECASE)
@@ -484,7 +491,7 @@ def parse(text: str) -> list[dict]:
                              "arg": match.group(2).lower()})
             continue
         match = re.match(
-            r"^(send|hold|done|skip|log|build|fix)\s+([\d,\s\-and]+)$",
+            r"^(send|hold|done|skip|log|build|fix|close)\s+([\d,\s\-and]+)$",
             line, re.IGNORECASE,
         )
         if match:
@@ -724,6 +731,10 @@ _SEND_READY = re.compile(
     r"^\s*send\s+(?:all\s+)?(?:the\s+)?ready(?:\s+ones)?"
     r"(?:\s*,?\s*(?:except|but\s+not|but)\s+(?P<ex>[\d,\s\-and]+))?"
     r"\s*[.!]?\s*$", re.I)
+_CLOSE_QUIET = re.compile(
+    r"^\s*close\s+(?:them\s+|all\s+)?quiet(?:ly)?"
+    r"(?:\s*,?\s*(?:except|but\s+not|but)\s+(?P<ex>[\d,\s\-and]+))?"
+    r"\s*[.!]?\s*$", re.I)
 _NEXT = re.compile(r"^\s*(next|next batch|more)\s*[.!?]?\s*$", re.I)
 _CATCH_UP = re.compile(
     r"^\s*(catch me up|batch|new batch|fresh batch|refresh)\s*[.!?]?\s*$",
@@ -745,6 +756,12 @@ def _batch_command(text: str, thread: str, batch: dict,
             return ("Say `send ready` in a batch's thread, so I send exactly "
                     "the replies that batch showed you.")
         return send_ready(batch, set(_numbers(match.group("ex") or "")))
+    match = _CLOSE_QUIET.match(text or "")
+    if match:
+        if not batch:
+            return ("Say `close quiet` in a batch's thread, so I close "
+                    "exactly what that batch showed you.")
+        return close_quiet(batch, set(_numbers(match.group("ex") or "")))
     if _NEXT.match(text or ""):
         shown = {int(k) for k in (batch.get("shown") or {})}
         result = sprint_batch.run_batch("next", exclude=shown,
@@ -879,6 +896,8 @@ _GATES = {
     # agent did not make on its own). Never merges.
     "fix": re.compile(
         r"\b(fix|make the (pr|change|update)|open (a|the) pr)\b", re.I),
+    # Closes the Zoho ticket with no email. Its own word, not "done".
+    "close": re.compile(r"\bclose\b", re.I),
 }
 _FREE = ("edit", "redraft", "retriage")
 _TICKET = re.compile(r"#?\b(\d{4,6})\b")
@@ -1187,9 +1206,11 @@ def _execute(command: dict, item: dict) -> str:
     if verb == "route":
         return _route(item, command["arg"])
     if verb in ("log", "build"):
-        return _feature(item, verb)
+        return _feature(item, verb, command.get("arg") or "")
     if verb == "fix":
         return _fix(item)
+    if verb == "close":
+        return _close_quietly(item)
     return f"*{n}.* unknown command."
 
 
@@ -1449,9 +1470,50 @@ def _route(item: dict, who: str) -> str:
         add_ticket_comment(item["ticket_id"], f"ClickUp task: {url}")
     except Exception:
         pass
-    sprint_store.decide(item["id"], sprint_store.ROUTED, f"routed to {key}")
+    # The reason feeds "what still escalates, and why" (G27). The card's own
+    # reason when triage gave one, else it was Sam's call.
+    reason = str(card.get("escalation_reason") or "sam_call")
+    reason = re.sub(r"\W+", "_", reason).strip("_") or "sam_call"
+    sprint_store.decide(item["id"], sprint_store.ROUTED,
+                        f"routed to {key} ({reason})")
     return (f"*{n}.* routed to {key}: {url}. Zoho set In Progress. No reply "
             "was sent; say `send` on a draft if one is owed.")
+
+
+def _close_quietly(item: dict) -> str:
+    """Close the Zoho ticket with no closure email, and finish the item.
+    For tickets that owe nothing (confirmed fixed, a thank-you, an
+    out-of-office, a handled error report)."""
+    import zoho_actions
+
+    n = item.get("number")
+    if item.get("status") not in sprint_store.CARRIES:
+        return f"*{n}.* already {item.get('status')}."
+    try:
+        zoho_actions.set_status(item["ticket_id"], "Closed")
+    except Exception as exc:
+        return f"*{n}.* not closed: Zoho said {exc}"
+    sprint_store.decide(item["id"], sprint_store.DONE,
+                        "closed quietly by Sam")
+    return f"*{n}.* closed in Zoho, no email."
+
+
+def close_quiet(batch: dict, except_numbers: set) -> str:
+    """Close what this batch showed under CLOSE QUIETLY, and only that."""
+    ids = batch.get("quiet") or []
+    if not ids:
+        return "This batch had nothing to close quietly."
+    results = []
+    for item_id in ids:
+        item = sprint_store.get_item(int(item_id))
+        if not item:
+            continue
+        if item.get("number") in except_numbers:
+            results.append(f"*{item.get('number')}.* left open, as you "
+                           "asked.")
+            continue
+        results.append(_close_quietly(item))
+    return "\n".join(results) or "Nothing to close."
 
 
 def _fix(item: dict) -> str:
@@ -1479,18 +1541,97 @@ def _fix(item: dict) -> str:
             "engineer instead.")
 
 
-def _feature(item: dict, verb: str) -> str:
+_TASK_ID = re.compile(r"^[a-z0-9]{6,12}$", re.I)
+
+
+def _feature(item: dict, verb: str, mode: str = "") -> str:
+    """`log N` / `build N`, with a duplicate check first (G10), and every
+    decision posted to #vome-feature-requests with the client (G9).
+
+    mode "" checks for an existing request and stops if one may cover it;
+    "new" logs it anyway; a ClickUp task id adds this client to that one.
+    """
+    from mcp_connector import feature_requests
+
     n = item.get("number")
-    list_id = SAM_ACCEPTED if verb == "build" else RAW_INTAKE
     card = item.get("card") or {}
     title = card.get("live_question") or item.get("summary") or "request"
-    task = _clickup_create(list_id, {
-        "name": f"[#{item.get('ticket_number')}] {title[:110]}",
-        "markdown_description": _task_description(item),
-        "custom_fields": [{"id": FIELD_SOURCE, "value": SOURCE_ZOHO_TICKET}],
-    })
-    url = task.get("url") or f"https://app.clickup.com/t/{task.get('id')}"
+    problem = card.get("situation") or title
+    org = (item.get("account") or "").split("(")[0].strip()
+    mode = (mode or "").strip()
+    if mode and mode != "new" and not _TASK_ID.match(mode):
+        mode = ""  # the partner's free text is not a task id
+
+    if mode and mode != "new":
+        import zoho_actions
+
+        try:
+            existing = feature_requests.add_plus_one(
+                task_id=mode, requested_by=org, logged_by="Sam (sprint)",
+                note=title,
+                ticket_url=zoho_actions.ticket_url(item.get("ticket_id")))
+        except Exception as exc:
+            return f"*{n}.* not added to {mode}: {exc}"
+        url = existing.get("url") or f"https://app.clickup.com/t/{mode}"
+        where = f"the existing request {existing.get('name') or mode}"
+        if verb == "build":
+            where += " (move it to Sam Accepted in ClickUp to build it now)"
+    else:
+        if mode != "new":
+            try:
+                found = feature_requests.find_duplicates(title, problem)
+            except Exception as exc:
+                return (f"*{n}.* nothing logged: I could not check for an "
+                        f"existing request ({exc}). Say `{verb} {n} new` to "
+                        "log it anyway.")
+            if found:
+                lines = [f"*{n}.* nothing logged yet. These may already "
+                         "cover it:"]
+                lines += [
+                    f"  - <{d.get('url')}|{d.get('name')}> · "
+                    f"{d.get('list') or ''} · {d.get('status') or ''}"
+                    + (" · shipped" if d.get("shipped") else "")
+                    + f" · `{verb} {n} to {d.get('id')}`"
+                    for d in found[:5]]
+                lines.append(f"Or `{verb} {n} new` if none is the same "
+                             "request.")
+                return "\n".join(lines)
+        list_id = SAM_ACCEPTED if verb == "build" else RAW_INTAKE
+        task = _clickup_create(list_id, {
+            "name": f"[#{item.get('ticket_number')}] {title[:110]}",
+            "markdown_description": _task_description(item),
+            "custom_fields": [{"id": FIELD_SOURCE,
+                               "value": SOURCE_ZOHO_TICKET}],
+        })
+        url = task.get("url") or f"https://app.clickup.com/t/{task.get('id')}"
+        where = ("Sam Accepted (Build Now)" if verb == "build"
+                 else "Raw Intake")
     sprint_store.decide(item["id"], sprint_store.DONE, f"{verb}: {url}")
-    where = "Sam Accepted (Build Now)" if verb == "build" else "Raw Intake"
-    return (f"*{n}.* logged in {where}: {url}. The customer has not been "
-            "told anything; draft a reply with `edit` if one is owed.")
+    _post_feature_request(item, verb, where, url)
+    return (f"*{n}.* {'building' if verb == 'build' else 'logged'}: {where}"
+            f" {url}. Posted in #vome-feature-requests. The customer has not "
+            "been told anything; draft a reply with `edit` if one is owed.")
+
+
+FEATURE_REQUESTS = os.environ.get("SLACK_CHANNEL_FEATURE_REQUESTS",
+                                  "C0ALL4VPWK0")
+
+
+def _post_feature_request(item: dict, verb: str, where: str,
+                          url: str) -> None:
+    """One message per decision in #vome-feature-requests, so Sam's list of
+    requests is in one place (feedback, 2026-10-16)."""
+    import zoho_actions
+
+    card = item.get("card") or {}
+    ticket = (f"<{zoho_actions.ticket_url(item.get('ticket_id'))}|"
+              f"#{item.get('ticket_number')}>")
+    _post("\n".join([
+        f":bulb: *Feature request* from {item.get('account') or 'unknown'} "
+        f"· {ticket}",
+        f"*Asked for:* {card.get('live_question') or item.get('summary')}",
+        f"*Situation:* {card.get('situation') or ''}",
+        f"*Decision:* {'build now' if verb == 'build' else 'logged'}, "
+        f"<{url}|{where}>",
+        "*Client told:* nothing yet.",
+    ]), channel=FEATURE_REQUESTS)

@@ -404,6 +404,8 @@ ADDED_SINCE = {
     "support.sprint_batch_weekend": ("0 11 * * 0,6", "support", CLAIM_NONE),
     # Per-ticket leases are its idempotency.
     "support.queue_sweep": ("*/30 * * * *", "support", CLAIM_NONE),
+    # Claims each task in vomeos_release_resolutions.
+    "support.shipped_untold": ("45 * * * *", "support", CLAIM_NONE),
     "support.autonomy_report": ("30 9 * * mon", "support", CLAIM_WEEKLY),
 }
 

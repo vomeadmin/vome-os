@@ -72,6 +72,18 @@ store.register_table(
 READY, FIX, DECIDE, HELD = "ready", "fix", "decide", "held"
 # Nothing is owed (we asked, they have not answered): one line, `done N`.
 OWED_NOTHING = "owed_nothing"
+# Nothing owed and nothing to do (triage lane housekeeping): `close quiet`.
+QUIET = "quiet"
+
+ESCALATION_LABELS = {
+    "data_lookup": "needs a record we cannot read",
+    "mobile_unreadable": "lives in the mobile app",
+    "schema_or_migration": "needs a model or migration change",
+    "auth_or_billing": "touches login, permissions or payments",
+    "out_of_repo": "chats or integrations service",
+    "low_confidence": "the code check could not settle it",
+    "product_decision": "a product call",
+}
 NO_RECIPIENT = "no recipient: the latest customer message has no sender"
 
 CATEGORY_LABELS = {
@@ -188,6 +200,8 @@ def section(item: dict, now: datetime | None = None) -> str:
         return READY
     if draft and item.get("draft_status") == "blocked":
         return FIX
+    if (item.get("card") or {}).get("lane") == "housekeeping":
+        return QUIET
     if item.get("category") == "awaiting_client":
         return OWED_NOTHING
     return DECIDE
@@ -223,6 +237,8 @@ def select(items: list[dict], exclude: set | None = None,
         "more": len(actionable) - len(chosen),
         "held": held,
         OWED_NOTHING: owed,
+        QUIET: sorted((i for i in items if section(i, now) == QUIET),
+                      key=_priority),
     }
 
 
@@ -332,6 +348,10 @@ def detail(item: dict, resolutions: set, now: datetime) -> str:
                      f"{code.get('finding') or ''}")
     if card.get("why_human"):
         lines.append(f"*Why you:* {card['why_human']}")
+    if card.get("lane") == "engineer" and card.get("escalation_reason"):
+        reason = card["escalation_reason"]
+        lines.append(f"*Needs an engineer:* "
+                     f"{ESCALATION_LABELS.get(reason, reason)}")
     if card.get("recommended_action"):
         lines.append(f"*Recommended:* {card['recommended_action']}")
     if is_design_question(item):
@@ -351,6 +371,20 @@ def detail(item: dict, resolutions: set, now: datetime) -> str:
                  f"`log {n}` · `build {n}` · `edit {n}: <reply>` · "
                  f"`hold {n}` · `done {n}`")
     return "\n".join(lines)
+
+
+def week_line(week: dict) -> str:
+    """"this week 12 sent, 2 to engineers (onlyg 2; why: data lookup 1,
+    mobile 1)". What still escalates, and why, in one line (G27)."""
+    routed = ", ".join(f"{k} {v}" for k, v in
+                       sorted(week.get("by_engineer", {}).items()))
+    why = ", ".join(f"{k.replace('_', ' ')} {v}" for k, v in
+                    sorted(week.get("by_reason", {}).items()))
+    detail = "; ".join(p for p in (routed, f"why: {why}" if why else "")
+                       if p)
+    return (f"this week {week.get('sent', 0)} sent, "
+            f"{week.get('routed', 0)} to engineers"
+            + (f" ({detail})" if detail else ""))
 
 
 def _parts(blocks: list[str]) -> list[str]:
@@ -409,6 +443,16 @@ def render(batch_number: int, picked: dict, context: dict,
                 + (f" · waiting {age(i, now)}" if age(i, now) else "")
                 for i in owed]
 
+    closing = picked.get(QUIET) or []
+    if closing:
+        top.append(f"\n*CLOSE QUIETLY ({len(closing)})* · nothing owed, no "
+                   "reply · `close quiet` closes them in Zoho with no email")
+        top += [f"*{i.get('number')}* {_zoho(i)} {_account(i)} · "
+                + _short((i.get("card") or {}).get("live_question")
+                         or (i.get("card") or {}).get("situation")
+                         or i.get("summary"), 110)
+                for i in closing]
+
     quiet = []
     held = picked.get("held") or []
     if held:
@@ -424,11 +468,7 @@ def render(batch_number: int, picked: dict, context: dict,
                      "release")
     week = context.get("week") or {}
     if week:
-        routed = ", ".join(f"{k} {v}" for k, v in
-                           sorted(week.get("by_engineer", {}).items()))
-        quiet.append(f"this week {week.get('sent', 0)} sent, "
-                     f"{week.get('routed', 0)} to engineers"
-                     + (f" ({routed})" if routed else ""))
+        quiet.append(week_line(week))
     if context.get("untriaged") is not None:
         count = context["untriaged"]
         quiet.append(f"{count} open ticket(s) not triaged yet"
@@ -631,8 +671,9 @@ def run_batch(kind: str = "scheduled", exclude: set | None = None,
     for part in parts:
         sprint_thread._post(part, thread_ts=ts)
     ready = {str(i["id"]): draft_hash(i.get("draft")) for i in picked[READY]}
+    quiet_ids = [i["id"] for i in picked[QUIET]]
     sprint_store.finish_batch(number, sprint_thread.CHANNEL, ts, shown,
-                              ready)
+                              ready, quiet_ids)
     if prev:
         _supersede(prev, ts, number)
     if reply_thread and reply_thread != ts:

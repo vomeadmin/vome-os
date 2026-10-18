@@ -77,22 +77,49 @@ def recent_edits(days: int = WINDOW_DAYS, limit: int = 200) -> list[dict]:
     )
 
 
+# Trust tiers (G28): a category whose drafts go out unedited is "proven".
+# It only ranks and reports. Every reply is still shown in full and needs
+# Sam's send (Sam, 2026-10-17: "I want the actual message").
+PROVEN_SENT = int(os.environ.get("AUTONOMY_PROVEN_SENT", "20"))
+PROVEN_UNEDITED = float(os.environ.get("AUTONOMY_PROVEN_UNEDITED", "0.9"))
+
+
+def tier(row: dict) -> str:
+    if row.get("eligible"):
+        return "qualifies for auto-send"
+    if row.get("sent", 0) >= PROVEN_SENT and \
+            row.get("unedited_rate", 0) >= PROVEN_UNEDITED:
+        return "proven"
+    if row.get("sent", 0) >= 5:
+        return "learning"
+    return "too few to tell"
+
+
 def render(rows: list[dict], edits: list[dict],
-           lessons: list[dict] | None = None) -> str:
+           lessons: list[dict] | None = None,
+           week: dict | None = None) -> str:
     lines = [f":bar_chart: *Draft autonomy, last {WINDOW_DAYS} days*",
-             f"_A category qualifies for auto-send at {MIN_SENT}+ sent and "
-             f"{int(MIN_UNEDITED * 100)}%+ unedited. Auto-send is not "
-             "built; this only shows who would qualify._"]
+             f"_Proven at {PROVEN_SENT}+ sent and "
+             f"{int(PROVEN_UNEDITED * 100)}%+ unedited; auto-send would "
+             f"need {MIN_SENT}+ and {int(MIN_UNEDITED * 100)}%+ and your "
+             "decision. Nothing sends without you either way._"]
     if not rows:
         lines.append("No drafts in the window yet.")
     for r in rows:
         rate = f"{r['unedited_rate'] * 100:.0f}%" if r["sent"] else "-"
-        flag = " :white_check_mark: *qualifies*" if r["eligible"] else ""
+        mark = {"qualifies for auto-send": " :white_check_mark:",
+                "proven": " :large_green_circle:"}.get(tier(r), "")
         lines.append(
-            f"`{r['category']}` drafted {r['drafted']} · sent {r['sent']} · "
-            f"unedited {r['unedited']} ({rate}) · edited {r['edited']} · "
-            f"redrafts {r['redrafts']}{flag}"
+            f"`{r['category']}` {tier(r)}{mark} · drafted {r['drafted']} · "
+            f"sent {r['sent']} · unedited {r['unedited']} ({rate}) · "
+            f"edited {r['edited']} · redrafts {r['redrafts']}"
         )
+    if week:
+        import sprint_batch
+
+        lines.append(f"\n:wrench: *What still escalates:* "
+                     f"{sprint_batch.week_line(week)}. Each reason names "
+                     "the gap that would let an agent handle it.")
     if edits:
         lines.append(f"\n*Your edits this period: {len(edits)}.* Each is a "
                      "correction the drafter got wrong and a candidate "
@@ -116,7 +143,8 @@ def run_autonomy_report() -> dict:
 
     import sprint_thread
 
-    ts = sprint_thread._post(render(rows, edits, lesson_store.all_active()))
+    ts = sprint_thread._post(render(rows, edits, lesson_store.all_active(),
+                                    sprint_store.week_counts()))
     return {"status": "ok" if ts else "post failed",
             "categories": len(rows), "edits": len(edits)}
 

@@ -32,6 +32,7 @@ Tables are `vomeos_` prefixed, created on first use, same as every OS table.
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -216,12 +217,19 @@ def week_counts(days: int = 7) -> dict:
         " - make_interval(days => :d) AND status IN ('sent', 'routed')",
         {"d": int(days)},
     )
-    out = {"sent": 0, "routed": 0, "by_engineer": {}}
+    out = {"sent": 0, "routed": 0, "by_engineer": {}, "by_reason": {}}
     for row in rows:
         out[row["status"]] += 1
-        if row["status"] == ROUTED:
-            who = str(row.get("decision") or "").replace("routed to ", "")
-            out["by_engineer"][who] = out["by_engineer"].get(who, 0) + 1
+        if row["status"] != ROUTED:
+            continue
+        # "routed to onlyg (data_lookup)"; older rows have no reason.
+        match = re.match(r"routed to (\w+)(?: \((\w+)\))?",
+                         str(row.get("decision") or ""))
+        if not match:
+            continue
+        who, why = match.group(1), match.group(2) or "not recorded"
+        out["by_engineer"][who] = out["by_engineer"].get(who, 0) + 1
+        out["by_reason"][why] = out["by_reason"].get(why, 0) + 1
     return out
 
 
@@ -483,6 +491,8 @@ store.register_table(
         -- what Sam was shown, unchanged.
         shown          JSONB,
         ready          JSONB,
+        -- item ids shown under CLOSE QUIETLY: `close quiet` closes only these
+        quiet          JSONB,
         posted_at      TIMESTAMP NOT NULL DEFAULT NOW(),
         superseded_at  TIMESTAMP
     )
@@ -496,7 +506,7 @@ def batches_ready() -> bool:
 
 
 def _decode_batch(row: dict) -> dict:
-    for key in ("shown", "ready"):
+    for key in ("shown", "ready", "quiet"):
         value = row.get(key)
         if isinstance(value, str):
             try:
@@ -519,13 +529,14 @@ def start_batch(kind: str) -> int:
 
 
 def finish_batch(batch_id: int, channel: str, ts: str, shown: dict,
-                 ready: dict) -> None:
+                 ready: dict, quiet: list | None = None) -> None:
     store.execute(
         f"UPDATE {BATCHES} SET channel = :c, ts = :ts,"
         " shown = CAST(:s AS JSONB), ready = CAST(:r AS JSONB),"
-        " posted_at = :now WHERE id = :i",
+        " quiet = CAST(:q AS JSONB), posted_at = :now WHERE id = :i",
         {"c": channel, "ts": ts, "s": json.dumps(shown),
-         "r": json.dumps(ready), "now": _now(), "i": batch_id},
+         "r": json.dumps(ready), "q": json.dumps(quiet or []),
+         "now": _now(), "i": batch_id},
     )
 
 

@@ -411,6 +411,9 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
         release.get("live") and category not in ("misdirected",
                                                  "account_deletion",
                                                  "email_update"))
+    # Nothing is owed: it closes quietly from the batch (`close quiet`).
+    if card.get("lane") == "housekeeping" and not release.get("live"):
+        owed = False
     if owed and not is_error_report(subject):
         resolution_card = card
         notes = ""

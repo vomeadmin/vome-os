@@ -101,6 +101,23 @@ def latest_inbound(ticket_id: str) -> dict:
     return inbound[0]
 
 
+def latest_outbound(ticket_id: str) -> dict:
+    """The newest message we sent on this ticket, or {} if none."""
+    data = _get(f"/tickets/{ticket_id}/threads", {"limit": 50})
+    outbound = [t for t in (data.get("data") or [])
+                if t.get("direction") == "out"]
+    if not outbound:
+        return {}
+    outbound.sort(key=lambda t: str(t.get("createdTime") or ""),
+                  reverse=True)
+    return outbound[0]
+
+
+def ticket_status(ticket_id: str) -> str:
+    """The ticket's Zoho status ("Closed", "Processing", ...)."""
+    return str(_get(f"/tickets/{ticket_id}").get("status") or "")
+
+
 def _secondary_emails(ticket_id: str) -> list[str]:
     try:
         ticket = _get(f"/tickets/{ticket_id}")

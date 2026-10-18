@@ -24,6 +24,7 @@ skills = [
     "deciding-not-to-act",
     "reading-ticket-images",
     "checking-the-code",
+    "choosing-the-lane",
 ]
 # Screenshots are shown, not just counted. Six covers every real thread seen
 # so far once signatures are removed (#9415 had one, #9436 two). The kernel

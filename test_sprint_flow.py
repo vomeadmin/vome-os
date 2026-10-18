@@ -194,7 +194,12 @@ def test_route_to_an_unknown_person(world):
 
 
 def test_build_goes_to_sam_accepted(monkeypatch, world):
+    from mcp_connector import feature_requests
+
     created = []
+    # No existing request matches, so both go ahead (the duplicate check
+    # itself is covered in test_remaining_items.py).
+    monkeypatch.setattr(feature_requests, "find_duplicates", lambda t, p: [])
     monkeypatch.setattr(sprint_thread, "_clickup_create",
                         lambda list_id, body: created.append(list_id) or
                         {"id": "86y"})
