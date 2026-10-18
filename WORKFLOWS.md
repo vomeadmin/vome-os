@@ -13,7 +13,7 @@ To propose a change: edit a diagram or add a register row, set its status,
 and regenerate. A new AI session should read this file, `CLAUDE.md`, and the
 ClickUp handoff page (doc 3dztm-3311, page 3dztm-6351) before acting.
 
-**As of:** 2026-10-17
+**As of:** 2026-10-18
 
 ## Status key
 
@@ -30,8 +30,7 @@ ClickUp handoff page (doc 3dztm-3311, page 3dztm-6351) before acting.
 ```mermaid
 flowchart TD
   A["Client emails support<br/>or replies"]:::live --> B["Zoho Desk webhook<br/>/webhook/zoho-ticket, /zoho-update"]:::live
-  B --> L1["Legacy intake: classify, CRM tier,<br/>internal note, #vome-tickets brief"]:::decide
-  B --> L2["Instant auto-ack<br/>(blind, retired: ENABLE_AUTO_ACK off)"]:::built
+  B --> AC["Activation-code fix<br/>(auth check, sends its own reply)"]:::live
   B --> S["Shadow triage on the worker<br/>customer_success.shadow_triage"]:::deployed
   S --> S1["Thread + screenshots<br/>(inline images, attachments)"]:::deployed
   S --> S2["Existing work + release state<br/>(ticket no., account, symptom; Agent Fixes)"]:::deployed
@@ -189,10 +188,11 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 | G1 | release | Resolution drafts made automatically when a fix goes Live | broken | First production pass (Oct 17 14:00 ET) failed for #9415, #9436, #9500: sprint tables did not exist yet | Push the pending batch (table setup + retry up to 3); the next pass drafts all three | Sam |
 | G21 | release | Auto-send resolutions once a fix is proven live (`RELEASE_AUTO_SEND`) | decide | Removes the last manual step for clean resolutions | Turn on once the Monday autonomy report shows resolutions going out unedited; never applies to needs_human | Sam |
 | G2 | engineer | Engineer-triggered replies still auto-send (on prod, needs client info, user education) | decide | They skip Sam's review; the playbook text says nothing auto-sends | Keep as is, or turn them into sprint thread drafts | Sam |
-| G3 | intake | #vome-tickets brief and legacy classifier run beside shadow triage | decide | Two cards per ticket, two places to look | Retire once the sprint thread is trusted (the old reply handling depends on it) | Sam |
+| G3 | intake | Legacy intake (classifier, CRM tier, Zoho auto-assignment, ClickUp queue task, #vome-tickets brief) and the blind auto-ack removed | built | Two cards per ticket, and a second ClickUp task whenever Sam routed one | Push; new tickets then reach engineers only through `route`. Reply handling is unchanged | Sam |
+| G32 | intake | Activation-code fix still emails the client on its own | decide | The one new-ticket reply that skips Sam's review | Keep (it fixes the login in seconds), or turn it into a sprint thread draft | Sam |
 | G4 | sentry | vome-react sends nothing to Sentry | broken | Frontend crashes reach us only as tickets | Put REACT_APP_SENTRY_DSN into the build (CRA inlines it at build time) | Sanjay |
 | G5 | sentry | Chats and integrations services have no Sentry | broken | Their errors are invisible | Add the SDK to both services | OnlyG |
-| G6 | code | Mobile source is unreadable (VomeApp 403) | broken | Code checks cannot read the app | Token with read on samfagen15/VomeApp, add `mobile=` to VOMEOS_CODE_REPO_MAP | Sam |
+| G6 | code | Mobile source is unreadable (VomeApp 403) | built | Code checks cannot read the app | VomeApp moved to vomeadmin; all GitHub reads use `vome-os-sentry-write-web`, `mobile=` added to the default repo map. Live on push | Sam |
 | G7 | creds | vomeadmin GitHub token expires 2026-10-31 | broken | Release watcher web checks and web code reads stop | Renew, update VOMEOS_GITHUB_TOKEN_VOMEADMIN on worker and web | Sam |
 | G8 | data | content_mode email failures (Oct 15 20:11 to Oct 16 16:01 UTC) | broken | Some birthday, bulk and enrollment emails may not have sent | Confirm it stopped; count what failed; add db_default on new NOT NULL columns | OnlyG |
 | G9 | feature | Feature requests are not posted to #vome-feature-requests | proposed | Sam's single list of decisions misses them | Post on log/build with client, ARR, ticket | agent |
@@ -215,4 +215,4 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 | G28 | learning | Trust tiers per category (order and report only) | proposed | Proven categories should need less of Sam | Full reply text is ALWAYS shown (Sam, 2026-10-17); tiers only rank and report | agent |
 | G29 | director | `close quiet` housekeeping lane | proposed | "Thanks, works now" and handled error reports still take a decision each | Triage `lane=housekeeping`; Zoho Closed with no closure email, on Sam's word | agent |
 | G31 | release | Every fixed ticket the client was not told about gets a prepared reply | proposed | Fixes ship and the client never hears (Oct 9: six closed tasks came back) | Sweep open and awaiting tickets with a live fix and no outbound since; "it has been updated, have a look and let us know" in the next batch | agent |
-| G20 | items 1-5 | Close the loop, code checks, ticket fixes, autonomy report, auto-ack off, Sam signature, resolution drafts | built | Not pushed yet | Review the diff, push | Sam |
+| G20 | items 1-5 | Close the loop, code checks, ticket fixes, autonomy report, Sam signature, resolution drafts | built | Not pushed yet | Review the diff, push | Sam |

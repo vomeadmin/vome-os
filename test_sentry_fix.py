@@ -416,7 +416,7 @@ def test_a_repo_with_no_integration_branch_is_refused_not_defaulted(
         {"issue_id": "T-1", "triage_summary": "x"},
         {"attempted": True, "diff": "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"},
         {"repo": "VomeApp", "branch": "master", "host": "github",
-         "owner": "samfagen15"},
+         "owner": "vomeadmin"},
     )
     assert out["opened"] is False
     assert "no integration branch" in out["reason"]

@@ -22,6 +22,7 @@ def _clear(monkeypatch):
         "VOMEOS_BITBUCKET_WORKSPACE", "VOMEOS_GITHUB_TOKEN",
         "VOMEOS_GITHUB_OWNER", "VOMEOS_CODE_REPOS",
         "VOMEOS_GITHUB_TOKEN_VOMEADMIN", "VOMEOS_GITHUB_TOKEN_SAMFAGEN15",
+        "vome-os-sentry-write-web",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -70,6 +71,28 @@ def test_each_owner_gets_its_own_token(monkeypatch):
     assert client.token_for("samfagen15") == "tok_app"
     assert client.headers("vomeadmin")["Authorization"] == "Bearer tok_react"
     assert client.headers("samfagen15")["Authorization"] == "Bearer tok_app"
+
+
+def test_the_write_web_token_wins_for_vomeadmin(monkeypatch):
+    # One token for every GitHub repo: vome-os-sentry-write-web has read and
+    # write on vome-react, vome-landing-page and VomeApp. The older read-only
+    # VOMEOS_GITHUB_TOKEN_VOMEADMIN may still be set in Railway and must not
+    # win, or reads break the day it expires.
+    _clear(monkeypatch)
+    monkeypatch.setenv("VOMEOS_GITHUB_TOKEN_VOMEADMIN", "tok_old_read")
+    monkeypatch.setenv("vome-os-sentry-write-web", "tok_web")
+    client = code_search.GitHub()
+    assert client.token_for("vomeadmin") == "tok_web"
+    assert code_search.github_owners_configured() == ("vomeadmin",)
+
+
+def test_the_write_web_token_alone_configures_vomeadmin(monkeypatch):
+    _clear(monkeypatch)
+    monkeypatch.setenv("vome-os-sentry-write-web", "tok_web")
+    client = code_search.GitHub()
+    assert client.configured() is True
+    assert client.configured("vomeadmin") is True
+    assert code_search.github_owners_configured() == ("vomeadmin",)
 
 
 def test_the_env_name_is_derived_from_the_owner():

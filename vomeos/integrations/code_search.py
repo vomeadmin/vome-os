@@ -61,10 +61,13 @@ ENVIRONMENT
                                unscoped tokens, which need Basic. See
                                Bitbucket.headers() for why Bearer is better.
     VOMEOS_GITHUB_TOKEN        shared fallback token
+    vome-os-sentry-write-web   the vomeadmin token, read and write on every
+                               GitHub repo. Wins over the per-owner variable;
+                               see GITHUB_TOKEN_ALIASES.
     VOMEOS_GITHUB_TOKEN_<OWNER> per account, e.g.
-                               VOMEOS_GITHUB_TOKEN_SAMFAGEN15. A fine-grained
-                               token is bound to one account, so two accounts
-                               means two tokens.
+                               VOMEOS_GITHUB_TOKEN_VOMEADMIN. A fine-grained
+                               token is bound to one account, so a second
+                               account would mean a second token.
     VOMEOS_GITHUB_OWNER        default owner when a caller names none
     VOMEOS_CODE_REPOS          comma separated allowlist of repo slugs.
                                Empty means every repo the token can reach.
@@ -85,6 +88,16 @@ MAX_FILE_BYTES = int(os.environ.get("VOMEOS_CODE_MAX_FILE_BYTES", "60000"))
 
 # The Bitbucket token that may read pipelines, first match wins.
 PIPELINES_TOKEN_VARS = ("VOMEOS-PIPELINES", "VOMEOS_BITBUCKET_PIPELINES_TOKEN")
+
+# The one GitHub token per account, under the name it was created with in
+# Railway. Every GitHub repo (vome-react, vome-landing-page, VomeApp) is under
+# `vomeadmin` since 2026-10-18, and `vome-os-sentry-write-web` has read and
+# write on all three, so reading and writing both use it. It is consulted
+# BEFORE VOMEOS_GITHUB_TOKEN_<OWNER> so that the older read-only token still
+# set in Railway is ignored rather than winning and then expiring.
+GITHUB_TOKEN_ALIASES = {
+    "VOMEADMIN": ("vome-os-sentry-write-web",),
+}
 
 
 def allowed_repos() -> tuple[str, ...]:
@@ -338,22 +351,26 @@ class GitHub(Connector):
         ------------------------------------------
         A GitHub fine-grained token is scoped to exactly one account at
         creation time, in the "Resource owner" dropdown, and that cannot be
-        changed afterwards. Our two GitHub repositories are under different
-        accounts: `vomeadmin/vome-react` in the organization and
-        `samfagen15/VomeApp` on a personal account. So reaching both means
-        two tokens, and one environment variable cannot hold two.
+        changed afterwards. Today every GitHub repo is under `vomeadmin`
+        (VomeApp moved there from a personal account on 2026-10-18), but a
+        second account would need a second token.
 
-        Worse, using the wrong one does not look like an auth problem.
-        GitHub answers a request for a repo outside the token's owner with
-        404, not 403, so it reads as "that file does not exist" and sends
-        you looking for a renamed module.
+        Using the wrong one does not look like an auth problem. GitHub
+        answers a request for a repo outside the token's owner with 404, not
+        403, so it reads as "that file does not exist" and sends you looking
+        for a renamed module.
 
-        Resolution order: the owner-specific variable first, then the shared
+        Resolution order: the account's named token (GITHUB_TOKEN_ALIASES),
+        then the owner-specific variable, then the shared
         VOMEOS_GITHUB_TOKEN, which keeps a single-owner setup working with
         no changes.
         """
         env_name = self.token_env_name(owner or self.owner)
         if env_name:
+            slug = env_name[len("VOMEOS_GITHUB_TOKEN_"):]
+            for alias in GITHUB_TOKEN_ALIASES.get(slug, ()):
+                if os.environ.get(alias):
+                    return os.environ[alias]
             scoped = os.environ.get(env_name, "")
             if scoped:
                 return scoped
@@ -371,10 +388,7 @@ class GitHub(Connector):
             return bool(self.token_for(owner))
         if os.environ.get("VOMEOS_GITHUB_TOKEN"):
             return True
-        return any(
-            name.startswith("VOMEOS_GITHUB_TOKEN_") and value
-            for name, value in os.environ.items()
-        )
+        return bool(github_owners_configured())
 
     def headers(self, owner: str = "") -> dict[str, str]:
         return {
@@ -554,6 +568,9 @@ def github_owners_configured() -> tuple[str, ...]:
     for name in os.environ:
         if name.startswith("VOMEOS_GITHUB_TOKEN_") and os.environ[name]:
             owners.add(name[len("VOMEOS_GITHUB_TOKEN_"):].lower())
+    for slug, aliases in GITHUB_TOKEN_ALIASES.items():
+        if any(os.environ.get(alias) for alias in aliases):
+            owners.add(slug.lower())
     if os.environ.get("VOMEOS_GITHUB_TOKEN") and github.owner:
         owners.add(github.owner.lower())
     return tuple(sorted(owners))

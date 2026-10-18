@@ -44,7 +44,7 @@ Verified 2026-10-15 against each repo's CI config and history. Defined in
 | vomesalesforce | Bitbucket | `main` | its only long-lived branch |
 | vome-react | GitHub, vomeadmin | `master` | `cicd-prod.yml` deploys master |
 | vome-landing-page | GitHub, vomeadmin | `master` | `cicd-prod.yml` deploys master |
-| VomeApp | GitHub, samfagen15 | `master` | store build (`sanjay_expo_upgrade`, v3.6.6) promoted to master 2026-10-15 |
+| VomeApp | GitHub, vomeadmin | `master` | store build (`sanjay_expo_upgrade`, v3.6.6) promoted to master 2026-10-15 |
 
 Code search itself indexes each repo's default branch; `read_code_file`
 then reads the branch above. The code tools use their own allowlist,
@@ -82,7 +82,7 @@ Google Cloud console, the project that owns the vomevolunteer.co Workspace:
 | `MCP_GOOGLE_CLIENT_ID` | from step 1 |
 | `MCP_GOOGLE_CLIENT_SECRET` | from step 1 |
 | `CLICKUP_TEAM_ID` | the workspace id, for the Lessons Log |
-| `VOMEOS_GITHUB_TOKEN_VOMEADMIN`, `VOMEOS_GITHUB_TOKEN_SAMFAGEN15` | already used by Sentry triage; the connector downloads vome-react and VomeApp with them |
+| `vome-os-sentry-write-web` | the one vomeadmin token (read and write on vome-react, vome-landing-page and VomeApp); the connector downloads vome-react and VomeApp with it |
 
 Optional: `MCP_ALLOWED_DOMAINS` (default `vomevolunteer.co,vomevolunteer.com`),
 `MCP_ALLOWED_EMAILS` (individuals outside those domains), `MCP_TRIAGE_EMAILS`

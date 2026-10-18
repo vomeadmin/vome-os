@@ -17,7 +17,8 @@ import sentry_notify as notify
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
     for name in (
-        "SENTRY_SLACK_CHANNEL", "SLACK_USER_ONLYG",
+        "SENTRY_AUTOMATIONS", "SENTRY_SLACK_CHANNEL", "SLACK_CHANNEL_ENG_ALERTS",
+        "SLACK_USER_ONLYG",
         "SLACK_USER_SANJAY", "SLACK_USER_SIRAJ", "SAM_SLACK_USER_ID",
     ):
         monkeypatch.delenv(name, raising=False)

@@ -261,7 +261,12 @@ needs go on `vome-os-worker`, not the web service.
   `RELEASE_AUTO_SEND=true` sends clean drafts itself (never needs_human);
   off by default, Sam's call. Nothing ever sets `on prod`
   from these paths: the on-prod handler would email the customer again.
-- Retired: blind auto-ack (`ENABLE_AUTO_ACK` unset = off), email
+- Removed 2026-10-18: legacy new-ticket intake (classifier, CRM tier, Zoho
+  auto-assignment, ClickUp queue task, #vome-tickets brief) and the blind
+  auto-ack. `process_ticket` now only runs the activation-code fix; engineers
+  get work through `route` in the sprint thread. Reply handling
+  (`process_ticket_update`) is unchanged.
+- Retired: email
   completeness gate (removed), "Vic" signatures (engineer-triggered replies
   sign "Sam | Vome team").
 

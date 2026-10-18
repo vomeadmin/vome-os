@@ -11,8 +11,8 @@ WHY "SHADOW"
 Nothing here acts on the ticket. It writes no Zoho status, sends no email and
 creates no task. Its whole output is a card and a draft waiting for Sam, so
 the work is ready when he sits down instead of starting when he does. The old
-paths (auto-ack, the #vome-tickets brief) keep running beside it until Sam
-retires them.
+new-ticket paths (auto-ack, the #vome-tickets brief) were removed 2026-10-18;
+only the activation-code fix in agent.process_ticket still runs beside it.
 
 FLOW
 ----

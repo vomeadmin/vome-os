@@ -671,10 +671,10 @@ async def zoho_ticket_webhook(request: Request):
         f"-- {ticket_data['subject'] or 'no subject'}"
     )
 
+    # Activation-code fast path only; legacy intake was removed 2026-10-18.
     process_ticket(ticket_data)
 
-    # Card and draft for the sprint thread, on the worker. Never blocks or
-    # breaks the existing intake above.
+    # Card and draft for the sprint thread, on the worker.
     shadow_triage.enqueue(str(ticket_data.get("ticket_id") or ""), "new")
 
     return {"status": "ok"}
@@ -1856,13 +1856,11 @@ async def health():
         "code_read": _present(
             "VOMEOS_BITBUCKET_TOKEN", "VOMEOS_BITBUCKET_WORKSPACE",
             "VOMEOS_CODE_REPOS",
-            "VOMEOS_GITHUB_TOKEN_VOMEADMIN",
-            "VOMEOS_GITHUB_TOKEN_SAMFAGEN15",
+            "vome-os-sentry-write-web",
         ),
         "code_write": _present(
             "VOMEOS_BITBUCKET_WRITE_TOKEN",
-            "VOMEOS_GITHUB_WRITE_TOKEN_VOMEADMIN",
-            "VOMEOS_GITHUB_WRITE_TOKEN_SAMFAGEN15",
+            "vome-os-sentry-write-web",
             "VOMEOS_CODE_WRITE_REPOS", "VOMEOS_PR_ALLOW_PROTECTED_TARGET",
             "SENTRY_AUTO_PR_ENABLED",
         ),

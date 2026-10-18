@@ -50,7 +50,8 @@ from vomeos.integrations import code_search
 DEFAULT_REPO_MAP = (
     "core=bitbucket:vomedjango/vomedjango-restored-core-app@master,"
     "database=bitbucket:vomedjango/vomedjango-database-app@master,"
-    "web=github:vomeadmin/vome-react@master"
+    "web=github:vomeadmin/vome-react@master,"
+    "mobile=github:vomeadmin/VomeApp@master"
 )
 
 MAX_RESULT_CHARS = int(os.environ.get("VOMEOS_TOOL_MAX_CHARS", "12000"))
