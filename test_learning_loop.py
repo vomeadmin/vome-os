@@ -197,7 +197,7 @@ def test_one_correction_is_learned_once_per_turn(monkeypatch, keeper):
     item = {"id": 21, "number": 2, "ticket_number": "9415",
             "category": "clear_bug", "draft": "old", "status": "open",
             "draft_status": "ok", "recipients": {}, "card": {}}
-    monkeypatch.setattr(sprint_store, "items_for_day", lambda day: [item])
+    monkeypatch.setattr(sprint_store, "working_set", lambda: [item])
     monkeypatch.setattr(sprint_store, "set_draft", lambda *a, **k: None)
     monkeypatch.setattr(sprint_thread, "_turns",
                         lambda t: [{"role": "sam", "text": "x",

@@ -10,10 +10,13 @@ WHY NUMBERS ARE STORED, NOT COMPUTED
 Sam answers "send 1-4" or "hold 6". If the numbers were recomputed from the
 queue at each update, a ticket closing at 11:00 would shift every number
 below it, and "send 4" at 13:05 would send the wrong reply. So a number is
-assigned once, when the item enters the day, and is never reused that day.
+assigned once, when the ticket first becomes an item, and it is permanent:
+it never changes and is never reused, across days.
 
-An item still open at the end of the day is carried into the next day with a
-new number and its original arrival time, so the age marker is honest.
+Until 2026-10-18 numbers restarted every day and a carried item got a new
+one, while its card stayed in yesterday's thread where commands could no
+longer reach it (the first weekend proved it). Batches (sprint_batch.py)
+made the day irrelevant, so the number stopped depending on it.
 
 ONE ITEM PER TICKET
 -------------------
@@ -95,6 +98,7 @@ store.register_table(
         incident_key    VARCHAR,
         decision        TEXT,
         decided_at      TIMESTAMP,
+        wake_at         TIMESTAMP,
         arrived_at      TIMESTAMP NOT NULL DEFAULT NOW(),
         updated_at      TIMESTAMP NOT NULL DEFAULT NOW(),
         UNIQUE (day, number)
@@ -176,10 +180,12 @@ def by_ticket(ticket_id: str) -> dict:
     return _decode(rows[0]) if rows else {}
 
 
-def by_number(day: date, number: int) -> dict:
+def by_number(number: int) -> dict:
+    """The item with this permanent number."""
     rows = store.query(
-        f"SELECT * FROM {ITEMS} WHERE day = :d AND number = :n",
-        {"d": day, "n": int(number)},
+        f"SELECT * FROM {ITEMS} WHERE number = :n"
+        " ORDER BY updated_at DESC LIMIT 1",
+        {"n": int(number)},
     )
     return _decode(rows[0]) if rows else {}
 
@@ -189,6 +195,34 @@ def items_for_day(day: date) -> list[dict]:
         f"SELECT * FROM {ITEMS} WHERE day = :d ORDER BY number", {"d": day}
     )
     return [_decode(r) for r in rows]
+
+
+def working_set(hours: int = 36) -> list[dict]:
+    """Everything still open or held, plus anything decided recently, so
+    "what happened with 5" still has an answer after 5 was sent."""
+    rows = store.query(
+        f"SELECT * FROM {ITEMS} WHERE kind = 'ticket' AND (status IN"
+        " ('open', 'held') OR updated_at >= NOW() - make_interval("
+        "hours => :h)) ORDER BY number",
+        {"h": int(hours)},
+    )
+    return [_decode(r) for r in rows]
+
+
+def week_counts(days: int = 7) -> dict:
+    """Sent and routed in the last `days`, routed split by engineer."""
+    rows = store.query(
+        f"SELECT status, decision FROM {ITEMS} WHERE decided_at >= NOW()"
+        " - make_interval(days => :d) AND status IN ('sent', 'routed')",
+        {"d": int(days)},
+    )
+    out = {"sent": 0, "routed": 0, "by_engineer": {}}
+    for row in rows:
+        out[row["status"]] += 1
+        if row["status"] == ROUTED:
+            who = str(row.get("decision") or "").replace("routed to ", "")
+            out["by_engineer"][who] = out["by_engineer"].get(who, 0) + 1
+    return out
 
 
 def recent(hours: int = 24) -> list[dict]:
@@ -203,9 +237,8 @@ def recent(hours: int = 24) -> list[dict]:
 
 
 def _next_number_sql() -> str:
-    return (
-        f"(SELECT COALESCE(MAX(number), 0) + 1 FROM {ITEMS} WHERE day = :day)"
-    )
+    """The next permanent number: one above the highest ever used."""
+    return f"(SELECT COALESCE(MAX(number), 0) + 1 FROM {ITEMS})"
 
 
 def upsert_ticket(
@@ -228,8 +261,9 @@ def upsert_ticket(
 ) -> dict:
     """Create the ticket's item, or refresh it after a new customer message.
 
-    Refreshing reopens it. It keeps its number when it is already in today's
-    thread; an item from an earlier day comes into today with a new number.
+    Refreshing reopens it and it keeps its number. Only a number that
+    collides with one already used today (from before numbers were
+    permanent) is replaced.
     """
     day = today()
     params = {
@@ -253,25 +287,9 @@ def upsert_ticket(
     }
     existing = by_ticket(ticket_id)
     if existing:
-        same_day = existing.get("day") == day
-        number_sql = "number" if same_day else _next_number_sql()
-        rows = store.query(
-            f"UPDATE {ITEMS} SET status = 'open', day = :day,"
-            f" number = {number_sql}, category = :category,"
-            " account = :account, subject = :subject, summary = :summary,"
-            " important = :important, card = CAST(:card AS JSONB),"
-            " draft = :draft, draft_status = :draft_status,"
-            " original_draft = :draft, edits = 0, redrafts = 0,"
-            " sent_text = NULL, sent_unedited = NULL, sent_at = NULL,"
-            " draft_why = :draft_why,"
-            " recipients = CAST(:recipients AS JSONB),"
-            " last_thread_id = :last_thread_id,"
-            " incident_key = COALESCE(:incident_key, incident_key),"
-            " card_ts = CASE WHEN day = :day THEN card_ts END,"
-            " decision = NULL, decided_at = NULL, updated_at = :now"
-            " WHERE ticket_id = :ticket_id RETURNING *",
-            params, write=True,
-        )
+        rows = _refresh(params, "number")
+        if not rows and existing.get("day") != day:
+            rows = _refresh(params, _next_number_sql())
         return _decode(rows[0]) if rows else {}
 
     for _ in range(3):
@@ -296,6 +314,26 @@ def upsert_ticket(
         if again:
             return again
     return {}
+
+
+def _refresh(params: dict, number_sql: str) -> list[dict]:
+    return store.query(
+        f"UPDATE {ITEMS} SET status = 'open', day = :day,"
+        f" number = {number_sql}, category = :category,"
+        " account = :account, subject = :subject, summary = :summary,"
+        " important = :important, card = CAST(:card AS JSONB),"
+        " draft = :draft, draft_status = :draft_status,"
+        " original_draft = :draft, edits = 0, redrafts = 0,"
+        " sent_text = NULL, sent_unedited = NULL, sent_at = NULL,"
+        " draft_why = :draft_why,"
+        " recipients = CAST(:recipients AS JSONB),"
+        " last_thread_id = :last_thread_id,"
+        " incident_key = COALESCE(:incident_key, incident_key),"
+        " card_ts = CASE WHEN day = :day THEN card_ts END,"
+        " decision = NULL, decided_at = NULL, wake_at = NULL,"
+        " updated_at = :now WHERE ticket_id = :ticket_id RETURNING *",
+        params, write=True,
+    )
 
 
 def set_card_ts(item_id: int, ts: str) -> None:
@@ -373,6 +411,15 @@ def decide(item_id: int, status: str, decision: str) -> None:
     )
 
 
+def hold(item_id: int, wake_at: datetime, decision: str) -> None:
+    """Out of the batches until `wake_at` (naive UTC), then back on top."""
+    store.execute(
+        f"UPDATE {ITEMS} SET status = 'held', decision = :d, wake_at = :w,"
+        " decided_at = :now, updated_at = :now WHERE id = :i",
+        {"d": decision, "w": wake_at, "i": item_id, "now": _now()},
+    )
+
+
 def set_incident(item_id: int, key: str) -> None:
     store.execute(
         f"UPDATE {ITEMS} SET incident_key = :k WHERE id = :i",
@@ -383,7 +430,9 @@ def set_incident(item_id: int, key: str) -> None:
 def carry_forward() -> int:
     """Move every unfinished item from earlier days into today. Returns count.
 
-    Oldest first, so the longest-waiting item gets the lowest new number.
+    Numbers are permanent, so an item keeps its own. Only one that collides
+    with a number already used today (from before numbers were permanent)
+    gets a new one.
     """
     day = today()
     rows = store.query(
@@ -393,11 +442,101 @@ def carry_forward() -> int:
     )
     moved = 0
     for row in rows:
-        updated = store.query(
-            f"UPDATE {ITEMS} SET day = :day, number = {_next_number_sql()},"
-            " card_ts = NULL WHERE id = :id AND day < :day RETURNING id",
-            {"day": day, "id": row["id"]},
-            write=True,
-        )
-        moved += len(updated)
+        for number_sql in ("number", _next_number_sql()):
+            updated = store.query(
+                f"UPDATE {ITEMS} SET day = :day, number = {number_sql},"
+                " card_ts = NULL WHERE id = :id AND day < :day RETURNING id",
+                {"day": day, "id": row["id"]},
+                write=True,
+            )
+            if updated:
+                moved += 1
+                break
     return moved
+
+
+# ---------------------------------------------------------------------------
+# Batches (sprint_batch.py)
+# ---------------------------------------------------------------------------
+
+BATCHES = "vomeos_sprint_batches"
+
+store.register_table(
+    BATCHES,
+    f"""
+    CREATE TABLE IF NOT EXISTS {BATCHES} (
+        id             SERIAL PRIMARY KEY,
+        channel        VARCHAR,
+        ts             VARCHAR,
+        kind           VARCHAR,
+        -- item id -> hash of the draft as shown. `send ready` sends only
+        -- what Sam was shown, unchanged.
+        shown          JSONB,
+        ready          JSONB,
+        posted_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+        superseded_at  TIMESTAMP
+    )
+    """,
+    (f"CREATE INDEX IF NOT EXISTS {BATCHES}_ts_idx ON {BATCHES} (ts)",),
+)
+
+
+def batches_ready() -> bool:
+    return store.ensure_table(BATCHES)
+
+
+def _decode_batch(row: dict) -> dict:
+    for key in ("shown", "ready"):
+        value = row.get(key)
+        if isinstance(value, str):
+            try:
+                row[key] = json.loads(value)
+            except ValueError:
+                row[key] = {}
+        elif value is None:
+            row[key] = {}
+    return row
+
+
+def start_batch(kind: str) -> int:
+    """Reserve the batch number before posting, so the message can say it."""
+    rows = store.query(
+        f"INSERT INTO {BATCHES} (kind, posted_at) VALUES (:k, :now)"
+        " RETURNING id",
+        {"k": kind, "now": _now()}, write=True,
+    )
+    return int(rows[0]["id"]) if rows else 0
+
+
+def finish_batch(batch_id: int, channel: str, ts: str, shown: dict,
+                 ready: dict) -> None:
+    store.execute(
+        f"UPDATE {BATCHES} SET channel = :c, ts = :ts,"
+        " shown = CAST(:s AS JSONB), ready = CAST(:r AS JSONB),"
+        " posted_at = :now WHERE id = :i",
+        {"c": channel, "ts": ts, "s": json.dumps(shown),
+         "r": json.dumps(ready), "now": _now(), "i": batch_id},
+    )
+
+
+def latest_batch() -> dict:
+    rows = store.query(
+        f"SELECT * FROM {BATCHES} WHERE ts IS NOT NULL"
+        " ORDER BY id DESC LIMIT 1"
+    )
+    return _decode_batch(rows[0]) if rows else {}
+
+
+def batch_for_thread(ts: str) -> dict:
+    if not ts:
+        return {}
+    rows = store.query(f"SELECT * FROM {BATCHES} WHERE ts = :ts",
+                       {"ts": ts})
+    return _decode_batch(rows[0]) if rows else {}
+
+
+def mark_superseded(batch_id: int) -> None:
+    store.execute(
+        f"UPDATE {BATCHES} SET superseded_at = :now WHERE id = :i",
+        {"now": _now(), "i": batch_id},
+    )

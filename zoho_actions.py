@@ -131,6 +131,8 @@ def recipients(ticket_id: str) -> dict:
         "cc": cc,
         "first_name": first_name(author, to),
         "thread_id": str(latest.get("id") or ""),
+        # When the customer last wrote: the age a batch shows.
+        "received_at": str(latest.get("createdTime") or ""),
     }
 
 

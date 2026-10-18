@@ -5,11 +5,21 @@ The daily support sprint, run as one Slack thread in #support-sprints.
 
 WHAT SAM SEES
 -------------
-One thread per business day. A card arrives in it as each ticket is triaged
-(shadow_triage), and at 10:00, 13:00, 16:00 and 19:00 the agent posts the
-complete current list: what needs Sam, what is held, what waits on a release.
-Item numbers stay fixed all day. An incident breaks the schedule with an
-immediate mention.
+Batches (sprint_batch.py, since 2026-10-18): one message holding everything
+that needs him, every reply in full in its thread. Item numbers are
+permanent, so a command works in any batch thread, and in the older day
+threads. An incident breaks the schedule with an immediate mention. The day
+thread with a card per ticket remains behind SPRINT_PER_TICKET_CARDS.
+
+BATCH COMMANDS (fast path, never the model)
+-------------------------------------------
+    send ready [except 4 7]   every reply shown READY in THIS batch, still
+                              exactly as shown, and nothing newer from the
+                              customer
+    next                      a batch of what this one did not show
+    catch me up               a fresh batch of everything
+    clear the queue           triage every untriaged ticket, 25 at a time
+    hold 4 till fri           back on top of the first batch after Friday 8am
 
 TALKING TO IT
 -------------
@@ -50,7 +60,7 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import sprint_store
 from vomeos import store
@@ -265,6 +275,12 @@ def render_card(item: dict, release: dict | None = None) -> str:
 
 
 def post_card(item: dict, release: dict | None = None) -> str:
+    """A card per ticket, only behind SPRINT_PER_TICKET_CARDS. With batches
+    the item waits for the next batch instead of trickling into a thread."""
+    import sprint_batch
+
+    if not sprint_batch.cards_enabled():
+        return ""
     thread = ensure_thread()
     if not thread:
         return ""
@@ -285,7 +301,11 @@ def announce_incident(item: dict, incident: dict) -> bool:
     )
     if not rows and store.usable():
         return False
-    thread = ensure_thread()
+    import sprint_batch
+
+    # With batches there is no day thread: the incident is its own message,
+    # the one thing allowed to interrupt.
+    thread = ensure_thread() if sprint_batch.cards_enabled() else ""
     mention = " ".join(f"<@{r}>" for r in reviewers())
     tickets = ", ".join(f"#{n}" for n in incident.get("same_as") or [])
     sentry = incident.get("sentry_issue")
@@ -448,6 +468,14 @@ def parse(text: str) -> list[dict]:
             commands.append({"verb": match.group(1).lower(),
                              "numbers": [int(match.group(2))], "arg": rest})
             break
+        match = re.match(
+            r"^hold\s+([\d,\s\-and]+?)\s+(?:till|until|to)\s+(\w+)\s*$",
+            line, re.IGNORECASE)
+        if match:
+            commands.append({"verb": "hold",
+                             "numbers": _numbers(match.group(1)),
+                             "arg": match.group(2).lower()})
+            continue
         match = re.match(r"^route\s+([\d,\s\-and]+?)\s+to\s+(\w+)\s*$", line,
                          re.IGNORECASE)
         if match:
@@ -531,16 +559,25 @@ def handle_command(message: dict) -> dict:
     )
     if not claimed and store.usable():
         return {"status": "duplicate"}
+    batch = sprint_store.batch_for_thread(thread) \
+        if sprint_store.batches_ready() else {}
     day = _day_for_thread(thread)
-    if day is None:
+    if day is None and not batch:
         return {"status": "not a sprint thread"}
+    day = day or sprint_store.today()
 
     text = message.get("text") or ""
     _record_turn(thread, message.get("ts") or "", "sam", text, None)
 
-    lesson_reply = _lesson_command(text)
-    commands = parse_strict(text) if lesson_reply is None else None
-    if lesson_reply is not None:
+    batch_reply = _batch_command(text, thread, batch,
+                                 message.get("ts") or "")
+    lesson_reply = _lesson_command(text) if batch_reply is None else None
+    commands = parse_strict(text) \
+        if batch_reply is None and lesson_reply is None else None
+    if batch_reply is not None:
+        reply, focus, outcome = batch_reply, None, {
+            "status": "ok", "results": [], "path": "batch"}
+    elif lesson_reply is not None:
         reply, focus, outcome = lesson_reply, None, {
             "status": "ok", "results": [], "path": "lessons"}
     elif commands is not None:
@@ -683,13 +720,117 @@ def _lesson_command(text: str) -> str | None:
     return None
 
 
+_SEND_READY = re.compile(
+    r"^\s*send\s+(?:all\s+)?(?:the\s+)?ready(?:\s+ones)?"
+    r"(?:\s*,?\s*(?:except|but\s+not|but)\s+(?P<ex>[\d,\s\-and]+))?"
+    r"\s*[.!]?\s*$", re.I)
+_NEXT = re.compile(r"^\s*(next|next batch|more)\s*[.!?]?\s*$", re.I)
+_CATCH_UP = re.compile(
+    r"^\s*(catch me up|batch|new batch|fresh batch|refresh)\s*[.!?]?\s*$",
+    re.I)
+_CLEAR = re.compile(
+    r"^\s*clear(?:\s+the)?(?:\s+(?:queue|pipeline|backlog))?\s*[.!]?\s*$",
+    re.I)
+
+
+def _batch_command(text: str, thread: str, batch: dict,
+                   message_ts: str) -> str | None:
+    """`send ready`, `next`, `catch me up`, `clear the queue`. None when
+    the message is none of them."""
+    import sprint_batch
+
+    match = _SEND_READY.match(text or "")
+    if match:
+        if not batch:
+            return ("Say `send ready` in a batch's thread, so I send exactly "
+                    "the replies that batch showed you.")
+        return send_ready(batch, set(_numbers(match.group("ex") or "")))
+    if _NEXT.match(text or ""):
+        shown = {int(k) for k in (batch.get("shown") or {})}
+        result = sprint_batch.run_batch("next", exclude=shown,
+                                        reply_thread="")
+        return _batch_result(result)
+    if _CATCH_UP.match(text or ""):
+        return _batch_result(sprint_batch.run_batch("catch_up"))
+    if _CLEAR.match(text or ""):
+        return sprint_batch.start_clear(message_ts, thread)
+    return None
+
+
+def _batch_result(result: dict) -> str:
+    if result.get("status") != "ok":
+        return f"No batch posted ({result.get('status')})."
+    more = result.get("more") or 0
+    return (f"Posted batch {result.get('batch')} in the channel: "
+            f"{result.get('shown')} need you"
+            + (f", {more} more after those." if more else "."))
+
+
+def send_ready(batch: dict, except_numbers: set) -> str:
+    """Send every reply this batch showed as ready, exactly as shown.
+
+    A reply that changed after the batch was posted (an edit, a redraft, a
+    new customer message) is not sent: Sam approved what he read, not what
+    it became. _send still checks for a newer customer message.
+    """
+    ready = batch.get("ready") or {}
+    if not ready:
+        return "This batch had no replies ready to send."
+    results = []
+    for item_id, shown_hash in ready.items():
+        item = sprint_store.get_item(int(item_id))
+        if not item:
+            continue
+        n = item.get("number")
+        if n in except_numbers:
+            results.append(f"*{n}.* left out, as you asked.")
+            continue
+        import sprint_batch
+
+        if sprint_batch.draft_hash(item.get("draft")) != shown_hash:
+            results.append(f"*{n}.* changed since this batch, so not sent. "
+                           f"Read it and say `send {n}`.")
+            continue
+        try:
+            results.append(_send(item))
+        except Exception as exc:
+            results.append(f"*{n}.* failed: {exc}")
+    return "\n".join(results) or "Nothing to send."
+
+
+def _wake_at(word: str):
+    """8am Montreal on the day Sam named, as naive UTC. None if unknown.
+
+    No day: the next weekday morning.
+    """
+    names = {"mon": 0, "monday": 0, "tue": 1, "tues": 1, "tuesday": 1,
+             "wed": 2, "wednesday": 2, "thu": 3, "thur": 3, "thurs": 3,
+             "thursday": 3, "fri": 4, "friday": 4, "sat": 5, "saturday": 5,
+             "sun": 6, "sunday": 6}
+    today = datetime.now(sprint_store.ZONE)
+    word = (word or "").strip().lower()
+    if not word:
+        days = 1
+        while (today + timedelta(days=days)).weekday() >= 5:
+            days += 1
+    elif word == "tomorrow":
+        days = 1
+    elif word in names:
+        days = (names[word] - today.weekday()) % 7 or 7
+    else:
+        return None
+    wake = (today + timedelta(days=days)).replace(hour=8, minute=0,
+                                                  second=0, microsecond=0)
+    return wake.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 def _run_commands(commands: list[dict], day) -> list[str]:
     results = []
     for command in commands:
         for number in command["numbers"]:
-            item = sprint_store.by_number(day, number)
+            item = sprint_store.by_number(number)
             if not item:
-                results.append(f"*{number}.* no such item in this thread.")
+                results.append(f"*{number}.* no such item.")
                 continue
             try:
                 results.append(_execute(command, item))
@@ -911,7 +1052,7 @@ def converse(text: str, day, thread: str) -> tuple[str, object, list[str]]:
     """
     from vomeos import run_agent
 
-    items = sprint_store.items_for_day(day)
+    items = sprint_store.working_set()
     turns = _turns(thread)
     focus_before = _last_focus(turns[:-1])
     knowledge = "No product knowledge search was run."
@@ -958,7 +1099,7 @@ def converse(text: str, day, thread: str) -> tuple[str, object, list[str]]:
         number = action.get("number")
         item = by_number.get(number)
         if not item:
-            results.append(f"_Skipped {verb} {number}: no such item today._")
+            results.append(f"_Skipped {verb} {number}: no such item._")
             continue
         if verb == "send":
             if number not in sendable:
@@ -1023,8 +1164,15 @@ def _execute(command: dict, item: dict) -> str:
     if verb == "send":
         return _send(item)
     if verb == "hold":
-        sprint_store.decide(item["id"], sprint_store.HELD, "held by Sam")
-        return f"*{n}.* held. It carries to tomorrow."
+        wake = _wake_at(command.get("arg") or "")
+        if wake is None:
+            return (f"*{n}.* not held: I did not understand "
+                    f"\"{command.get('arg')}\". Say `hold {n} till fri`.")
+        local = wake.replace(tzinfo=timezone.utc).astimezone(
+            sprint_store.ZONE)
+        when = f"{local:%A} {local:%b} {local.day}"
+        sprint_store.hold(item["id"], wake, f"held by Sam until {when}")
+        return f"*{n}.* held. It comes back in the first batch after {when}."
     if verb == "done":
         sprint_store.decide(item["id"], sprint_store.DONE, "done by Sam")
         return f"*{n}.* done."

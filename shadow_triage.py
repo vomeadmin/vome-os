@@ -323,7 +323,7 @@ def handle(message: dict) -> dict:
 
 
 def _handle(ticket_id: str, reason: str, force: bool = False,
-            release: dict | None = None) -> dict:
+            release: dict | None = None, ignore_cap: bool = False) -> dict:
     """`release` is the release state when the caller already knows it.
 
     The release watcher passes the fix it just proved live, so a second
@@ -346,7 +346,8 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
             and existing.get("last_thread_id") == thread_id
             and existing.get("status") in sprint_store.CARRIES):
         return {"status": "skipped", "reason": "already triaged"}
-    if not force and _triaged_today() >= daily_cap():
+    # Clear mode (Sam asked for the whole queue) is not held to the cap.
+    if not force and not ignore_cap and _triaged_today() >= daily_cap():
         return {"status": "skipped", "reason": "daily cap reached"}
 
     import sprint

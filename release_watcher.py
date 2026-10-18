@@ -684,9 +684,19 @@ def _post(text: str) -> bool:
 
     The first live release posted to the channel itself, so each fix showed
     up as its own stray thread away from the sprint.
+
+    With batches (the default since 2026-10-18) nothing is posted: the next
+    batch carries the resolution drafts as ready to send, the fixes still
+    waiting, and any failed check. True means "remembered as told".
     """
     from slack_sdk import WebClient
     from slack_sdk.errors import SlackApiError
+
+    import sprint_batch
+
+    if not sprint_batch.cards_enabled():
+        print(f"[RELEASE] for the next batch: {text.splitlines()[0]}")
+        return True
 
     try:
         import sprint_thread

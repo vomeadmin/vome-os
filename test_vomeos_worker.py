@@ -398,8 +398,12 @@ ADDED_SINCE = {
     # Every 15 minutes, unclaimed for the same reason. Its idempotency is the
     # per-fix alert state in vomeos_release_fixes.
     "support.release_watcher": ("*/15 * * * *", "support", CLAIM_NONE),
-    # Four a day on weekdays. Skips itself within 20 minutes of a post.
-    "support.sprint_update": ("0 10,13,16,19 * * 1-5", "support", CLAIM_NONE),
+    # Sprint batches (replaced support.sprint_update on 2026-10-18). An
+    # unchanged batch posts one line, so a double run is cheap.
+    "support.sprint_batch": ("0 9,13,17 * * 1-5", "support", CLAIM_NONE),
+    "support.sprint_batch_weekend": ("0 11 * * 0,6", "support", CLAIM_NONE),
+    # Per-ticket leases are its idempotency.
+    "support.queue_sweep": ("*/30 * * * *", "support", CLAIM_NONE),
     "support.autonomy_report": ("30 9 * * mon", "support", CLAIM_WEEKLY),
 }
 

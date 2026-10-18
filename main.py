@@ -51,6 +51,7 @@ from field_feedback import handle_field_feedback
 from on_prod_handler import handle_on_prod
 from release_watcher import run_release_watcher
 import shadow_triage
+import sprint_batch
 import sprint_thread
 from code_access_monitor import check_code_access as run_code_access_check
 from sentry_handler import (
@@ -355,13 +356,30 @@ _scheduler.add_job(
     max_instances=1,
 )
 
-# Sprint thread update at 10, 13, 16 and 19 on weekdays. Mirrors
-# support.sprint_update.
+# Sprint batches: weekdays 9, 13, 17; weekends 11. Mirrors
+# support.sprint_batch and support.sprint_batch_weekend.
 _scheduler.add_job(
-    sprint_thread.run_sprint_update,
-    CronTrigger(day_of_week="mon-fri", hour="10,13,16,19", minute=0,
+    sprint_batch.run_scheduled_batch,
+    CronTrigger(day_of_week="mon-fri", hour="9,13,17", minute=0,
                 timezone="America/Montreal"),
     misfire_grace_time=900,
+    coalesce=True,
+    max_instances=1,
+)
+_scheduler.add_job(
+    sprint_batch.run_weekend_batch,
+    CronTrigger(day_of_week="sat,sun", hour=11, minute=0,
+                timezone="America/Montreal"),
+    misfire_grace_time=900,
+    coalesce=True,
+    max_instances=1,
+)
+
+# Untriaged open tickets, every 30 minutes. Mirrors support.queue_sweep.
+_scheduler.add_job(
+    sprint_batch.run_queue_sweep,
+    CronTrigger(minute="*/30", timezone="America/Montreal"),
+    misfire_grace_time=600,
     coalesce=True,
     max_instances=1,
 )
