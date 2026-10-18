@@ -22,8 +22,9 @@ THE LADDER (each rung can stop it, and usually does)
    dependencies, CI and tests. The diff must apply to the dev branch as it
    is now.
 5. A pull request opens into `development` (backend) or `develop` (web).
-   It is never merged by an agent: the merge is OnlyG's (backend) or
-   Sanjay's (frontend), and the Merge Owner field says so.
+   It is never merged by an agent: Sam merges agent PRs into the dev
+   branch (they carry no migrations), and the Merge Owner field says so.
+   Production: Sam deploys web, OnlyG merges core to master.
 
 Then, in Agent Fixes: a parent task (the fix, no Zoho link, "Fix PR:" in its
 description) and a child per ticket (with the Zoho link). Once the pull
@@ -59,7 +60,10 @@ TAG_AGENT = "d4cf0a1c-7f21-41c5-8b8b-f00ebb459552"
 FIELD_TYPE = "e0e439f5-397d-432d-addd-e90fbf50cd30"
 TYPE_BUG = "d9c82e67-c46b-48d1-95f7-9c1f5b2fc2df"
 
-MERGE_OWNERS = {"bitbucket": 49257687, "github": 4434086}  # OnlyG, Sanjay
+# Sam merges every agent PR into the dev branch (2026-10-18): they never
+# carry a migration (patch safety refuses one), so no backend merge needs
+# OnlyG. Production stays split: Sam deploys web, OnlyG merges core.
+MERGE_OWNER = 3691763  # Sam
 
 _PR_LINE = re.compile(r"Fix PR:\s*(\S+)")
 
@@ -293,7 +297,7 @@ def _clickup(method: str, path: str, body: dict | None = None) -> dict:
 def _file_tasks(ticket_number, account, card, repo, pr_url, zoho_url):
     code = card.get("code_check") or {}
     summary = (card.get("live_question") or "").strip()[:90]
-    owner = MERGE_OWNERS.get(repo.host, MERGE_OWNERS["bitbucket"])
+    owner = MERGE_OWNER
     description = "\n".join([
         "**Agent fix proposed from a customer ticket.** Not reviewed by a "
         "person. Merge into the dev branch only after review.",

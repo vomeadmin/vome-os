@@ -69,6 +69,9 @@ FIELD_MERGE_OWNER = "12682083-5a03-4f27-a6b6-5c716aa5dd73"
 
 CLICKUP_USER_ONLYG = 49257687
 CLICKUP_USER_SANJAY = 4434086
+# Sam merges every agent PR into the dev branch (2026-10-18): agent PRs never
+# carry a migration, so none needs OnlyG at that step.
+CLICKUP_USER_SAM = 3691763
 
 PRIORITY = {"s1": 1, "s2": 2, "s3": 3}
 
@@ -227,10 +230,7 @@ def _create(issue: dict, analysis: dict, pull_request: dict,
         {"id": FIELD_TAGS, "value": [TAG_AGENT]},
     ]
     if pull_request.get("opened"):
-        owner = (
-            CLICKUP_USER_SANJAY if issue.get("stack") == "frontend"
-            else CLICKUP_USER_ONLYG
-        )
+        owner = CLICKUP_USER_SAM
         custom_fields.append(
             {"id": FIELD_MERGE_OWNER, "value": {"add": [owner]}}
         )

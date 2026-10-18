@@ -259,8 +259,10 @@ def _star(item: dict) -> str:
     return ":star: " if item.get("important") else ""
 
 
-def _merge_owner(pr_url: str) -> str:
-    return "OnlyG" if "bitbucket" in (pr_url or "") else "Sanjay"
+def _after_merge(pr_url: str) -> str:
+    """Who takes it to production once Sam merges it into the dev branch."""
+    return ("OnlyG merges core to production" if "bitbucket" in (pr_url or "")
+            else "you deploy web to production")
 
 
 def _index_line(item: dict, resolutions: set, now: datetime) -> str:
@@ -300,9 +302,9 @@ def detail(item: dict, resolutions: set, now: datetime) -> str:
     if item.get("fix_pr"):
         # The agent opened a fix for this ticket. The client hears about it
         # when the release watcher proves it live, as a resolution here.
-        lines.append(f":hammer_and_wrench: Fix PR opened, waiting on "
-                     f"{_merge_owner(item['fix_pr'])} to merge: "
-                     f"{item['fix_pr']}")
+        lines.append(f":hammer_and_wrench: Fix PR opened, waiting on your "
+                     f"merge into the dev branch (then "
+                     f"{_after_merge(item['fix_pr'])}): {item['fix_pr']}")
     if kind in (READY, FIX):
         lines.append(_recipients(item))
         if kind == FIX:

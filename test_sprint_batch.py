@@ -204,11 +204,13 @@ def test_an_open_fix_pr_is_shown_with_who_merges_it():
     top, parts = _render([item], prs_open=1)
     assert "fix PR open" in top
     assert "1 agent fix PR(s) waiting on a merge" in top
-    assert "waiting on Sanjay to merge: https://github.com" in parts[0]
+    # Sam merges agent PRs into the dev branch; production differs by repo.
+    assert "waiting on your merge into the dev branch (then you deploy web" \
+        in parts[0]
     core = _item(2, fix_pr="https://bitbucket.org/vomedjango/x/"
                            "pull-requests/9")
     _, parts = _render([core])
-    assert "waiting on OnlyG to merge" in parts[0]
+    assert "(then OnlyG merges core to production)" in parts[0]
 
 
 QUESTION = {"verdict": "design_question", "confidence": "medium",
@@ -251,7 +253,7 @@ def test_fix_command_opens_a_pr_on_sams_word(monkeypatch):
                                  item)
     assert calls == [{"sam_approved": True}]
     assert stored == [(item["id"], "https://bitbucket.org/v/x/pull/3")]
-    assert "waiting on OnlyG to merge" in out
+    assert "Merge it into the dev branch, then OnlyG merges core" in out
 
 
 def test_fix_that_cannot_be_made_says_why():

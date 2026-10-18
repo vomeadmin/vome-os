@@ -1468,10 +1468,12 @@ def _fix(item: dict) -> str:
         zoho_actions.ticket_url(item.get("ticket_id")), sam_approved=True)
     if out.get("outcome") == "pr_opened":
         sprint_store.set_fix_pr(item["id"], out["pr_url"])
-        owner = "OnlyG" if "bitbucket" in out["pr_url"] else "Sanjay"
-        return (f"*{n}.* fix PR opened: {out['pr_url']} (waiting on {owner} "
-                "to merge). Once it is proven live, the resolution comes "
-                "back to you here, ready to send.")
+        then = ("OnlyG merges core to production"
+                if "bitbucket" in out["pr_url"]
+                else "you deploy web to production")
+        return (f"*{n}.* fix PR opened: {out['pr_url']}. Merge it into the "
+                f"dev branch, then {then}. Once it is proven live, the "
+                "resolution comes back to you here, ready to send.")
     return (f"*{n}.* no PR: {out.get('reason') or out.get('outcome')}. "
             f"`route {n} to onlyg` or `route {n} to sanjay` hands it to an "
             "engineer instead.")
