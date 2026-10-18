@@ -182,6 +182,13 @@ def env(jobs, monkeypatch):
     monkeypatch.setattr(jobs, "_local_studio", lambda: "")
     state.research = []
     state.captured = []
+    monkeypatch.setattr(jobs.video_marketing, 'playbook',
+                        lambda strategy=False: 'PLAYBOOK' +
+                        (' +COMPETITIVE' if strategy else ''))
+    monkeypatch.setattr(jobs.video_marketing, 'website',
+                        lambda topic, limit=3: 'WEBSITE')
+    monkeypatch.setattr(jobs.video_marketing, 'labels',
+                        lambda topic, limit=12: 'LABELS')
     state.real_capture = jobs.capture_lessons
     monkeypatch.setattr(jobs.video_lessons, 'render_for',
                         lambda role: '- [1] Say volunteer.')
@@ -335,7 +342,15 @@ def test_strategist_then_director_with_the_right_context(jobs, env,
     assert env.research == [SCOUT["queries"]]
     s = agents.context("content_strategist")
     assert set(s) == {"feature_name", "faq_text", "brief", "prior_videos",
-                      "scout", "related_articles", "house_lessons"}
+                      "scout", "related_articles", "house_lessons",
+                      "website_positioning", "marketing_playbook"}
+    # The team knows how Vome sells itself, not only how it works; only the
+    # strategist sees the competitive landscape.
+    assert s["marketing_playbook"] == "PLAYBOOK +COMPETITIVE"
+    assert s["website_positioning"] == "WEBSITE"
+    d0 = agents.context("creative_director")
+    assert d0["marketing_playbook"] == "PLAYBOOK"
+    assert d0["website_positioning"] == "WEBSITE"
     # Every writing role is given what the team has been taught.
     assert s["house_lessons"] == "- [1] Say volunteer."
     assert agents.context("creative_director")["house_lessons"]
@@ -492,7 +507,8 @@ def test_copywriter_writes_the_concept_in_its_format(jobs, env, monkeypatch):
     assert json.loads(c["positioning"]) == POSITIONING
     assert json.loads(c["storyboard_contract"]) == REVEAL_CONTRACT
     e = agents.context("brand_editor")
-    assert set(e) == {"storyboard", "concept", "positioning", "contract", "house_lessons"}
+    assert set(e) == {"storyboard", "concept", "positioning", "contract",
+                      "marketing_playbook", "product_labels", "house_lessons"}
     assert json.loads(e["storyboard"])["format"] == "reveal"
     # What Studio validated is the edited storyboard, in the concept's format.
     sent = env.studio.validated[0]

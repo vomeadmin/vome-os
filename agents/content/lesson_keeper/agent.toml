@@ -6,13 +6,17 @@ reports_to = "sam"
 hired = "2026-10-17"
 
 [model]
-# Senior. A lesson it keeps shapes every later video, by every agent on the
+# A top tier. A lesson it keeps shapes every later video, by every agent on the
 # team. Mistaking a one-off edit ("make line 3 shorter") for standing taste
 # would quietly bend all future work; missing real taste means the person
 # repeats themselves. It runs only when someone gives feedback, so the cost
 # is a handful of calls a week.
-tier = "senior"
-max_tokens = 6000
+# Premium tier (Opus 5.5), Sammy 2026-10-18: the current Opus for
+# writing that carries the company's name. Opus 5.5 defaults to
+# medium effort, so high is set explicitly.
+tier = "premium"
+effort = "high"
+max_tokens = 20000
 
 [job]
 charter = "charter.md"
@@ -38,7 +42,7 @@ output = ["json_shape", "non_empty"]
 client_facing = false
 
 [limits]
-timeout_seconds = 120
+timeout_seconds = 300
 max_retries = 2
 
 [approval]

@@ -17,11 +17,13 @@ variables, with defaults that work out of the box. No kernel module reads
 
 MODEL TIERS
 -----------
-An agent manifest names a tier, never a model. Three of them:
+An agent manifest names a tier, never a model. The original three:
 
     fast      lightweight classifiers where latency and cost beat reasoning
     standard  the default: classification, drafting, review
     senior    judgment calls, governance, anything expensive to unwind
+
+and three newer ones (current, premium, executive), defined below the bench.
 
 Why a tier and not a model ID: model IDs go stale. A pinned snapshot was once
 hardcoded at ~18 call sites in the support app, Anthropic retired it, and
@@ -57,12 +59,33 @@ SKILLS_DIR = HOME / "skills"
 MODEL_FAST = os.environ.get("VOMEOS_MODEL_FAST", "claude-haiku-4-5")
 MODEL_STANDARD = os.environ.get("VOMEOS_MODEL_STANDARD", "claude-sonnet-5")
 MODEL_SENIOR = os.environ.get("VOMEOS_MODEL_SENIOR", "claude-opus-5")
+# Three tiers added for the video marketing team (2026-10-18), so moving it
+# to newer models did not move every agent in the support app with it.
+#   current    the current Sonnet, for mechanical steps that still read
+#   premium    the current Opus, for writing and editing that carries the
+#              company's name
+#   executive  the most capable model, for strategy every later step builds
+#              on; slower and dearer, so used sparingly
+MODEL_CURRENT = os.environ.get("VOMEOS_MODEL_CURRENT", "claude-sonnet-5-5")
+MODEL_PREMIUM = os.environ.get("VOMEOS_MODEL_PREMIUM", "claude-opus-5-5")
+MODEL_EXECUTIVE = os.environ.get("VOMEOS_MODEL_EXECUTIVE", "claude-fable-5-1")
 
 TIERS: dict[str, str] = {
     "fast": MODEL_FAST,
     "standard": MODEL_STANDARD,
     "senior": MODEL_SENIOR,
+    "current": MODEL_CURRENT,
+    "premium": MODEL_PREMIUM,
+    "executive": MODEL_EXECUTIVE,
 }
+
+# Models that accept the server-side refusal fallback. A safety classifier
+# can decline a legitimate request on these; with the fallback the API
+# reruns it on a model that can answer instead of the run simply failing.
+FALLBACK_MODELS = frozenset({
+    "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5",
+    "claude-sonnet-5-5",
+})
 
 VALID_TIERS = tuple(TIERS)
 

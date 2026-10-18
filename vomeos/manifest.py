@@ -66,11 +66,18 @@ class Identity:
         return f"{self.division}.{self.name}"
 
 
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+
 @dataclass(frozen=True)
 class ModelSpec:
     tier: str = "standard"
     max_tokens: int = 1024
     temperature: float | None = None
+    # How hard the model thinks. Newer models think on every call and take
+    # this instead of a thinking budget; Opus 5.5 defaults to "medium", so a
+    # judgment-heavy agent says what it needs. None leaves the model default.
+    effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -183,12 +190,14 @@ def parse_manifest(raw: dict, directory: Path) -> AgentManifest:
 
     model_raw = _table(raw, "model")
     temperature = model_raw.get("temperature")
+    effort = str(model_raw.get("effort") or "").strip().lower()
     model = ModelSpec(
         tier=str(model_raw.get("tier") or "standard").strip(),
         max_tokens=int(model_raw.get("max_tokens") or 1024),
         temperature=(
             float(temperature) if temperature is not None else None
         ),
+        effort=effort if effort in EFFORT_LEVELS else None,
     )
 
     job_raw = _table(raw, "job")

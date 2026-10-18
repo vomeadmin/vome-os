@@ -6,7 +6,7 @@ reports_to = "sam"
 hired = "2026-10-17"
 
 [model]
-# Senior tier, for the same reason as content_producer: the hard part is
+# A top tier, for the same reason as content_producer: the hard part is
 # judgment, not volume. Deciding what is genuinely new about a feature (as
 # opposed to what Vome already did) and which single claim the video makes
 # is the decision every later step inherits. A cheaper model gets it
@@ -15,10 +15,14 @@ hired = "2026-10-17"
 #
 # It runs once per video thread. A few briefs a week is not a cost worth
 # optimising against the risk.
-tier = "senior"
+# Executive tier (Fable 5.1), Sammy 2026-10-18: the strategy every
+# later step builds on gets the most capable model. It thinks
+# for minutes on hard briefs, hence the long timeout.
+tier = "executive"
+effort = "high"
 # The brief is a small JSON object, but the senior model reasons first and
 # that counts against this cap too.
-max_tokens = 12000
+max_tokens = 32000
 
 [job]
 charter = "charter.md"
@@ -44,6 +48,13 @@ requires_context = [
     # lesson_keeper and read at request time. Required so no run can
     # ignore it.
     "house_lessons",
+    # Vome's Product Marketing Playbook, read live from ClickUp:
+    # positioning, the two ICPs, prospect language, messaging
+    # framework and brand voice (Sammy, 2026-10-18).
+    "marketing_playbook",
+    # How the website describes this area of the product, from the
+    # landing page's own copy.
+    "website_positioning",
 ]
 output = "json"
 
@@ -58,7 +69,7 @@ output = ["json_shape", "non_empty"]
 client_facing = false
 
 [limits]
-timeout_seconds = 180
+timeout_seconds = 900
 max_retries = 2
 
 [approval]

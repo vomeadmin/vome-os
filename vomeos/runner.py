@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 import anthropic
 
 from vomeos import images as image_tools
-from vomeos import tiers, trace
+from vomeos import config, tiers, trace
 from vomeos.composer import compose_system_prompt, render_context
 from vomeos.guards import GuardResult, run_guards
 from vomeos.manifest import AgentManifest
@@ -149,6 +149,15 @@ def _call_model(
             }
             if send_temperature:
                 kwargs["temperature"] = manifest.model.temperature
+            if manifest.model.effort:
+                kwargs["output_config"] = {"effort": manifest.model.effort}
+            if model in config.FALLBACK_MODELS:
+                # A safety classifier can decline a legitimate request on
+                # these models; the server then reruns it on a model that
+                # can answer, inside the same call, instead of failing it.
+                kwargs["extra_headers"] = {
+                    "anthropic-beta": "server-side-fallback-2026-07-01"}
+                kwargs["extra_body"] = {"fallbacks": "default"}
             if manifest.model.max_tokens > STREAM_ABOVE_TOKENS:
                 with _client.messages.stream(**kwargs) as stream:
                     response = stream.get_final_message()

@@ -41,6 +41,7 @@ import time
 import slack
 import video_concepts
 import video_lessons
+import video_marketing
 import video_threads
 
 # Local checkout, used only when Studio is not reachable over HTTP. No
@@ -666,7 +667,28 @@ def _with_lessons(agent: str, context: dict) -> dict:
     role = agent.split(".")[-1]
     if role in video_lessons.ROLES and "house_lessons" not in context:
         context = dict(context, house_lessons=video_lessons.render_for(role))
+    # How Vome sells itself (Sammy, 2026-10-18: "all the context should live
+    # within the marketing team"). The strategist also gets the competitive
+    # landscape, which is for deciding what to claim, not for the script.
+    if role in video_lessons.ROLES and "marketing_playbook" not in context:
+        context = dict(context, marketing_playbook=video_marketing.playbook(
+            strategy=(role == "content_strategist")))
     return context
+
+
+def _topic(*parts) -> str:
+    """The product area a video is about, as words to look things up by."""
+    out = []
+    for p in parts:
+        if isinstance(p, dict):
+            p = " ".join(str(v) for k, v in p.items()
+                         if k in ("parent_capability", "queries",
+                                  "whats_new", "single_claim", "title",
+                                  "angle", "feature_name"))
+        elif isinstance(p, (list, tuple)):
+            p = " ".join(str(x) for x in p)
+        out.append(str(p or ""))
+    return " ".join(out)
 
 
 def _run(agent: str, context: dict, thread_ts: str):
@@ -777,6 +799,8 @@ def run_concepts(brief: str, row: dict, direction: str = "") -> dict:
         return {"ok": False, "error": err}
     related = _related_articles(scout.get("queries") or [],
                                 exclude_title=feature_name)
+    website = video_marketing.website(
+        _topic(feature_name, scout, direction))
     s_context = {
         "feature_name": feature_name,
         "faq_text": body,
@@ -784,6 +808,7 @@ def run_concepts(brief: str, row: dict, direction: str = "") -> dict:
         "prior_videos": prior_text,
         "scout": json.dumps(scout, indent=2),
         "related_articles": related or "(none found)",
+        "website_positioning": website,
     }
     if direction:
         s_context["direction"] = direction
@@ -805,6 +830,7 @@ def run_concepts(brief: str, row: dict, direction: str = "") -> dict:
         "formats": json.dumps({"formats": catalogue}, indent=2),
         "prior_videos": prior_text,
         "brief": brief,
+        "website_positioning": website,
     }
     if direction:
         context["direction"] = direction
@@ -868,6 +894,8 @@ def _brand_edit(sb: dict, concept: dict, positioning: dict | None,
         "concept": json.dumps(concept, indent=2),
         "positioning": json.dumps(positioning or {}, indent=2),
         "contract": json.dumps(contract, indent=2),
+        "product_labels": video_marketing.labels(
+            _topic(sb.get("feature_name"))),
     }, thread_ts)
     unedited = "so this is the copywriter's draft as written."
     if err:
@@ -934,6 +962,11 @@ def run_content_producer(message: str, row: dict, revise: bool = False,
         "concept": json.dumps(concept, indent=2) if concept else "",
         "positioning": json.dumps(positioning, indent=2) if positioning
         else "",
+        # How the website says it, and the product's own words for it.
+        "website_positioning": video_marketing.website(
+            _topic(title or row.get("feature_name"), positioning, concept)),
+        "product_labels": video_marketing.labels(
+            _topic(title or row.get("feature_name"))),
     }
     fmt = (concept or {}).get("format") or "explainer"
     if revise:

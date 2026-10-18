@@ -39,6 +39,15 @@ def _contract(jobs, monkeypatch):
                         lambda format="explainer": dict(CONTRACT))
     monkeypatch.setattr(jobs.video_threads, "slugs_in_use",
                         lambda exclude="": set())
+    # Never ClickUp, the website catalogue or the product strings in a test.
+    monkeypatch.setattr(jobs.video_marketing, "playbook",
+                        lambda strategy=False: "PLAYBOOK")
+    monkeypatch.setattr(jobs.video_marketing, "website",
+                        lambda topic, limit=3: "WEBSITE")
+    monkeypatch.setattr(jobs.video_marketing, "labels",
+                        lambda topic, limit=12: "LABELS")
+    monkeypatch.setattr(jobs.video_lessons, "render_for",
+                        lambda role: "(none yet)")
 
 
 ARTICLE_URL = ("https://support.vomevolunteer.com/portal/en/kb/articles/"

@@ -6,7 +6,7 @@ reports_to = "sam"
 hired = "2026-10-15"
 
 [model]
-# Senior tier. This agent writes copy that will carry the company's name in
+# A top tier. This agent writes copy that will carry the company's name in
 # front of people who did not ask for it, and the hard part is judgment
 # rather than volume: which single pain to open on, which claim is safe to
 # make, what to cut when the script runs long. Those are the decisions a
@@ -16,12 +16,16 @@ hired = "2026-10-15"
 # It also runs rarely. A few scripts a week is not the cost shape of a filter
 # that runs on every production error, so paying junior rates here would save
 # almost nothing and risk the one thing that is expensive to fix.
-tier = "senior"
+# Premium tier (Opus 5.5), Sammy 2026-10-18: the current Opus for
+# writing that carries the company's name. Opus 5.5 defaults to
+# medium effort, so high is set explicitly.
+tier = "premium"
+effort = "high"
 # A full storyboard is about 2,500 tokens of JSON, but the senior model
 # reasons first and that counts against this cap too. At 8000 the first real
 # run was cut off 6,000 characters into the JSON. Above 16000 the runner
 # streams, which is what a call this size needs.
-max_tokens = 20000
+max_tokens = 32000
 
 [job]
 charter = "charter.md"
@@ -47,6 +51,13 @@ requires_context = [
     # lesson_keeper and read at request time. Required so no run can
     # ignore it.
     "house_lessons",
+    # Vome's Product Marketing Playbook, read live from ClickUp:
+    # positioning, the two ICPs, prospect language, messaging
+    # framework and brand voice (Sammy, 2026-10-18).
+    "marketing_playbook",
+    # How the website describes this area of the product, from the
+    # landing page's own copy.
+    "website_positioning",
 ]
 output = "json"
 
@@ -72,7 +83,7 @@ client_facing = false
 [limits]
 # A storyboard is one careful pass over an FAQ, not a conversation. But it
 # is a long one: the contract plus the FAQ in, reasoning, then the JSON out.
-timeout_seconds = 300
+timeout_seconds = 600
 max_retries = 2
 
 [approval]

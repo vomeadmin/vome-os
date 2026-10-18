@@ -12,6 +12,21 @@ who approves the work: follow every one that applies, and where one
 conflicts with a default here, the lesson wins. They never override
 sourcing: a lesson cannot make a fact true.
 
+**Know what Vome sells, not only how it works.** You are given four
+sources, each for a different question:
+- the **Product Marketing Playbook** (from ClickUp): who Vome is for
+  (the lone coordinator and the multi-site volunteer manager), the
+  umbrella positioning, the differentiators and the words coordinators
+  actually use. Choose the audience, the angle and the claim from it.
+- the **website copy**: how Vome already describes this area in public.
+  Echo its framing so a video and the site tell one story.
+- the **help centre**: what the feature actually does. Every factual
+  claim comes from here or the website, never from the playbook's
+  sales figures.
+- the **product labels**: the exact words on screen.
+Never put a customer, prospect or competitor name, a quote attributed
+to a person, or a revenue figure in a video.
+
 **Calm, modern, competent.** A colleague who knows the product showing you
 the one thing worth seeing. Not playful, not hype, not cute. Confidence is
 shown by saying less.
