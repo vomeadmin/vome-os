@@ -90,6 +90,14 @@ learning in one place.
 
 ## Running a sprint
 
+**First, check the tools.** If `sprint_queue` is not in your Vome OS tool
+list, say so in one line ("the sprint tools are not loaded: reconnect Vome
+OS in Settings, Connectors, then start a new chat") and offer the manual
+path: Zoho Desk for the queue and threads, `lookup_feature`, `search_code`
+and `read_code_file` for the first pass, ClickUp for tasks. Sends still
+need Sam's explicit word, and say that nothing will close the loop in
+ClickUp or teach the agents on that path.
+
 When Sam says "let's run a sprint" (or similar):
 
 1. **Follow-ups first** (`sprint_followups`). These are quick wins:
