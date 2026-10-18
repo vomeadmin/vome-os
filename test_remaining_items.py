@@ -430,3 +430,58 @@ def test_an_unreadable_status_finishes_nothing(monkeypatch, zoho_status):
     assert sprint_batch.sync_handled_elsewhere(
         [_item(1, ticket_id="X")], set()) == 0
     assert decided == []
+
+
+# ---------------------------------------------------------------------------
+# A Zoho hiccup does not end a clear (2026-10-18: "Error -3 while
+# decompressing data" on page 9 of 10 stopped round 2)
+# ---------------------------------------------------------------------------
+
+def test_a_corrupt_page_is_read_again(monkeypatch):
+    import sprint
+
+    calls = []
+    answers = [None, None, {"data": {"data": [{"id": "1"}]}}]
+    monkeypatch.setattr(sprint, "_zoho_desk_call",
+                        lambda name, args: calls.append(name)
+                        or answers.pop(0))
+    monkeypatch.setattr(sprint.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sprint, "_unwrap_mcp_result", lambda r: r)
+    assert sprint._pull_page(800) == [{"id": "1"}]
+    assert len(calls) == 3
+
+
+def test_a_round_retries_before_pausing(monkeypatch):
+    results = [{"status": "queue unreadable", "error": "Error -3"},
+               {"status": "ok", "open": 46, "triaged": 20, "failed": 0,
+                "untriaged": 0}]
+    posts = []
+    monkeypatch.setattr(sprint_batch, "_lease", lambda n, m: True)
+    monkeypatch.setattr(sprint_batch, "triage_untriaged",
+                        lambda *a, **k: results.pop(0))
+    monkeypatch.setattr(sprint_batch.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sprint_batch, "run_batch",
+                        lambda kind, reply_thread="": {"batch": 9})
+    monkeypatch.setattr(sprint_thread, "_post",
+                        lambda text, thread_ts="", **k: posts.append(text))
+    out = sprint_batch.handle_queue_clear({
+        "ts": "1.1", "thread": "9.9", "round": 2,
+        "fresh_since": "2026-10-18T18:59:00"})
+    assert out["batch"] == 9 and posts == []
+
+
+def test_three_failed_reads_pause_and_say_how_to_resume(monkeypatch):
+    posts = []
+    monkeypatch.setattr(sprint_batch, "_lease", lambda n, m: True)
+    monkeypatch.setattr(sprint_batch, "triage_untriaged",
+                        lambda *a, **k: {"status": "queue unreadable",
+                                         "error": "Error -3"})
+    monkeypatch.setattr(sprint_batch.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sprint_thread, "_post",
+                        lambda text, thread_ts="", **k: posts.append(text))
+    sprint_batch.handle_queue_clear({"ts": "1.1", "thread": "9.9",
+                                     "round": 2,
+                                     "fresh_since": "2026-10-18T18:59:00"})
+    assert "Clearing paused" in posts[0]
+    assert "`clear the queue fresh` again" in posts[0]
+    assert "nothing already triaged is redone" in posts[0]

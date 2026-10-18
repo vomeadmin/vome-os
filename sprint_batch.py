@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 from datetime import datetime, timedelta, timezone
 
 import sprint_store
@@ -816,6 +817,36 @@ def sync_handled_elsewhere(items: list[dict], open_ids: set) -> int:
     return finished
 
 
+def _fresh_start(thread: str, now: datetime) -> datetime:
+    """When this thread's unfinished fresh clear began, else `now`.
+
+    Saying `clear the queue fresh` again after a run stopped picks up where
+    it left off: tickets refreshed since the first request are not triaged
+    a second time (2026-10-18, a Zoho read failed after 25 of 46). The
+    request time comes from the conversation record; a run is finished once
+    a clear batch has posted after it.
+    """
+    import sprint_thread
+
+    rows = store.query(
+        f"SELECT text, created_at FROM {sprint_thread.TURNS_TABLE}"
+        " WHERE thread_ts = :t AND role = 'sam' AND created_at >= :since"
+        " ORDER BY created_at",
+        {"t": thread, "since": now - timedelta(hours=6)})
+    done = store.query(f"SELECT MAX(posted_at) AS at FROM "
+                       f"{sprint_store.BATCHES} WHERE kind = 'clear'")
+    done_at = done[0].get("at") if done else None
+    for row in rows:
+        match = sprint_thread._CLEAR.match(row.get("text") or "")
+        at = row.get("created_at")
+        if not (match and match.group("fresh") and isinstance(at, datetime)):
+            continue
+        if isinstance(done_at, datetime) and at <= done_at:
+            continue
+        return at
+    return now
+
+
 def start_clear(message_ts: str, thread: str, fresh: bool = False) -> str:
     """Sam said `clear the queue` (or `clear the queue fresh`)."""
     try:
@@ -823,7 +854,9 @@ def start_clear(message_ts: str, thread: str, fresh: bool = False) -> str:
     except Exception as exc:
         return (f"I could not read the Zoho queue ({exc}), so I cannot "
                 "clear it. Try again in a few minutes.")
-    since = _now()
+    now = _now()
+    since = _fresh_start(thread, now) if fresh else now
+    resumed = fresh and since < now - timedelta(minutes=1)
     todo = [t for t in tickets if _needs_triage(t, since if fresh else None)]
     try:
         from vomeos.worker import enqueue_event
@@ -838,6 +871,11 @@ def start_clear(message_ts: str, thread: str, fresh: bool = False) -> str:
         return ("Every open ticket is already triaged. Posting a fresh "
                 "batch of what needs you now.")
     rounds = -(-len(todo) // BATCH_SIZE)
+    if resumed:
+        return (f"Picking up the fresh run from {_clock(since)}: "
+                f"{len(todo)} ticket(s) left, the ones already done are "
+                f"kept (about {rounds} round(s)). The batch posts when the "
+                "last round is done.")
     if fresh:
         return (f"Triaging all {len(todo)} open ticket(s) again under "
                 f"today's rules, {BATCH_SIZE} per round (about {rounds} "
@@ -866,13 +904,23 @@ def handle_queue_clear(message: dict) -> dict:
         return {"status": "duplicate"}
     fresh_since = _parse_time(message.get("fresh_since")) \
         if message.get("fresh_since") else None
-    result = triage_untriaged(BATCH_SIZE, ignore_cap=True,
-                              fresh_since=fresh_since, pages=CLEAR_PAGES)
     thread = message.get("batch_ts") or message.get("thread") or ""
+    for pause in (0, 30, 90):
+        # A Zoho hiccup is retried here rather than ending the run.
+        if pause:
+            time.sleep(pause)
+        result = triage_untriaged(BATCH_SIZE, ignore_cap=True,
+                                  fresh_since=fresh_since, pages=CLEAR_PAGES)
+        if result.get("status") != "queue unreadable":
+            break
     if result.get("status") != "ok":
+        again = ("`clear the queue fresh`" if fresh_since is not None
+                 else "`clear the queue`")
         sprint_thread._post(
-            f"Clearing stopped: {result.get('status')} "
-            f"({result.get('error') or ''}).", thread_ts=thread)
+            f"Clearing paused: Zoho could not be read after three tries "
+            f"({_short(result.get('error') or result.get('status'), 120)}). "
+            f"Say {again} again in this thread to pick up where it "
+            "stopped; nothing already triaged is redone.", thread_ts=thread)
         return result
     round_number = int(message.get("round") or 1)
     left = result.get("untriaged") or 0

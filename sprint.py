@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import json
 import textwrap
+import time
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
@@ -124,16 +125,25 @@ def _pull_page(offset: int) -> list[dict]:
     tickets in the whole system, which are all long closed, and the open
     queue never appears at all.
     """
-    result = _zoho_desk_call(
-        "ZohoDesk_getTickets",
-        {
-            "query_params": {
-                "limit": PAGE_SIZE,
-                "from": offset,
-                "sortBy": "-recentThread",
-            }
-        },
-    )
+    # Retried: on 2026-10-18 one page of a ten-page read came back as a
+    # corrupt compressed body ("Error -3 while decompressing data") and
+    # stopped a whole queue clear. A second request returns it cleanly.
+    result = None
+    for pause in (0, 2, 6):
+        if pause:
+            time.sleep(pause)
+        result = _zoho_desk_call(
+            "ZohoDesk_getTickets",
+            {
+                "query_params": {
+                    "limit": PAGE_SIZE,
+                    "from": offset,
+                    "sortBy": "-recentThread",
+                }
+            },
+        )
+        if result:
+            break
     if not result:
         from agent import get_last_mcp_error
 

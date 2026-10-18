@@ -389,10 +389,12 @@ def db(monkeypatch):
     monkeypatch.setattr(config, "DATABASE_URL", TEST_DB)
     store.reset()
     for table in (sprint_store.ITEMS, sprint_store.DAYS,
-                  sprint_store.BATCHES, sprint_batch.LEASES):
+                  sprint_store.BATCHES, sprint_batch.LEASES,
+                  sprint_thread.TURNS_TABLE):
         store.execute(f"DROP TABLE IF EXISTS {table}")
     store.reset()
     assert sprint_store.ready() and sprint_store.batches_ready()
+    assert store.ensure_table(sprint_thread.TURNS_TABLE)
     posts = []
 
     def post(text, thread_ts="", channel="", broadcast=False):
@@ -475,3 +477,25 @@ def test_a_lease_is_held_once(db):
     assert sprint_batch._lease("triage:1", 20) is True
     assert sprint_batch._lease("triage:1", 20) is False
     assert sprint_batch._lease("triage:2", 20) is True
+
+
+def test_a_repeated_fresh_clear_resumes_the_unfinished_run(db):
+    start = datetime(2026, 10, 18, 18, 59)
+    for text, at in (("clear the queue fresh", start),
+                     ("what is 4?", start + timedelta(minutes=5)),
+                     ("clear the queue fresh",
+                      start + timedelta(minutes=40))):
+        store.execute(
+            f"INSERT INTO {sprint_thread.TURNS_TABLE} (thread_ts, role,"
+            " text, created_at) VALUES ('T9', 'sam', :x, :at)",
+            {"x": text, "at": at})
+    now = start + timedelta(minutes=41)
+    assert sprint_batch._fresh_start("T9", now) == start
+    # Once a clear batch has posted, the next fresh request starts anew.
+    store.execute(
+        f"INSERT INTO {sprint_store.BATCHES} (kind, ts, posted_at)"
+        " VALUES ('clear', 'B1', :at)",
+        {"at": start + timedelta(minutes=30)})
+    assert sprint_batch._fresh_start("T9", now) == \
+        start + timedelta(minutes=40)
+    assert sprint_batch._fresh_start("OTHER", now) == now
