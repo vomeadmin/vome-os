@@ -30,7 +30,7 @@ Usage:
       py scripts/check_code_access.py bitbucket
 
     # GitHub
-    VOMEOS_GITHUB_OWNER=samfagen15 VOMEOS_GITHUB_TOKEN=<token> \\
+    VOMEOS_GITHUB_OWNER=vomeadmin VOMEOS_GITHUB_TOKEN=<token> \\
       py scripts/check_code_access.py github --repo VomeApp --ref master
 
 Reading what comes back:

@@ -101,6 +101,23 @@ def latest_inbound(ticket_id: str) -> dict:
     return inbound[0]
 
 
+def latest_outbound(ticket_id: str) -> dict:
+    """The newest message we sent on this ticket, or {} if none."""
+    data = _get(f"/tickets/{ticket_id}/threads", {"limit": 50})
+    outbound = [t for t in (data.get("data") or [])
+                if t.get("direction") == "out"]
+    if not outbound:
+        return {}
+    outbound.sort(key=lambda t: str(t.get("createdTime") or ""),
+                  reverse=True)
+    return outbound[0]
+
+
+def ticket_status(ticket_id: str) -> str:
+    """The ticket's Zoho status ("Closed", "Processing", ...)."""
+    return str(_get(f"/tickets/{ticket_id}").get("status") or "")
+
+
 def _secondary_emails(ticket_id: str) -> list[str]:
     try:
         ticket = _get(f"/tickets/{ticket_id}")
@@ -131,6 +148,8 @@ def recipients(ticket_id: str) -> dict:
         "cc": cc,
         "first_name": first_name(author, to),
         "thread_id": str(latest.get("id") or ""),
+        # When the customer last wrote: the age a batch shows.
+        "received_at": str(latest.get("createdTime") or ""),
     }
 
 
@@ -154,6 +173,23 @@ def send_reply(ticket_id: str, to: str, cc: list[str], content: str) -> dict:
         raise ValueError("no recipient address on the latest message")
     return _send("POST", f"/tickets/{ticket_id}/sendReply",
                  _reply_body(to, cc, content))
+
+
+def set_status(ticket_id: str, status: str) -> dict:
+    """Set a ticket's status without Zoho emailing the customer about it.
+
+    `disableClosureNotification` matters on Closed: without it Zoho sends its
+    own "your ticket is closed" email, which is an unapproved client send
+    (lessons log, 2026-09-28).
+    """
+    resp = httpx.request(
+        "PATCH", f"{ZOHO_BASE}/tickets/{ticket_id}",
+        headers=_headers(), params={"disableClosureNotification": "true"},
+        json={"status": status}, timeout=30,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Zoho {resp.status_code}: {resp.text[:300]}")
+    return resp.json() if resp.text.strip() else {}
 
 
 def set_in_progress(ticket_id: str, team: str) -> dict:

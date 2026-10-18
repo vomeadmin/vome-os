@@ -216,8 +216,9 @@ def _generate_resolution_draft(
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_message}],
     )
-    # Auto-send category: resolution replies are signed "Vic".
-    return sign_message(response.content[0].text.strip(), "vic", language)
+    # Signed "Sam | Vome team", the one identity customers see (playbook
+    # Rule 2; "Vic" signatures were flagged in three sprint logs).
+    return sign_message(response.content[0].text.strip(), "sam", language)
 
 
 # ---------------------------------------------------------------------------
@@ -957,7 +958,7 @@ def handle_on_prod(task_id: str, engineer_name: str) -> bool:
         draft = (
             f"Hi {first_name}, the issue you reported has been resolved "
             "and the fix is now live. Let us know if anything else comes up.\n"
-            + signature("vic")
+            + signature("sam")
         )
 
     # Step 6b - outbound guard. Deterministic check that the draft is a

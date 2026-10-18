@@ -83,7 +83,7 @@ Bitbucket will not.
 | `prod-volunteer-database` | same repo | `master` (unconfirmed) | Bitbucket | backend | yes |
 | `dev-vome-web` | `vomeadmin/vome-react` | `develop` | GitHub | frontend | **none** |
 | `prod-vome-web` | same repo | `master` (unconfirmed) | GitHub | frontend | **none** |
-| `vome-2j` | `samfagen15/VomeApp` | `master` | GitHub | mobile | yes |
+| `vome-2j` | `vomeadmin/VomeApp` | `master` | GitHub | mobile | yes |
 
 **Count the projects from the API, not the dashboard.** The project grid
 honours a "My Teams" filter, which showed five of the seven and sent the first
@@ -828,8 +828,8 @@ VOMEOS_BITBUCKET_EMAIL           LEAVE UNSET. Bearer does not need it, and a
                                  token.
 VOMEOS_BITBUCKET_TOKEN_EXPIRES   YYYY-MM-DD. Bitbucket never tells us, so the
                                  monitor cannot warn without this.
-VOMEOS_GITHUB_TOKEN_SAMFAGEN15   VomeApp
-VOMEOS_GITHUB_TOKEN_VOMEADMIN    vome-react
+vome-os-sentry-write-web         vome-react, vome-landing-page and VomeApp
+                                 (all under vomeadmin), read and write
 VOMEOS_CODE_REPOS                the repos the analyst may read, which is
                                  narrower than the repos you hold tokens for
 SENTRY_QUEUE_MAX_BYTES           default 65536

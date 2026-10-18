@@ -82,7 +82,8 @@ class QueueUnavailable(RuntimeError):
     """The queue could not be read. Not the same as the queue being empty."""
 
 
-def fetch_open_tickets(limit: int = 25) -> list[dict]:
+def fetch_open_tickets(limit: int = 25,
+                       max_pages: int | None = None) -> list[dict]:
     """The sprint working set, oldest activity first.
 
     Two Zoho quirks are handled here rather than trusted to the API. The
@@ -95,8 +96,11 @@ def fetch_open_tickets(limit: int = 25) -> list[dict]:
     same false-reassurance failure this whole division exists to prevent, and
     it would be worse here because it looks like good news.
     """
+    # The default reads the 300 most recently active tickets (back about
+    # three weeks on 2026-10-18). Clearing the whole queue reads further, so
+    # an open ticket nobody touched for a month is not missed.
     collected: list[dict] = []
-    for page in range(MAX_PAGES):
+    for page in range(max_pages or MAX_PAGES):
         rows = _pull_page(offset=page * PAGE_SIZE)
         collected.extend(rows)
         if len(rows) < PAGE_SIZE:

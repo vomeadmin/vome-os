@@ -20,6 +20,10 @@ def wired(monkeypatch):
     sent, updates = [], []
     monkeypatch.setenv("SENTRY_SLACK_ENABLED", "true")
     monkeypatch.setenv("SAM_SLACK_USER_ID", "U01B9FQNSBU")
+    # Other test modules load the local .env, which sets the live channel.
+    for name in ("SENTRY_AUTOMATIONS", "SENTRY_SLACK_CHANNEL",
+                 "SLACK_CHANNEL_ENG_ALERTS"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(
         sentry_slack, "_post",
         lambda channel, text, thread_ts="": (

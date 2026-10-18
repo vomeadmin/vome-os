@@ -202,7 +202,8 @@ def test_an_open_pr_names_the_merge_owner(clickup):
     assert body["status"] == "in progress"
     owner = [f for f in body["custom_fields"]
              if f["id"] == saf.FIELD_MERGE_OWNER][0]
-    assert owner["value"] == {"add": [saf.CLICKUP_USER_ONLYG]}
+    # Sam merges agent PRs into the dev branch (2026-10-18).
+    assert owner["value"] == {"add": [saf.CLICKUP_USER_SAM]}
     assert "https://bb/pr/9" in body["markdown_description"]
 
 

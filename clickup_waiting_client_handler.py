@@ -240,7 +240,7 @@ def _generate_need_info_message(
         messages=[{"role": "user", "content": prompt}],
     )
     # Auto-send category: needs-client-info requests are signed "Vic".
-    return sign_message(response.content[0].text.strip(), "vic", language)
+    return sign_message(response.content[0].text.strip(), "sam", language)
 
 
 # ---------------------------------------------------------------------------
@@ -922,7 +922,7 @@ def handle_needs_client_info(
             " continue. Could you provide any additional"
             " details, such as screenshots, steps to"
             " reproduce, or the affected user's email?\n"
-            + signature("vic")
+            + signature("sam")
         )
 
     # 7a. Outbound guard. Deterministic check that the draft is actually a

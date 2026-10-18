@@ -104,6 +104,9 @@ def world(monkeypatch):
                         lambda i, s, d: W.decided.append((i, s, d)))
     monkeypatch.setattr(sprint_store, "set_draft",
                         lambda i, t, s, w="": W.drafts.append((i, t, s, w)))
+    monkeypatch.setattr(sprint_store, "hold",
+                        lambda i, wake, d: W.decided.append(
+                            (i, sprint_store.HELD, d)))
     monkeypatch.setattr(sprint_thread, "_post",
                         lambda text, thread_ts="", channel="",
                         broadcast=False: W.posts.append(
@@ -191,7 +194,12 @@ def test_route_to_an_unknown_person(world):
 
 
 def test_build_goes_to_sam_accepted(monkeypatch, world):
+    from mcp_connector import feature_requests
+
     created = []
+    # No existing request matches, so both go ahead (the duplicate check
+    # itself is covered in test_remaining_items.py).
+    monkeypatch.setattr(feature_requests, "find_duplicates", lambda t, p: [])
     monkeypatch.setattr(sprint_thread, "_clickup_create",
                         lambda list_id, body: created.append(list_id) or
                         {"id": "86y"})
@@ -356,7 +364,8 @@ def db(monkeypatch):
     for table in (sprint_store.ITEMS, sprint_store.DAYS,
                   sprint_thread.COMMANDS_TABLE,
                   sprint_thread.INCIDENTS_TABLE,
-                  sprint_thread.TURNS_TABLE):
+                  sprint_thread.TURNS_TABLE, sprint_store.BATCHES,
+                  "vomeos_sprint_leases"):
         store.execute(f"DROP TABLE IF EXISTS {table}")
     store.reset()
     assert sprint_store.ready()
@@ -393,30 +402,65 @@ def test_a_new_reply_reopens_a_finished_item(db):
     assert again["number"] == item["number"]
 
 
-def test_carry_forward_renumbers_oldest_first(db):
+def test_carry_forward_keeps_permanent_numbers(db):
     old = _upsert("t-3001")
     held = _upsert("t-3002")
     sprint_store.decide(held["id"], sprint_store.HELD, "held")
     done = _upsert("t-3003")
     sprint_store.decide(done["id"], sprint_store.DONE, "done")
     yesterday = sprint_store.today() - timedelta(days=1)
-    store.execute(f"UPDATE {sprint_store.ITEMS} SET day = :d, number = "
-                  "number + 100", {"d": yesterday})
+    store.execute(f"UPDATE {sprint_store.ITEMS} SET day = :d",
+                  {"d": yesterday})
     today_new = _upsert("t-3004")
     moved = sprint_store.carry_forward()
     assert moved == 2
     numbers = {i["ticket_id"]: i["number"]
                for i in sprint_store.items_for_day(sprint_store.today())}
-    assert numbers == {"t-3004": 1, "t-3001": 2, "t-3002": 3}
-    assert today_new["number"] == 1
+    # The first weekend: carried items got new numbers while their cards
+    # stayed in yesterday's thread. Now a number never changes.
+    assert numbers == {"t-3001": 1, "t-3002": 2, "t-3004": 4}
+    assert today_new["number"] == 4
     assert sprint_store.get_item(old["id"])["day"] == sprint_store.today()
+
+
+def test_numbers_never_restart_on_a_new_day(db):
+    first = _upsert("t-3101")
+    store.execute(f"UPDATE {sprint_store.ITEMS} SET day = :d",
+                  {"d": sprint_store.today() - timedelta(days=1)})
+    second = _upsert("t-3102")
+    assert second["number"] == first["number"] + 1
+    again = _upsert("t-3101", thread_id="T5")
+    assert again["number"] == first["number"]
+
+
+def test_a_number_from_before_permanence_that_collides_is_replaced(db):
+    old = _upsert("t-3201")
+    store.execute(f"UPDATE {sprint_store.ITEMS} SET day = :d",
+                  {"d": sprint_store.today() - timedelta(days=1)})
+    clash = _upsert("t-3202")
+    store.execute(f"UPDATE {sprint_store.ITEMS} SET number = :n WHERE id ="
+                  " :i", {"n": old["number"], "i": clash["id"]})
+    assert sprint_store.carry_forward() == 1
+    moved = sprint_store.get_item(old["id"])
+    assert moved["day"] == sprint_store.today()
+    assert moved["number"] != old["number"]
+
+
+def test_hold_until_and_working_set(db):
+    item = _upsert("t-3301")
+    wake = sprint_store._now() + timedelta(days=2)
+    sprint_store.hold(item["id"], wake, "held by Sam until Friday")
+    row = sprint_store.get_item(item["id"])
+    assert row["status"] == sprint_store.HELD and row["wake_at"] == wake
+    assert [i["id"] for i in sprint_store.working_set()] == [item["id"]]
+    again = _upsert("t-3301", thread_id="T7")
+    assert again["status"] == sprint_store.OPEN and again["wake_at"] is None
 
 
 def test_by_number_and_day_thread(db):
     item = _upsert("t-4001")
     day = sprint_store.today()
-    assert sprint_store.by_number(day, item["number"])["ticket_id"] == \
-        "t-4001"
+    assert sprint_store.by_number(item["number"])["ticket_id"] == "t-4001"
     sprint_store.set_day_thread(day, "C1", "123.456")
     assert sprint_store.get_day(day)["thread_ts"] == "123.456"
 
@@ -505,7 +549,7 @@ def chat(monkeypatch, world):
         partner = {"reply": "ok", "focus": None, "verbs": "", "actions": []}
         routed = []
 
-    monkeypatch.setattr(sprint_store, "items_for_day", lambda day: items)
+    monkeypatch.setattr(sprint_store, "working_set", lambda: items)
     monkeypatch.setattr(sprint_thread, "_turns", lambda thread: C.turns)
     monkeypatch.setattr(sprint_thread, "_ticket_text",
                         lambda item, n="": "thread text")
@@ -640,3 +684,14 @@ def test_conversation_is_remembered_across_messages(db, monkeypatch, world):
     assert "Here is 1." in calls[1]
     turns = sprint_thread._turns("500.1")
     assert sprint_thread._last_focus(turns) == 1
+
+
+def test_no_database_means_no_header_spam(monkeypatch):
+    """Oct 17: four day headers in 13 minutes when the tables were missing."""
+    posts = []
+    monkeypatch.setattr(sprint_store, "ready", lambda: False)
+    monkeypatch.setattr(sprint_thread, "_post",
+                        lambda *a, **k: posts.append(a) or "ts")
+    assert sprint_thread.ensure_thread() == ""
+    assert sprint_thread.ensure_thread() == ""
+    assert posts == []

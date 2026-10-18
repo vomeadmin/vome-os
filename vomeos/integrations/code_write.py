@@ -59,6 +59,7 @@ from dataclasses import dataclass, field
 
 from vomeos import config
 from vomeos.integrations.base import Connector, IntegrationResult
+from vomeos.integrations.code_search import GITHUB_TOKEN_ALIASES
 
 # Branches that may never be written to or targeted by a pull request, in any
 # repository, whatever the configuration says. Belt to go with the braces of
@@ -73,22 +74,15 @@ PROTECTED = tuple(
 
 BRANCH_PREFIX = os.environ.get("VOMEOS_BRANCH_PREFIX", "agent/sentry")
 
-# Deployment-specific names for the same tokens.
+# Deployment-specific names for the same tokens, shared with reading.
 #
 # The canonical name encodes the GitHub ACCOUNT, because a fine-grained token
 # is bound to one account at creation and the owner is how the code knows
-# which token can reach which repository. The names below encode the platform
-# instead, which is how they were created in Railway, and renaming a live
-# variable is a deploy nobody wanted. So they are aliases rather than a
-# rename: the canonical name still wins, and these are only consulted when it
-# is absent.
-#
-# If a third GitHub account ever appears, add the canonical name rather than
-# another alias. This table is a bridge, not a pattern to follow.
-OWNER_TOKEN_ALIASES = {
-    "VOMEADMIN": ("vome-os-sentry-write-web",),
-    "SAMFAGEN15": ("vome-os-sentry-write-mobile",),
-}
+# which token can reach which repository. The aliases are the names the
+# tokens were created with in Railway, and renaming a live variable is a
+# deploy nobody wanted. For writing the canonical name still wins, and the
+# alias is only consulted when it is absent.
+OWNER_TOKEN_ALIASES = GITHUB_TOKEN_ALIASES
 
 
 def writable_repos() -> tuple[str, ...]:

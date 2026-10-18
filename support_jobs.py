@@ -233,21 +233,85 @@ def register_all() -> None:
         description="Mark agent fixes Live once every commit is deployed",
     )
 
-    # The daily sprint thread in #support-sprints: the complete list at 10,
-    # 1, 4 and 7 on weekdays. Each update also triages a few open tickets
-    # that never got a card (a missed webhook, or the backlog from before
-    # shadow triage). Unclaimed: four runs a day has no claim period, and the
-    # job skips itself if it posted in the last 20 minutes.
-    from sprint_thread import COMMAND_KEY, handle_command, run_sprint_update
+    # The support sprint as batches in #support-sprints (sprint_batch.py):
+    # one message holding everything that needs Sam, every reply in full in
+    # its thread. Weekdays 9, 13, 17; weekends 11, only when something needs
+    # him. Replaced the 10/1/4/7 day-thread update on 2026-10-18 (Sam: "I
+    # just want to focus on the things I need to touch"). Unclaimed: several
+    # runs a day has no claim period, and an unchanged batch posts one line.
+    import sprint_batch
+    from sprint_thread import COMMAND_KEY, handle_command
 
     register_job(
-        "support.sprint_update",
-        run_sprint_update,
-        cron="0 10,13,16,19 * * 1-5",
+        "support.sprint_batch",
+        sprint_batch.run_scheduled_batch,
+        cron="0 9,13,17 * * 1-5",
         queue=QUEUE,
         claim=CLAIM_NONE,
-        time_limit=1800,
-        description="Post the sprint list in #support-sprints",
+        time_limit=600,
+        description="Post the sprint batch in #support-sprints",
+    )
+    register_job(
+        "support.sprint_batch_weekend",
+        sprint_batch.run_weekend_batch,
+        cron="0 11 * * 0,6",
+        queue=QUEUE,
+        claim=CLAIM_NONE,
+        time_limit=600,
+        description="Weekend sprint batch, only if something needs Sam",
+    )
+
+    # Open tickets no webhook triaged (a missed event, or the backlog),
+    # a few every 30 minutes, silently. Per-ticket leases stop it and clear
+    # mode triaging the same ticket twice.
+    register_job(
+        "support.queue_sweep",
+        sprint_batch.run_queue_sweep,
+        cron="*/30 * * * *",
+        queue=QUEUE,
+        claim=CLAIM_NONE,
+        time_limit=1500,
+        description="Triage untriaged open tickets for the next batch",
+    )
+
+    # Work that shipped (Priority Queue `on prod`, Sam Accepted done) for a
+    # client nobody told: a prepared reply in the next batch. Hourly; claims
+    # each task in vomeos_release_resolutions, so it drafts once.
+    from shipped_untold import run_shipped_untold
+
+    register_job(
+        "support.shipped_untold",
+        run_shipped_untold,
+        cron="45 * * * *",
+        queue=QUEUE,
+        claim=CLAIM_NONE,
+        time_limit=1500,
+        description="Prepare replies for shipped work nobody told",
+    )
+
+    # `clear the queue`: one round of 25 per event, chaining itself until
+    # nothing is untriaged. Idempotent on Sam's message ts and the round.
+    register_event_handler(
+        sprint_batch.CLEAR_KEY,
+        sprint_batch.handle_queue_clear,
+        queue=QUEUE,
+        time_limit=3300,
+        description="Clear the queue: triage a round, post or announce it",
+    )
+
+    # Draft autonomy, Monday 09:30. Per category: how often the agent's draft
+    # went out unedited. The evidence roadmap item 8 (earned auto-send)
+    # needs, and a list of Sam's edits to turn into answer-key cases.
+    from autonomy_report import run_autonomy_report
+
+    register_job(
+        "support.autonomy_report",
+        run_autonomy_report,
+        cron="30 9 * * mon",
+        queue=QUEUE,
+        claim=CLAIM_WEEKLY,
+        time_limit=300,
+        description="Weekly draft autonomy report in #support-sprints",
     )
 
     # Shadow triage: a card and a draft for every new ticket or customer

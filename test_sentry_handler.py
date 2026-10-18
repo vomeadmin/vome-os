@@ -204,7 +204,7 @@ def test_the_mobile_project_routes_to_github(wired):
     _post(payload)
     message = wired["queued"][0]
     assert message["repo"] == "VomeApp"
-    assert message["repo_owner"] == "samfagen15"
+    assert message["repo_owner"] == "vomeadmin"
     assert message["repo_host"] == "github"
     assert message["stack"] == "mobile"
 

@@ -70,7 +70,7 @@ _REPOS = (
     Repo("vome-landing-page", "github", "vomeadmin", "master",
          "public marketing site",
          ".github/workflows/cicd-prod.yml deploys master"),
-    Repo("VomeApp", "github", "samfagen15", "master",
+    Repo("VomeApp", "github", "vomeadmin", "master",
          "mobile app (iOS and Android)",
          "the store build (sanjay_expo_upgrade, v3.6.6) was promoted to "
          "master on 2026-10-15; master's tree is identical to it"),

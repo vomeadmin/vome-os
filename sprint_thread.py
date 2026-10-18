@@ -5,11 +5,21 @@ The daily support sprint, run as one Slack thread in #support-sprints.
 
 WHAT SAM SEES
 -------------
-One thread per business day. A card arrives in it as each ticket is triaged
-(shadow_triage), and at 10:00, 13:00, 16:00 and 19:00 the agent posts the
-complete current list: what needs Sam, what is held, what waits on a release.
-Item numbers stay fixed all day. An incident breaks the schedule with an
-immediate mention.
+Batches (sprint_batch.py, since 2026-10-18): one message holding everything
+that needs him, every reply in full in its thread. Item numbers are
+permanent, so a command works in any batch thread, and in the older day
+threads. An incident breaks the schedule with an immediate mention. The day
+thread with a card per ticket remains behind SPRINT_PER_TICKET_CARDS.
+
+BATCH COMMANDS (fast path, never the model)
+-------------------------------------------
+    send ready [except 4 7]   every reply shown READY in THIS batch, still
+                              exactly as shown, and nothing newer from the
+                              customer
+    next                      a batch of what this one did not show
+    catch me up               a fresh batch of everything
+    clear the queue           triage every untriaged ticket, 25 at a time
+    hold 4 till fri           back on top of the first batch after Friday 8am
 
 TALKING TO IT
 -------------
@@ -50,7 +60,7 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import sprint_store
 from vomeos import store
@@ -156,8 +166,16 @@ def _clock(moment: datetime) -> str:
 
 
 def ensure_thread(day=None) -> str:
-    """The thread_ts for the day, creating the parent message if needed."""
+    """The thread_ts for the day, creating the parent message if needed.
+
+    Returns "" when the day cannot be remembered. Posting a header it cannot
+    store means a new header on every post: production, 2026-10-17, four
+    "Support sprint, Saturday" threads in 13 minutes before the tables
+    existed. Callers post to the channel instead, which is noisy but honest.
+    """
     day = day or sprint_store.today()
+    if not sprint_store.ready():
+        return ""
     row = sprint_store.get_day(day)
     if row.get("thread_ts"):
         return row["thread_ts"]
@@ -214,7 +232,19 @@ def render_card(item: dict, release: dict | None = None) -> str:
     ]
     if card.get("existing_work"):
         lines.append(f"*Existing:* {card['existing_work']}")
-    if release and release.get("task_id"):
+    code = card.get("code_check") or {}
+    checked = code.get("verdict") not in (None, "", "not_checked") \
+        if isinstance(code, dict) else False
+    if checked:
+        lines.append(
+            f":mag: *Code check:* `{code.get('verdict')}` "
+            f"({code.get('confidence') or '?'}) {code.get('finding') or ''}"
+            + (f" `{code['where']}`" if code.get("where") else "")
+        )
+    if item.get("fix_pr"):
+        lines.append(f":hammer_and_wrench: *Proposed fix:* {item['fix_pr']}")
+    if release and (release.get("task_id")
+                    or "could not be read" in (release.get("text") or "")):
         lines.append(f"*Release:* {release.get('text')}")
     if card.get("blocking_claims"):
         lines.append(f":warning: *Unbacked claim in thread:* "
@@ -245,6 +275,12 @@ def render_card(item: dict, release: dict | None = None) -> str:
 
 
 def post_card(item: dict, release: dict | None = None) -> str:
+    """A card per ticket, only behind SPRINT_PER_TICKET_CARDS. With batches
+    the item waits for the next batch instead of trickling into a thread."""
+    import sprint_batch
+
+    if not sprint_batch.cards_enabled():
+        return ""
     thread = ensure_thread()
     if not thread:
         return ""
@@ -265,7 +301,11 @@ def announce_incident(item: dict, incident: dict) -> bool:
     )
     if not rows and store.usable():
         return False
-    thread = ensure_thread()
+    import sprint_batch
+
+    # With batches there is no day thread: the incident is its own message,
+    # the one thing allowed to interrupt.
+    thread = ensure_thread() if sprint_batch.cards_enabled() else ""
     mention = " ".join(f"<@{r}>" for r in reviewers())
     tickets = ", ".join(f"#{n}" for n in incident.get("same_as") or [])
     sentry = incident.get("sentry_issue")
@@ -428,6 +468,21 @@ def parse(text: str) -> list[dict]:
             commands.append({"verb": match.group(1).lower(),
                              "numbers": [int(match.group(2))], "arg": rest})
             break
+        match = re.match(r"^(log|build)\s+(\d+)\s+(?:to\s+)?(new|\w{6,12})"
+                         r"\s*$", line, re.IGNORECASE)
+        if match:
+            commands.append({"verb": match.group(1).lower(),
+                             "numbers": [int(match.group(2))],
+                             "arg": match.group(3)})
+            continue
+        match = re.match(
+            r"^hold\s+([\d,\s\-and]+?)\s+(?:till|until|to)\s+(\w+)\s*$",
+            line, re.IGNORECASE)
+        if match:
+            commands.append({"verb": "hold",
+                             "numbers": _numbers(match.group(1)),
+                             "arg": match.group(2).lower()})
+            continue
         match = re.match(r"^route\s+([\d,\s\-and]+?)\s+to\s+(\w+)\s*$", line,
                          re.IGNORECASE)
         if match:
@@ -436,7 +491,7 @@ def parse(text: str) -> list[dict]:
                              "arg": match.group(2).lower()})
             continue
         match = re.match(
-            r"^(send|hold|done|skip|log|build)\s+([\d,\s\-and]+)$",
+            r"^(send|hold|done|skip|log|build|fix|close)\s+([\d,\s\-and]+)$",
             line, re.IGNORECASE,
         )
         if match:
@@ -511,15 +566,28 @@ def handle_command(message: dict) -> dict:
     )
     if not claimed and store.usable():
         return {"status": "duplicate"}
+    batch = sprint_store.batch_for_thread(thread) \
+        if sprint_store.batches_ready() else {}
     day = _day_for_thread(thread)
-    if day is None:
+    if day is None and not batch:
         return {"status": "not a sprint thread"}
+    day = day or sprint_store.today()
 
     text = message.get("text") or ""
     _record_turn(thread, message.get("ts") or "", "sam", text, None)
 
-    commands = parse_strict(text)
-    if commands is not None:
+    batch_reply = _batch_command(text, thread, batch,
+                                 message.get("ts") or "")
+    lesson_reply = _lesson_command(text) if batch_reply is None else None
+    commands = parse_strict(text) \
+        if batch_reply is None and lesson_reply is None else None
+    if batch_reply is not None:
+        reply, focus, outcome = batch_reply, None, {
+            "status": "ok", "results": [], "path": "batch"}
+    elif lesson_reply is not None:
+        reply, focus, outcome = lesson_reply, None, {
+            "status": "ok", "results": [], "path": "lessons"}
+    elif commands is not None:
         results = _run_commands(commands, day)
         reply = "\n".join(results) or "Nothing to do."
         focus = (commands[0]["numbers"] or [None])[0]
@@ -537,13 +605,254 @@ def handle_command(message: dict) -> dict:
     return outcome
 
 
+# ---------------------------------------------------------------------------
+# Learning from Sam (vomeos/lessons.py)
+# ---------------------------------------------------------------------------
+
+DRAFTER = "customer_success.reply_drafter"
+_LEARNABLE = {"customer_success.reply_drafter",
+              "customer_success.triage_director",
+              "customer_success.sprint_partner",
+              "customer_success.incident_matcher", "*"}
+
+
+def _learn(item: dict, before: str, after: str, sam_said: str,
+           agent: str = DRAFTER) -> str:
+    """Ask the lesson keeper whether this correction is a general rule.
+
+    Returns the line to show Sam ("Learned ... say forget 7"), or "" when it
+    was a one-off fix for this ticket. Never raises: a lesson missed costs
+    one more correction; a crash here would cost the edit Sam just made.
+    """
+    if not after or before.strip() == after.strip():
+        return ""
+    try:
+        from vomeos import lessons, run_agent
+
+        existing = lessons.active_for(agent, limit=40)
+        result = run_agent(
+            "customer_success.lesson_keeper",
+            context={
+                "agent": agent,
+                "category": item.get("category") or "",
+                "before": before,
+                "after": after,
+                "sam_said": sam_said or "(nothing beyond the edit)",
+                "existing_lessons": "\n".join(
+                    f"- [L{r['id']}] {r['rule']}" for r in existing)
+                or "(none yet)",
+            },
+            subject_type="sprint_item", subject_id=str(item.get("id")),
+        )
+        data = result.data if result.ok else None
+        if not data or not data.get("general") or \
+                data.get("confidence") == "low":
+            return ""
+        if data.get("duplicate_of"):
+            return (f"\n:brain: Already a lesson "
+                    f"({data['duplicate_of']}); applied again.")
+        target = data.get("applies_to") or agent
+        target = target if target in _LEARNABLE else agent
+        lesson_id = lessons.add(
+            target, data.get("rule") or "", "slack_edit",
+            evidence=f"Before:\n{before}\n\nAfter:\n{after}\n\n"
+                     f"Sam: {sam_said}",
+            ticket=str(item.get("ticket_number") or ""),
+            created_by="sprint_thread",
+        )
+        if not lesson_id:
+            return ""
+        return (f"\n:brain: Learned *L{lesson_id}* ({_short(target)}): "
+                f"{data.get('rule')} Say `forget {lesson_id}` to undo.")
+    except Exception as exc:
+        print(f"[SPRINT] lesson keeper failed: {exc}")
+        return ""
+
+
+def _short(agent: str) -> str:
+    return "every agent" if agent == "*" else agent.split(".")[-1].replace(
+        "_", " ")
+
+
+def _record_partner_lessons(raw, sam_text: str) -> list[str]:
+    """General feedback Sam gave in conversation, as the partner heard it."""
+    out: list[str] = []
+    if not isinstance(raw, list):
+        return out
+    try:
+        from vomeos import lessons
+    except Exception:
+        return out
+    for entry in raw[:3]:
+        if not isinstance(entry, dict):
+            continue
+        agent = str(entry.get("agent") or "")
+        rule = str(entry.get("rule") or "").strip()
+        if agent not in _LEARNABLE or not rule:
+            continue
+        lesson_id = lessons.add(agent, rule, "slack_feedback",
+                                evidence=f"Sam: {sam_text}",
+                                created_by="sprint_partner")
+        if lesson_id:
+            out.append(f":brain: Learned *L{lesson_id}* ({_short(agent)}): "
+                       f"{rule} Say `forget {lesson_id}` to undo.")
+    return out
+
+
+_FORGET = re.compile(r"^\s*(forget|unlearn)\s+L?(\d+)\s*$", re.I)
+_LIST = re.compile(r"^\s*(lessons|what have you learned\??)\s*$", re.I)
+
+
+def _lesson_command(text: str) -> str | None:
+    """`forget 7` and `lessons`. None when the message is neither."""
+    from vomeos import lessons
+
+    match = _FORGET.match(text or "")
+    if match:
+        lesson_id = int(match.group(2))
+        row = lessons.get(lesson_id)
+        if not row:
+            return f"There is no lesson L{lesson_id}."
+        lessons.retire(lesson_id, "Sam said forget")
+        return f":wastebasket: Forgot L{lesson_id}: {row.get('rule')}"
+    if _LIST.match(text or ""):
+        rows = lessons.all_active()
+        if not rows:
+            return "No live lessons yet."
+        lines = [f":brain: *{len(rows)} live lessons* (newest first):"]
+        lines += [f"*L{r['id']}* ({_short(r['agent'])}) {r['rule']}"
+                  for r in rows[:30]]
+        lines.append("Say `forget N` to drop one.")
+        return "\n".join(lines)
+    return None
+
+
+_SEND_READY = re.compile(
+    r"^\s*send\s+(?:all\s+)?(?:the\s+)?ready(?:\s+ones)?"
+    r"(?:\s*,?\s*(?:except|but\s+not|but)\s+(?P<ex>[\d,\s\-and]+))?"
+    r"\s*[.!]?\s*$", re.I)
+_CLOSE_QUIET = re.compile(
+    r"^\s*close\s+(?:them\s+|all\s+)?quiet(?:ly)?"
+    r"(?:\s*,?\s*(?:except|but\s+not|but)\s+(?P<ex>[\d,\s\-and]+))?"
+    r"\s*[.!]?\s*$", re.I)
+_NEXT = re.compile(r"^\s*(next|next batch|more)\s*[.!?]?\s*$", re.I)
+_CATCH_UP = re.compile(
+    r"^\s*(?:please\s+)?(catch me up|batch|new batch|fresh batch|refresh)"
+    r"(?:\s+(?:now|please))?\s*[.!?]?\s*$", re.I)
+# "clear the queue fresh" triages every open ticket again under today's
+# rules, not only the untriaged ones.
+_CLEAR = re.compile(
+    r"^\s*clear(?:\s+the)?(?:\s+(?:queue|pipeline|backlog))?"
+    r"(?P<fresh>\s+(?:fresh|again|from scratch|all))?"
+    r"(?:\s+(?:now|please))?\s*[.!]?\s*$", re.I)
+
+
+def _batch_command(text: str, thread: str, batch: dict,
+                   message_ts: str) -> str | None:
+    """`send ready`, `next`, `catch me up`, `clear the queue`. None when
+    the message is none of them."""
+    import sprint_batch
+
+    match = _SEND_READY.match(text or "")
+    if match:
+        if not batch:
+            return ("Say `send ready` in a batch's thread, so I send exactly "
+                    "the replies that batch showed you.")
+        return send_ready(batch, set(_numbers(match.group("ex") or "")))
+    match = _CLOSE_QUIET.match(text or "")
+    if match:
+        if not batch:
+            return ("Say `close quiet` in a batch's thread, so I close "
+                    "exactly what that batch showed you.")
+        return close_quiet(batch, set(_numbers(match.group("ex") or "")))
+    if _NEXT.match(text or ""):
+        shown = {int(k) for k in (batch.get("shown") or {})}
+        result = sprint_batch.run_batch("next", exclude=shown,
+                                        reply_thread="")
+        return _batch_result(result)
+    if _CATCH_UP.match(text or ""):
+        return _batch_result(sprint_batch.run_batch("catch_up"))
+    match = _CLEAR.match(text or "")
+    if match:
+        return sprint_batch.start_clear(message_ts, thread,
+                                        fresh=bool(match.group("fresh")))
+    return None
+
+
+def _batch_result(result: dict) -> str:
+    if result.get("status") != "ok":
+        return f"No batch posted ({result.get('status')})."
+    more = result.get("more") or 0
+    return (f"Posted batch {result.get('batch')} in the channel: "
+            f"{result.get('shown')} need you"
+            + (f", {more} more after those." if more else "."))
+
+
+def send_ready(batch: dict, except_numbers: set) -> str:
+    """Send every reply this batch showed as ready, exactly as shown.
+
+    A reply that changed after the batch was posted (an edit, a redraft, a
+    new customer message) is not sent: Sam approved what he read, not what
+    it became. _send still checks for a newer customer message.
+    """
+    ready = batch.get("ready") or {}
+    if not ready:
+        return "This batch had no replies ready to send."
+    results = []
+    for item_id, shown_hash in ready.items():
+        item = sprint_store.get_item(int(item_id))
+        if not item:
+            continue
+        n = item.get("number")
+        if n in except_numbers:
+            results.append(f"*{n}.* left out, as you asked.")
+            continue
+        import sprint_batch
+
+        if sprint_batch.draft_hash(item.get("draft")) != shown_hash:
+            results.append(f"*{n}.* changed since this batch, so not sent. "
+                           f"Read it and say `send {n}`.")
+            continue
+        try:
+            results.append(_send(item))
+        except Exception as exc:
+            results.append(f"*{n}.* failed: {exc}")
+    return "\n".join(results) or "Nothing to send."
+
+
+def _wake_at(word: str):
+    """8am Montreal on the day Sam named, as naive UTC. None if unknown.
+
+    No day: the next weekday morning.
+    """
+    names = {"mon": 0, "monday": 0, "tue": 1, "tues": 1, "tuesday": 1,
+             "wed": 2, "wednesday": 2, "thu": 3, "thur": 3, "thurs": 3,
+             "thursday": 3, "fri": 4, "friday": 4, "sat": 5, "saturday": 5,
+             "sun": 6, "sunday": 6}
+    today = datetime.now(sprint_store.ZONE)
+    word = (word or "").strip().lower()
+    if not word:
+        days = 1
+        while (today + timedelta(days=days)).weekday() >= 5:
+            days += 1
+    elif word == "tomorrow":
+        days = 1
+    elif word in names:
+        days = (names[word] - today.weekday()) % 7 or 7
+    else:
+        return None
+    wake = (today + timedelta(days=days)).replace(hour=8, minute=0,
+                                                  second=0, microsecond=0)
+    return wake.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 def _run_commands(commands: list[dict], day) -> list[str]:
     results = []
     for command in commands:
         for number in command["numbers"]:
-            item = sprint_store.by_number(day, number)
+            item = sprint_store.by_number(number)
             if not item:
-                results.append(f"*{number}.* no such item in this thread.")
+                results.append(f"*{number}.* no such item.")
                 continue
             try:
                 results.append(_execute(command, item))
@@ -588,6 +897,12 @@ _GATES = {
     "route": re.compile(r"\b(onlyg|only g|sanjay|backend|frontend)\b", re.I),
     "log": re.compile(r"\b(log|feature|backlog|intake)\b", re.I),
     "build": re.compile(r"\bbuild\b", re.I),
+    # Opens a fix PR on Sam's word (a design question, or a fix the
+    # agent did not make on its own). Never merges.
+    "fix": re.compile(
+        r"\b(fix|make the (pr|change|update)|open (a|the) pr)\b", re.I),
+    # Closes the Zoho ticket with no email. Its own word, not "done".
+    "close": re.compile(r"\bclose\b", re.I),
 }
 _FREE = ("edit", "redraft", "retriage")
 _TICKET = re.compile(r"#?\b(\d{4,6})\b")
@@ -666,6 +981,13 @@ def _items_block(items: list[dict]) -> str:
         if card.get("blocking_claims"):
             lines.append(f"   Unbacked claim in thread: "
                          f"{card['blocking_claims']}")
+        code = card.get("code_check") or {}
+        if isinstance(code, dict) and code.get("verdict"):
+            lines.append(f"   Code check: {code.get('verdict')} "
+                         f"({code.get('confidence')}): {code.get('finding')}"
+                         f" [{code.get('where') or ''}]")
+        if i.get("fix_pr"):
+            lines.append(f"   Proposed fix PR: {i['fix_pr']}")
         if card.get("why_human"):
             lines.append(f"   Needs a person because: {card['why_human']}")
         draft = (i.get("draft") or "").strip()
@@ -758,7 +1080,7 @@ def converse(text: str, day, thread: str) -> tuple[str, object, list[str]]:
     """
     from vomeos import run_agent
 
-    items = sprint_store.items_for_day(day)
+    items = sprint_store.working_set()
     turns = _turns(thread)
     focus_before = _last_focus(turns[:-1])
     knowledge = "No product knowledge search was run."
@@ -793,6 +1115,8 @@ def converse(text: str, day, thread: str) -> tuple[str, object, list[str]]:
     focus = data.get("focus") if isinstance(data.get("focus"), int) else None
     actions = [a for a in data.get("actions") or [] if isinstance(a, dict)]
 
+    learned = _record_partner_lessons(data.get("lessons"), text)
+
     by_number = {i.get("number"): i for i in items}
     sendable = _allowed_sends(text, items, turns)
     edited = {a.get("number") for a in actions
@@ -803,7 +1127,7 @@ def converse(text: str, day, thread: str) -> tuple[str, object, list[str]]:
         number = action.get("number")
         item = by_number.get(number)
         if not item:
-            results.append(f"_Skipped {verb} {number}: no such item today._")
+            results.append(f"_Skipped {verb} {number}: no such item._")
             continue
         if verb == "send":
             if number not in sendable:
@@ -823,26 +1147,32 @@ def converse(text: str, day, thread: str) -> tuple[str, object, list[str]]:
         elif verb not in _GATES and verb not in _FREE:
             continue
         try:
-            results.append(_run_action(verb, action, item))
+            results.append(_run_action(verb, action, item, sam_text=text,
+                                       learn=not learned))
         except Exception as exc:
             results.append(f"*{number}.* {verb} failed: {exc}")
 
+    results += learned
     full = reply + ("\n\n" + "\n".join(results) if results else "")
     return full, focus, results
 
 
-def _run_action(verb: str, action: dict, item: dict) -> str:
+def _run_action(verb: str, action: dict, item: dict, sam_text: str = "",
+                learn: bool = True) -> str:
     n = item.get("number")
     if verb == "edit":
         body = str(action.get("text") or "").strip()
         if not body:
             return f"*{n}.* edit had no text."
+        before = item.get("draft") or ""
         status, why = _check_draft(item, body)
         sprint_store.set_draft(item["id"], body, status, why)
+        note = _learn(item, before, body, sam_text) if learn else ""
         if status != "ok":
             return (f":no_entry: *{n}.* the new draft is held by a guard: "
-                    f"{why}. Not sendable until fixed.")
-        return f"*{n}.* draft updated. Say `send {n}` when you're happy."
+                    f"{why}. Not sendable until fixed." + note)
+        return (f"*{n}.* draft updated. Say `send {n}` when you're happy."
+                + note)
     if verb == "retriage":
         import shadow_triage
 
@@ -862,8 +1192,15 @@ def _execute(command: dict, item: dict) -> str:
     if verb == "send":
         return _send(item)
     if verb == "hold":
-        sprint_store.decide(item["id"], sprint_store.HELD, "held by Sam")
-        return f"*{n}.* held. It carries to tomorrow."
+        wake = _wake_at(command.get("arg") or "")
+        if wake is None:
+            return (f"*{n}.* not held: I did not understand "
+                    f"\"{command.get('arg')}\". Say `hold {n} till fri`.")
+        local = wake.replace(tzinfo=timezone.utc).astimezone(
+            sprint_store.ZONE)
+        when = f"{local:%A} {local:%b} {local.day}"
+        sprint_store.hold(item["id"], wake, f"held by Sam until {when}")
+        return f"*{n}.* held. It comes back in the first batch after {when}."
     if verb == "done":
         sprint_store.decide(item["id"], sprint_store.DONE, "done by Sam")
         return f"*{n}.* done."
@@ -874,7 +1211,11 @@ def _execute(command: dict, item: dict) -> str:
     if verb == "route":
         return _route(item, command["arg"])
     if verb in ("log", "build"):
-        return _feature(item, verb)
+        return _feature(item, verb, command.get("arg") or "")
+    if verb == "fix":
+        return _fix(item)
+    if verb == "close":
+        return _close_quietly(item)
     return f"*{n}.* unknown command."
 
 
@@ -906,12 +1247,13 @@ def _edit(item: dict, text: str) -> str:
         return f"*{n}.* edit needs text after the colon."
     body = _signed(item, text)
     notes = _guard_notes(body, item)
+    before = item.get("draft") or ""
     sprint_store.set_draft(item["id"], body, "ok",
                            "; ".join(notes) if notes else "")
     shown = f"*{n}.* draft replaced. Send with `send {n}`:\n```{body}```"
     if notes:
         shown += "\n:warning: Check before sending: " + "; ".join(notes)
-    return shown
+    return shown + _learn(item, before, body, "")
 
 
 def _redraft(item: dict, notes: str) -> str:
@@ -937,10 +1279,11 @@ def _redraft(item: dict, notes: str) -> str:
         sam_notes=notes,
     )
     sprint_store.set_draft(item["id"], draft["text"], draft["status"],
-                           draft["why"])
+                           draft["why"], kind="redraft")
+    note = _learn(item, item.get("draft") or "", draft["text"], notes)
     if draft["status"] == "ok":
         return (f"*{n}.* redrafted. Send with `send {n}`:\n"
-                f"```{draft['text']}```")
+                f"```{draft['text']}```" + note)
     return (f"*{n}.* redraft {draft['status']}: {draft['why']}\n"
             f"```{draft['text']}```")
 
@@ -964,12 +1307,104 @@ def _send(item: dict) -> str:
 
     rcpt = item.get("recipients") or {}
     to, cc = rcpt.get("to") or "", list(rcpt.get("cc") or [])
+    if not to:
+        # #9538 (2026-10-18): a ready draft whose latest message had no
+        # readable sender. Never guess an address.
+        return (f"*{n}.* has no recipient (no sender on the latest customer "
+                "message), so nothing was sent. Reply from Zoho, or say "
+                f"`retriage {n}`.")
     zoho_actions.send_reply(item["ticket_id"], to, cc, draft)
     sprint_store.decide(item["id"], sprint_store.SENT, "sent by Sam")
+    sprint_store.record_sent(item["id"], draft)
     copied = f" cc {', '.join(cc)}" if cc else ""
     _post(f"Sent #{item.get('ticket_number')} to {to}{copied} on Sam's "
           "approval in the sprint thread.", channel=AGENT_LOG)
-    return f"*{n}.* sent to {to}{copied}."
+    after = _after_send(item)
+    return f"*{n}.* sent to {to}{copied}." + (f" {after}" if after else "")
+
+
+# What a sent reply means for the ticket. The reply is the decision; the
+# status follows from it, so nobody has to tidy two systems by hand.
+CLOSE_AFTER = {"user_education", "admin_action", "misdirected",
+               "account_deletion"}
+AWAIT_AFTER = {"vague_bug", "email_update"}
+
+
+def _after_send(item: dict) -> str:
+    """Zoho status and Agent Fixes closure after a sent reply.
+
+    A resolution (the linked fix is Live) or an answer closes the ticket,
+    silently. A question waits for the customer. An acknowledgment leaves
+    the status alone: the work is still open. Failures are reported, never
+    raised: the email already went, and that must not look like it failed.
+    """
+    import shadow_triage
+    import zoho_actions
+
+    category = item.get("category") or ""
+    release = shadow_triage.release_state(item.get("ticket_number") or "",
+                                          item.get("ticket_id") or "")
+    if release.get("live") or category in CLOSE_AFTER:
+        status = "Closed"
+    elif category in AWAIT_AFTER:
+        status = "Awaiting Client Response"
+    else:
+        return "Zoho status left as it is (the work is still open)."
+
+    notes = []
+    try:
+        zoho_actions.set_status(item["ticket_id"], status)
+        notes.append(f"Zoho set to {status}"
+                     + (" with no closure email." if status == "Closed"
+                        else "."))
+    except Exception as exc:
+        notes.append(f":warning: Zoho status NOT set to {status} ({exc}).")
+
+    if release.get("live"):
+        notes.append(_close_agent_fix(item))
+    return " ".join(n for n in notes if n)
+
+
+def _clickup_status(task_id: str, status: str) -> None:
+    import httpx
+
+    resp = httpx.put(
+        f"https://api.clickup.com/api/v2/task/{task_id}",
+        headers={"Authorization": os.environ.get("CLICKUP_API_TOKEN", ""),
+                 "Content-Type": "application/json"},
+        json={"status": status}, timeout=30,
+    )
+    resp.raise_for_status()
+
+
+def _close_agent_fix(item: dict) -> str:
+    """Close this ticket's Agent Fixes child, and the parent once its last
+    client has been told.
+
+    `Closed`, never `on prod`: on prod fires the on-prod handler, which
+    would write and send a second email to the same customer.
+    """
+    try:
+        import release_watcher as rw
+
+        tasks = rw._list_on_dev_tasks()
+    except Exception as exc:
+        return f":warning: Agent Fixes not closed ({exc})."
+    marker = f"[#{item.get('ticket_number')}]"
+    child = next((t for t in tasks if t.get("parent")
+                  and marker in (t.get("name") or "")), None)
+    if not child:
+        return ""
+    try:
+        _clickup_status(child["id"], "Closed")
+        left = [t for t in rw._children(child["parent"], tasks)
+                if t.get("id") != child["id"]]
+        if not left:
+            _clickup_status(child["parent"], "Closed")
+            return "Agent Fixes child and parent closed."
+        return f"Agent Fixes child closed; {len(left)} client(s) to go."
+    except Exception as exc:
+        return f":warning: Agent Fixes close failed ({exc})."
 
 
 def _clickup_create(list_id: str, body: dict) -> dict:
@@ -1040,23 +1475,168 @@ def _route(item: dict, who: str) -> str:
         add_ticket_comment(item["ticket_id"], f"ClickUp task: {url}")
     except Exception:
         pass
-    sprint_store.decide(item["id"], sprint_store.ROUTED, f"routed to {key}")
+    # The reason feeds "what still escalates, and why" (G27). The card's own
+    # reason when triage gave one, else it was Sam's call.
+    reason = str(card.get("escalation_reason") or "sam_call")
+    reason = re.sub(r"\W+", "_", reason).strip("_") or "sam_call"
+    sprint_store.decide(item["id"], sprint_store.ROUTED,
+                        f"routed to {key} ({reason})")
     return (f"*{n}.* routed to {key}: {url}. Zoho set In Progress. No reply "
             "was sent; say `send` on a draft if one is owed.")
 
 
-def _feature(item: dict, verb: str) -> str:
+def _close_quietly(item: dict) -> str:
+    """Close the Zoho ticket with no closure email, and finish the item.
+    For tickets that owe nothing (confirmed fixed, a thank-you, an
+    out-of-office, a handled error report)."""
+    import zoho_actions
+
     n = item.get("number")
-    list_id = SAM_ACCEPTED if verb == "build" else RAW_INTAKE
+    if item.get("status") not in sprint_store.CARRIES:
+        return f"*{n}.* already {item.get('status')}."
+    try:
+        zoho_actions.set_status(item["ticket_id"], "Closed")
+    except Exception as exc:
+        return f"*{n}.* not closed: Zoho said {exc}"
+    sprint_store.decide(item["id"], sprint_store.DONE,
+                        "closed quietly by Sam")
+    return f"*{n}.* closed in Zoho, no email."
+
+
+def close_quiet(batch: dict, except_numbers: set) -> str:
+    """Close what this batch showed under CLOSE QUIETLY, and only that."""
+    ids = batch.get("quiet") or []
+    if not ids:
+        return "This batch had nothing to close quietly."
+    results = []
+    for item_id in ids:
+        item = sprint_store.get_item(int(item_id))
+        if not item:
+            continue
+        if item.get("number") in except_numbers:
+            results.append(f"*{item.get('number')}.* left open, as you "
+                           "asked.")
+            continue
+        results.append(_close_quietly(item))
+    return "\n".join(results) or "Nothing to close."
+
+
+def _fix(item: dict) -> str:
+    """Sam said `fix N`: write the fix and open the PR, for a design
+    question he decided to change or a bug the agent did not fix on its own
+    call. The low-risk bar and patch safety still apply; nothing merges."""
+    import ticket_fix
+    import zoho_actions
+
+    n = item.get("number")
+    out = ticket_fix.propose_for_ticket(
+        item["ticket_id"], str(item.get("ticket_number") or ""),
+        item.get("account") or "", item.get("card") or {},
+        zoho_actions.ticket_url(item.get("ticket_id")), sam_approved=True)
+    if out.get("outcome") == "pr_opened":
+        sprint_store.set_fix_pr(item["id"], out["pr_url"])
+        then = ("OnlyG merges core to production"
+                if "bitbucket" in out["pr_url"]
+                else "you deploy web to production")
+        return (f"*{n}.* fix PR opened: {out['pr_url']}. Merge it into the "
+                f"dev branch, then {then}. Once it is proven live, the "
+                "resolution comes back to you here, ready to send.")
+    return (f"*{n}.* no PR: {out.get('reason') or out.get('outcome')}. "
+            f"`route {n} to onlyg` or `route {n} to sanjay` hands it to an "
+            "engineer instead.")
+
+
+_TASK_ID = re.compile(r"^[a-z0-9]{6,12}$", re.I)
+
+
+def _feature(item: dict, verb: str, mode: str = "") -> str:
+    """`log N` / `build N`, with a duplicate check first (G10), and every
+    decision posted to #vome-feature-requests with the client (G9).
+
+    mode "" checks for an existing request and stops if one may cover it;
+    "new" logs it anyway; a ClickUp task id adds this client to that one.
+    """
+    from mcp_connector import feature_requests
+
+    n = item.get("number")
     card = item.get("card") or {}
     title = card.get("live_question") or item.get("summary") or "request"
-    task = _clickup_create(list_id, {
-        "name": f"[#{item.get('ticket_number')}] {title[:110]}",
-        "markdown_description": _task_description(item),
-        "custom_fields": [{"id": FIELD_SOURCE, "value": SOURCE_ZOHO_TICKET}],
-    })
-    url = task.get("url") or f"https://app.clickup.com/t/{task.get('id')}"
+    problem = card.get("situation") or title
+    org = (item.get("account") or "").split("(")[0].strip()
+    mode = (mode or "").strip()
+    if mode and mode != "new" and not _TASK_ID.match(mode):
+        mode = ""  # the partner's free text is not a task id
+
+    if mode and mode != "new":
+        import zoho_actions
+
+        try:
+            existing = feature_requests.add_plus_one(
+                task_id=mode, requested_by=org, logged_by="Sam (sprint)",
+                note=title,
+                ticket_url=zoho_actions.ticket_url(item.get("ticket_id")))
+        except Exception as exc:
+            return f"*{n}.* not added to {mode}: {exc}"
+        url = existing.get("url") or f"https://app.clickup.com/t/{mode}"
+        where = f"the existing request {existing.get('name') or mode}"
+        if verb == "build":
+            where += " (move it to Sam Accepted in ClickUp to build it now)"
+    else:
+        if mode != "new":
+            try:
+                found = feature_requests.find_duplicates(title, problem)
+            except Exception as exc:
+                return (f"*{n}.* nothing logged: I could not check for an "
+                        f"existing request ({exc}). Say `{verb} {n} new` to "
+                        "log it anyway.")
+            if found:
+                lines = [f"*{n}.* nothing logged yet. These may already "
+                         "cover it:"]
+                lines += [
+                    f"  - <{d.get('url')}|{d.get('name')}> · "
+                    f"{d.get('list') or ''} · {d.get('status') or ''}"
+                    + (" · shipped" if d.get("shipped") else "")
+                    + f" · `{verb} {n} to {d.get('id')}`"
+                    for d in found[:5]]
+                lines.append(f"Or `{verb} {n} new` if none is the same "
+                             "request.")
+                return "\n".join(lines)
+        list_id = SAM_ACCEPTED if verb == "build" else RAW_INTAKE
+        task = _clickup_create(list_id, {
+            "name": f"[#{item.get('ticket_number')}] {title[:110]}",
+            "markdown_description": _task_description(item),
+            "custom_fields": [{"id": FIELD_SOURCE,
+                               "value": SOURCE_ZOHO_TICKET}],
+        })
+        url = task.get("url") or f"https://app.clickup.com/t/{task.get('id')}"
+        where = ("Sam Accepted (Build Now)" if verb == "build"
+                 else "Raw Intake")
     sprint_store.decide(item["id"], sprint_store.DONE, f"{verb}: {url}")
-    where = "Sam Accepted (Build Now)" if verb == "build" else "Raw Intake"
-    return (f"*{n}.* logged in {where}: {url}. The customer has not been "
-            "told anything; draft a reply with `edit` if one is owed.")
+    _post_feature_request(item, verb, where, url)
+    return (f"*{n}.* {'building' if verb == 'build' else 'logged'}: {where}"
+            f" {url}. Posted in #vome-feature-requests. The customer has not "
+            "been told anything; draft a reply with `edit` if one is owed.")
+
+
+FEATURE_REQUESTS = os.environ.get("SLACK_CHANNEL_FEATURE_REQUESTS",
+                                  "C0ALL4VPWK0")
+
+
+def _post_feature_request(item: dict, verb: str, where: str,
+                          url: str) -> None:
+    """One message per decision in #vome-feature-requests, so Sam's list of
+    requests is in one place (feedback, 2026-10-16)."""
+    import zoho_actions
+
+    card = item.get("card") or {}
+    ticket = (f"<{zoho_actions.ticket_url(item.get('ticket_id'))}|"
+              f"#{item.get('ticket_number')}>")
+    _post("\n".join([
+        f":bulb: *Feature request* from {item.get('account') or 'unknown'} "
+        f"· {ticket}",
+        f"*Asked for:* {card.get('live_question') or item.get('summary')}",
+        f"*Situation:* {card.get('situation') or ''}",
+        f"*Decision:* {'build now' if verb == 'build' else 'logged'}, "
+        f"<{url}|{where}>",
+        "*Client told:* nothing yet.",
+    ]), channel=FEATURE_REQUESTS)

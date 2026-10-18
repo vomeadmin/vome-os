@@ -51,6 +51,7 @@ from field_feedback import handle_field_feedback
 from on_prod_handler import handle_on_prod
 from release_watcher import run_release_watcher
 import shadow_triage
+import sprint_batch
 import sprint_thread
 from code_access_monitor import check_code_access as run_code_access_check
 from sentry_handler import (
@@ -360,13 +361,42 @@ _scheduler.add_job(
     max_instances=1,
 )
 
-# Sprint thread update at 10, 13, 16 and 19 on weekdays. Mirrors
-# support.sprint_update.
+# Sprint batches: weekdays 9, 13, 17; weekends 11. Mirrors
+# support.sprint_batch and support.sprint_batch_weekend.
 _scheduler.add_job(
-    sprint_thread.run_sprint_update,
-    CronTrigger(day_of_week="mon-fri", hour="10,13,16,19", minute=0,
+    sprint_batch.run_scheduled_batch,
+    CronTrigger(day_of_week="mon-fri", hour="9,13,17", minute=0,
                 timezone="America/Montreal"),
     misfire_grace_time=900,
+    coalesce=True,
+    max_instances=1,
+)
+_scheduler.add_job(
+    sprint_batch.run_weekend_batch,
+    CronTrigger(day_of_week="sat,sun", hour=11, minute=0,
+                timezone="America/Montreal"),
+    misfire_grace_time=900,
+    coalesce=True,
+    max_instances=1,
+)
+
+# Untriaged open tickets, every 30 minutes. Mirrors support.queue_sweep.
+_scheduler.add_job(
+    sprint_batch.run_queue_sweep,
+    CronTrigger(minute="*/30", timezone="America/Montreal"),
+    misfire_grace_time=600,
+    coalesce=True,
+    max_instances=1,
+)
+
+# Draft autonomy report, Monday 09:30. Mirrors support.autonomy_report.
+from autonomy_report import run_autonomy_report  # noqa: E402
+
+_scheduler.add_job(
+    run_autonomy_report,
+    CronTrigger(day_of_week="mon", hour=9, minute=30,
+                timezone="America/Montreal"),
+    misfire_grace_time=3600,
     coalesce=True,
     max_instances=1,
 )
@@ -646,10 +676,10 @@ async def zoho_ticket_webhook(request: Request):
         f"-- {ticket_data['subject'] or 'no subject'}"
     )
 
+    # Activation-code fast path only; legacy intake was removed 2026-10-18.
     process_ticket(ticket_data)
 
-    # Card and draft for the sprint thread, on the worker. Never blocks or
-    # breaks the existing intake above.
+    # Card and draft for the sprint thread, on the worker.
     shadow_triage.enqueue(str(ticket_data.get("ticket_id") or ""), "new")
 
     return {"status": "ok"}
@@ -1831,13 +1861,11 @@ async def health():
         "code_read": _present(
             "VOMEOS_BITBUCKET_TOKEN", "VOMEOS_BITBUCKET_WORKSPACE",
             "VOMEOS_CODE_REPOS",
-            "VOMEOS_GITHUB_TOKEN_VOMEADMIN",
-            "VOMEOS_GITHUB_TOKEN_SAMFAGEN15",
+            "vome-os-sentry-write-web",
         ),
         "code_write": _present(
             "VOMEOS_BITBUCKET_WRITE_TOKEN",
-            "VOMEOS_GITHUB_WRITE_TOKEN_VOMEADMIN",
-            "VOMEOS_GITHUB_WRITE_TOKEN_SAMFAGEN15",
+            "vome-os-sentry-write-web",
             "VOMEOS_CODE_WRITE_REPOS", "VOMEOS_PR_ALLOW_PROTECTED_TARGET",
             "SENTRY_AUTO_PR_ENABLED",
         ),

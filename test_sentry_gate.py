@@ -349,7 +349,7 @@ def test_the_routing_table_points_at_real_repositories(monkeypatch):
         "vomedjango/vomedjango-database-app"
     )
     assert sentry_projects.route("vome-2j").qualified_repo == (
-        "samfagen15/VomeApp"
+        "vomeadmin/VomeApp"
     )
 
 
@@ -387,14 +387,11 @@ def test_the_web_projects_are_mapped_and_flagged_empty(monkeypatch):
     assert "dev-vome-web" in described["receiving_nothing"]
 
 
-def test_the_two_github_owners_are_both_represented(monkeypatch):
-    # vome-react is in the vomeadmin org, VomeApp is on a personal account.
-    # A single VOMEOS_GITHUB_OWNER cannot reach both, which is why every
-    # code_search method takes an owner.
+def test_every_github_repo_is_under_vomeadmin(monkeypatch):
+    # VomeApp moved from a personal account to the vomeadmin org on
+    # 2026-10-18, so one token reaches vome-react and VomeApp alike.
     _clear(monkeypatch)
-    assert sentry_projects.describe()["github_owners"] == [
-        "samfagen15", "vomeadmin"
-    ]
+    assert sentry_projects.describe()["github_owners"] == ["vomeadmin"]
 
 
 def test_vome_react_uses_develop_not_development(monkeypatch):

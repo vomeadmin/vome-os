@@ -13,7 +13,7 @@ hired = "2026-09-28"
 tier = "senior"
 # 3000, not 2000. A long thread (ticket #9477) ran out mid-JSON at 2000 and
 # the json_shape guard threw the whole card away. Same lesson as bug_analyst.
-max_tokens = 3000
+max_tokens = 4500
 
 [job]
 charter = "charter.md"
@@ -23,11 +23,17 @@ skills = [
     "writing-the-triage-card",
     "deciding-not-to-act",
     "reading-ticket-images",
+    "checking-the-code",
+    "choosing-the-lane",
 ]
 # Screenshots are shown, not just counted. Six covers every real thread seen
 # so far once signatures are removed (#9415 had one, #9436 two). The kernel
 # drops anything past this, oversized, or a duplicate.
 images = 6
+# Read-only code access (vomeos/tools.py). The card is internal, so this is
+# allowed; the drafter that writes to customers is never given it.
+tools = ["search_code", "read_code_file", "recent_commits"]
+max_tool_calls = 10
 requires_context = [
     "ticket_number",
     "account",
@@ -46,6 +52,7 @@ output = ["json_shape", "non_empty"]
 client_facing = false
 
 [limits]
+# Per request. A run with code checks makes several requests.
 timeout_seconds = 120
 max_retries = 2
 

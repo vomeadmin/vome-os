@@ -158,7 +158,7 @@ def _generate_education_message(
         messages=[{"role": "user", "content": prompt}],
     )
     # Auto-send category: user-education explanations are signed "Vic".
-    return sign_message(response.content[0].text.strip(), "vic", language)
+    return sign_message(response.content[0].text.strip(), "sam", language)
 
 
 def _assess_education_state(
@@ -431,7 +431,7 @@ def handle_user_education(task_id: str, engineer_name: str) -> bool:
             " this and wanted to walk you through how this part of Vome"
             " works so you can get what you need. If anything is still"
             " unclear after this, just reply and we'll be glad to help.\n"
-            + signature("vic")
+            + signature("sam")
         )
 
     # 7a. Outbound guard. This is the check that was missing when ticket

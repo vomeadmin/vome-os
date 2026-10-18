@@ -85,6 +85,8 @@ def _capture(monkeypatch):
         return '{"category": "clear_bug"}', 1, 1, 1
 
     monkeypatch.setattr(runner, "_call_model", fake_call)
+    # Triage also has code tools, so it goes through the tool loop.
+    monkeypatch.setattr(runner, "_call_with_tools", fake_call)
     monkeypatch.setattr(runner, "_persist", lambda *a, **k: None)
     return sent
 

@@ -265,11 +265,15 @@ def _pr_body(issue: dict, proposal: dict, context: dict) -> str:
     A pull request that does not admit it was machine written is a pull
     request that gets less scrutiny than it needs.
     """
+    source = issue.get("source_label") or "a Sentry issue"
+    origin = (f"**Source** {source}" if issue.get("source_label") else
+              f"**Sentry issue** "
+              f"{issue.get('permalink') or issue.get('issue_id')}")
     lines = [
-        "Proposed automatically from a Sentry issue. **Not reviewed by a "
+        f"Proposed automatically from {source}. **Not reviewed by a "
         "person.** Treat this as a suggestion, not a fix.",
         "",
-        f"**Sentry issue** {issue.get('permalink') or issue.get('issue_id')}",
+        origin,
         f"**Severity** {issue.get('severity') or 'unrated'}",
         "",
         "### What broke",

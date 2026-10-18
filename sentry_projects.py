@@ -225,14 +225,13 @@ _PROJECTS: tuple[Project, ...] = (
     # Those contexts only exist on a native app, so this is VomeApp and not
     # the vome-react web client.
     #
-    # Note the owner. This repo is on a personal account rather than the
-    # `vomeadmin` organization that holds vome-react, which is why
-    # VOMEOS_GITHUB_OWNER must be `samfagen15` and not the org.
+    # Moved from the samfagen15 personal account to `vomeadmin` on
+    # 2026-10-18, so one token now reaches it and vome-react alike.
     Project(
         slug="vome-2j",
         repo="VomeApp",
         host=GITHUB,
-        owner="samfagen15",
+        owner="vomeadmin",
         stack=MOBILE,
         production=True,
         # Sanjay covers frontend for both web and mobile, so mobile lands in
