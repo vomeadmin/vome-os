@@ -1,4 +1,5 @@
-An analyst has diagnosed a bug and judged the fix low risk. Write the diff.
+An analyst has diagnosed a bug and judged the fix low risk, or Sam has
+greenlit it (see building-a-greenlit-fix). Write the diff.
 
 A person reads your patch and merges it. That is less scrutiny than a
 description gets, not more, because a diff looks finished. Write accordingly.
@@ -55,7 +56,8 @@ Refuse, with `attempted: false`, if the fix would require editing:
 - **anything under `migrations/`**, which is refused outright. Migrations are
   generated on deploy in these repositories and never written by hand.
 - settings, environment files, `manage.py`, `wsgi.py`, `asgi.py`
-- authentication, permissions, billing or payment code
+- authentication, permissions, billing or payment code (with a greenlight,
+  view-level scoping is allowed; the skill says where the line is)
 - dependency files, lockfiles, Dockerfiles, CI configuration
 - **test files**. You may not edit a test to accommodate your change. A fix
   that edits its own tests is a fix that makes itself pass.

@@ -82,6 +82,8 @@ class Recorder:
                      "status": {"status": "queued"}, "custom_fields": []}
         # Per repo: what the fix author returns, and whether the PR opens.
         self.diff = {"core": "--- a\n+++ b", "web": "--- a\n+++ b"}
+        self.rationale: dict = {}
+        self.greenlit_builds: list = []
         self.pr_opens = True
 
 
@@ -91,10 +93,12 @@ def rec(monkeypatch):
 
     r = Recorder()
 
-    def propose(ts, card, alias, places, several=False):
+    def propose(ts, card, alias, places, several=False, greenlit=False):
         r.proposed.append((alias, sorted({p for p, _l in places})))
+        r.greenlit_builds.append(greenlit)
         diff = r.diff.get(alias, "")
         return ({"diff": diff, "attempted": bool(diff),
+                 "rationale": r.rationale.get(alias, ""),
                  "reason": "" if diff else "the fix author declined"},
                 FakeRepo(alias))
 
@@ -469,6 +473,71 @@ def test_part_built_says_what_is_left(rec, monkeypatch):
     assert out["not_built"] == ["web"]
     assert "Not built: web: the fix author declined" in rec.posts[-1][2]
     assert "`route both`" in rec.posts[-1][2]
+
+
+def test_yes_builds_with_the_greenlight_on(rec, monkeypatch):
+    _greenlight_waiting(monkeypatch)
+    bug_reports._on_reply(TS, _sam("yes"))
+    assert rec.greenlit_builds == [True, True]
+
+
+def test_low_risk_build_on_its_own_is_not_greenlit(rec):
+    bug_reports.act(TS, _row(), BUG)
+    assert rec.greenlit_builds == [False]
+
+
+def test_what_the_fix_author_left_out_is_named(rec, monkeypatch):
+    _greenlight_waiting(monkeypatch)
+    rec.rationale["core"] = ("Swaps the lookup. Left out: the 403 on the "
+                             "volunteer list, its view is not in this file.")
+    out = bug_reports._on_reply(TS, _sam("yes"))
+    assert out["not_built"] == ["core"]
+    post = rec.posts[-1][2]
+    assert "Not built: core: left out the 403 on the volunteer list" in post
+    assert ".." not in post
+
+
+def test_refusal_reason_ending_in_a_period_reads_cleanly(rec, monkeypatch):
+    _greenlight_waiting(monkeypatch)
+    rec.diff = {"core": "", "web": ""}
+    bug_reports._on_reply(TS, _sam("yes"))
+    assert ".." not in rec.posts[-1][2]
+
+
+def test_greenlit_proposal_gets_whole_files_references_and_the_greenlight(
+        monkeypatch):
+    """The first greenlit build (exemption rules) failed because the fix
+    author saw a 60-line window, no copy of the sibling module, and no word
+    that Sam had approved it."""
+    import sentry_fix
+    from vomeos.integrations import code_search
+
+    views = "\n".join(f"line {n}" for n in range(1, 301))
+    files = {"sequence_app/step_exemption/views.py": views,
+             "sequence_app/step_status/views.py": "def _institution():\n"
+                                                  "    return v2()"}
+
+    class Reader:
+        def read_file(self, repo, path, ref="", max_bytes=0, **kw):
+            class R:
+                ok, error, data = True, "", files[path]
+            return R()
+
+    seen = {}
+    monkeypatch.setattr(code_search, "Bitbucket", Reader)
+    monkeypatch.setattr(sentry_fix, "propose",
+                        lambda analysis, ctx: seen.update(ctx) or {})
+    card = {**GUEST, "code_check": {
+        **GUEST["code_check"],
+        "where": "core:sequence_app/step_exemption/views.py:34",
+        "references": ["core:sequence_app/step_status/views.py:12"]}}
+    bug_reports._propose(TS, card, "core",
+                         [("sequence_app/step_exemption/views.py", 34)],
+                         greenlit=True)
+    assert "line 300" in seen["source"]  # whole file, not a window
+    assert "REFERENCE, read only" in seen["source"]
+    assert "return v2()" in seen["source"]
+    assert "said yes" in seen["greenlight"]
 
 
 def test_after_a_greenlight_a_rerun_never_routes_alone(rec):

@@ -9,7 +9,14 @@ hired = "2026-10-17"
 # Senior tier. Sam is asking judgment questions about real customers ("what
 # would you tell her", "is this the same bug as 9500") and the answer has to
 # be right the first time; he is reviewing on a phone between other things.
-tier = "senior"
+# Opus 5.5 since 2026-10-19 (Sam asked to move the senior agents for the
+# 20% saving). The "premium" tier is Opus 5.5; effort is pinned at "high"
+# because Opus 5.5 defaults to "medium" and this agent was tuned at Opus 5's
+# "high". Evals that day matched Opus 5 for the support agents but dropped
+# for bug_analyst (13/13 to 10/13), bug_report_analyst and kb_writer, so
+# those stayed on the senior tier (Opus 5).
+tier = "premium"
+effort = "high"
 max_tokens = 2500
 
 [job]

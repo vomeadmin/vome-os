@@ -10,7 +10,14 @@ hired = "2026-09-28"
 # thread, weigh partial evidence, and decide what a human should do next.
 # Everything downstream inherits its category, so an error here is an error
 # everywhere. This is the one place worth paying for the best model.
-tier = "senior"
+# Opus 5.5 since 2026-10-19 (Sam asked to move the senior agents for the
+# 20% saving). The "premium" tier is Opus 5.5; effort is pinned at "high"
+# because Opus 5.5 defaults to "medium" and this agent was tuned at Opus 5's
+# "high". Evals that day matched Opus 5 for the support agents but dropped
+# for bug_analyst (13/13 to 10/13), bug_report_analyst and kb_writer, so
+# those stayed on the senior tier (Opus 5).
+tier = "premium"
+effort = "high"
 # 3000, not 2000. A long thread (ticket #9477) ran out mid-JSON at 2000 and
 # the json_shape guard threw the whole card away. Same lesson as bug_analyst.
 max_tokens = 4500

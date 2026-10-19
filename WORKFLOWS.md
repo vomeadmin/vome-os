@@ -196,6 +196,17 @@ flowchart TD
   ASK --> RE["Requester answers, analysis runs again"]:::built
 ```
 
+<!-- map:diagram id=worklog title="10. Log this on ClickUp: Sam and Ron's Agent Workflows list (built 2026-10-19)" -->
+```mermaid
+flowchart TD
+  T["Sam or Ron in any thread the bot is in:<br/>'log this for us on ClickUp' or @Vome Agent log this"]:::built --> G["Checked before every channel's own commands<br/>(sprint `log N` does not match)"]:::built
+  G --> W["Worker claims the message once<br/>(a mention arrives twice)"]:::built
+  W --> L["Workflow logger reads the whole thread:<br/>title, bug / idea / improvement / question,<br/>area, summary, details, next step"]:::built
+  L --> C["ClickUp: Operations > Agent Workflows<br/>[Type] title, to do, Sam assigned, tagged, thread linked"]:::built
+  W -->|thread logged before| CM["Comment on that task instead"]:::built
+  C & CM --> R["Thread: check mark + link"]:::built
+```
+
 ## Schedule (America/Montreal, run by Celery beat on `vome-os-worker`)
 
 | When | Job | Status |
@@ -261,7 +272,9 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 | G34 | director | Sprints run in Claude.ai through the Vome OS connector | built | Sam works sprints in Claude.ai (2026-10-18); Slack batches paused until he wants them back (SPRINT_BATCHES_ENABLED) | Push; paste handoffs/CLAUDE_AI_SPRINT_PROMPT.md into the Claude.ai project; tools sprint_queue, ticket_first_pass, fix_status, sprint_followups, propose_fix, send_ticket_reply, route_ticket, close_ticket_quietly, log_ticket_request, teach_agents | Sam |
 | G35 | bugreports | #bug-reports handled by the agent: code check, agent fix PR, auto-route to engineers, adopt the reporter's ClickUp task | built | Ron's reports each waited for Sam to read, check the code and route | Push; dry-run backfill of the first 5 reports, then `py bug_reports.py --backfill` | Sam |
 | G40 | bugreports | Greenlight step: a bug with a fix asks Sam for one yes instead of routing; his yes lifts the risk bar and builds across files and repos | built | The guest shift report had a concrete fix and went straight to both engineers because it was high risk | Push, re-run the dry run, then `promote 5` (live lesson L5 now in the charter and skill greenlighting-a-fix) | Sam |
-| G41 | bugreports | Patch safety caps an agent PR at 3 files and 60 lines per repo, even after a greenlight | decide | Larger greenlit fixes (likely guest shifts) are refused at that guard and offered to an engineer | Keep, or raise SENTRY_PATCH_MAX_LINES (shared with Sentry fixes) | Sam |
+| G41 | bugreports | Patch safety blocks most greenlit fixes: SENTRY_PATCH_PATH_ALLOWLIST on the worker is `volunteer_database_app/, opportunity_app/, notification_app/, apps/, src/`, plus 3 files and 60 lines per repo | decide | The exemption fix (sequence_app) was written after Sam's yes on 2026-10-19 and refused only by the path allowlist; guest shifts (form_app) would be too. A greenlight never lifts patch safety, so only the allowlist decides | Add the apps Sam wants agent PRs in (at least sequence_app/, form_app/) to SENTRY_PATCH_PATH_ALLOWLIST on vome-os-worker; it also widens Sentry fixes | Sam |
+| G42 | bugreports | Greenlit builds: whole files, read-only reference files, a Greenlight section for the fix author (skill building-a-greenlit-fix), 8000-token diffs, `Left out:` named in the thread, `--build <ts> --dry-run` preview | built | The first greenlit build failed on a 60-line window, no copy of the sibling module, a refusal of reviewed scoping logic, then a truncated diff | Push; promote lessons L5 and L6 after the deploy | Sam |
+| G43 | worklog | "Log this on ClickUp" from any Slack thread into Operations > Agent Workflows (list 901115585535): bugs, ideas, improvements, questions about Vome OS itself | built | Sam wants to capture workflow problems and ideas from his phone and fix them later with Claude | Push; then say it in a thread once to prove it (the bot must be in the channel, or DM it) | Sam |
 | G36 | bugreports | Ron's own task is not moved when an agent fix ships | proposed | The Agent Fixes task goes on dev / Live, but Ron's Priority Queue task stays queued (it is linked and commented) | Close or move Ron's task when its linked Agent Fixes task goes Live | agent |
 | G37 | featuredesk | #feature-requests shaped by an architect before anything is built; additive handoffs become PRs, shape forks go to Sam with options | built | The frontend asks for the right screen, not always the right backend shape; building each ask as written makes the backend messy | Prove on real posts (`py feature_desk.py --backfill --dry-run`, needs the worker's code-read token), evals, then FEATURE_DESK_ENABLED=true | Sam |
 | G38 | featuredesk | Agent-built PRs from #feature-requests (`FEATURE_DESK_PR_ENABLED`) | decide | Off, an agent_build item is held and Sam says `go N` | Turn on after a week of verdicts Sam agrees with | Sam |

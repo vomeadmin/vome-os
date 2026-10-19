@@ -126,6 +126,14 @@ _EXACT_WHERE = re.compile(r"^[\w-]+:[^\s:()]+(:\d+(-\d+)?)?$")
 # A fix spanning repos lists its PRs this way, so ticket_fix.promote_merged
 # (which reads "Fix PR:") leaves it to run_rollup.
 MULTI_PR_LABEL = "Bug report PR:"
+_LEFT_OUT = re.compile(r"Left out:\s*(.+)", re.I | re.S)
+
+# What a greenlit fix author reads: each edited file whole up to
+# WHOLE_FILE_CHARS (past that, GREENLIT_WINDOW lines either side of each
+# spot), then reference files, all within SOURCE_BUDGET per repo.
+WHOLE_FILE_CHARS = 60_000
+GREENLIT_WINDOW = 150
+SOURCE_BUDGET = 120_000
 _MULTI_PR = re.compile(r"Bug report PR:\s*(\S+)")
 
 # Sam's greenlight. Only his replies count, and only whole answers: "yes but
@@ -290,23 +298,7 @@ def analyse(ts: str, dry_run: bool = False, greenlit: bool = False) -> dict:
     row = {} if dry_run else _row(ts)
     rounds = int(row.get("rounds") or 0) + 1
     task_id = report["task_id"]
-    context = {
-        "report": report["text"],
-        "reporter": report["reporter"],
-        "thread": report["thread"] or "(no replies)",
-        "linked_task": _task_text(task_id),
-        "existing_tasks": _existing(report["text"]),
-    }
-    result = run_agent(AGENT, context=context,
-                       subject_type="slack_bug_report", subject_id=ts)
-    if not result.ok:
-        card = {"verdict": DECISION, "team": "none",
-                "headline": "The analysis did not finish",
-                "analysis": f"The analyst returned nothing usable "
-                            f"({result.why()}).",
-                "question": "Can you take a look at this one?"}
-    else:
-        card = result.data or {}
+    card = _analyst_card(ts, report, run_agent)
     if not dry_run:
         _save(ts, reporter=report["reporter"], task_id=task_id,
               verdict=str(card.get("verdict") or ""),
@@ -316,6 +308,40 @@ def analyse(ts: str, dry_run: bool = False, greenlit: bool = False) -> dict:
            "reporter": report["reporter"], "greenlit": greenlit,
            "reporter_id": report["reporter_id"], "rounds": rounds}
     return act(ts, row, card, dry_run=dry_run)
+
+
+def _analyst_card(ts: str, report: dict, run_agent) -> dict:
+    context = {
+        "report": report["text"],
+        "reporter": report["reporter"],
+        "thread": report["thread"] or "(no replies)",
+        "linked_task": _task_text(report["task_id"]),
+        "existing_tasks": _existing(report["text"]),
+    }
+    result = run_agent(AGENT, context=context,
+                       subject_type="slack_bug_report", subject_id=ts)
+    if result.ok:
+        return result.data or {}
+    return {"verdict": DECISION, "team": "none",
+            "headline": "The analysis did not finish",
+            "analysis": f"The analyst returned nothing usable "
+                        f"({result.why()}).",
+            "question": "Can you take a look at this one?"}
+
+
+def preview_build(ts: str) -> dict:
+    """What Sam's yes would build for this report, without opening a pull
+    request or writing anything: the analysis, then the greenlit build as a
+    dry run, diffs included. `py bug_reports.py --build <ts> --dry-run`."""
+    from vomeos import run_agent
+
+    report = _read_report(ts)
+    if not report:
+        return {"status": "skipped", "reason": "message unreadable"}
+    card = _analyst_card(ts, report, run_agent)
+    row = {"ts": ts, "task_id": report["task_id"], "greenlit": True,
+           "reporter": report["reporter"]}
+    return _build(ts, row, card, greenlit=True, dry_run=True)
 
 
 def act(ts: str, row: dict, card: dict, dry_run: bool = False) -> dict:
@@ -524,8 +550,9 @@ def _auto_route(ts: str, row: dict, card: dict, reason: str,
 
 def _offer_route(ts: str, card: dict, reason: str,
                  dry_run: bool = False) -> dict:
-    text = (f"<@{SAM_SLACK}> I can't build this: {reason}. Say "
-            f"`route {_team(card)}` to send it to an engineer, or `close`.")
+    text = (f"<@{SAM_SLACK}> I can't build this: {reason.rstrip('. ')}. "
+            f"Say `route {_team(card)}` to send it to an engineer, or "
+            "`close`.")
     if dry_run:
         return _dry(ts, card, [f"thread: {text}"])
     _post(text, thread_ts=ts)
@@ -553,10 +580,16 @@ def _build(ts: str, row: dict, card: dict, greenlit: bool,
     headline = str(card.get("headline") or "")[:60]
     opened, failed, previews = [], [], []
     for alias, places in spots.items():
-        proposal, repo = _propose(ts, card, alias, places, len(spots) > 1)
-        if not proposal.get("diff"):
+        proposal, repo = _propose(ts, card, alias, places, len(spots) > 1,
+                                  greenlit=greenlit)
+        if not proposal.get("diff") or not proposal.get("attempted"):
             failed.append((alias, proposal.get("reason") or "no diff"))
             continue
+        # A partial build: the fix author wrote what it could and named the
+        # rest (skill building-a-greenlit-fix).
+        left = _LEFT_OUT.search(str(proposal.get("rationale") or ""))
+        if left:
+            failed.append((alias, "left out " + left.group(1).strip()))
         if dry_run:
             previews.append(f"PR into {alias} dev branch:\n"
                             f"{proposal['diff'][:3000]}")
@@ -608,7 +641,7 @@ def _build(ts: str, row: dict, card: dict, greenlit: bool,
                  if task_url else
                  f"<@{SAM_SLACK}> the ClickUp task could not be saved.")
     if failed:
-        rest = "; ".join(f"{a}: {r}" for a, r in failed)
+        rest = "; ".join(f"{a}: {r.rstrip('. ')}" for a, r in failed)
         lines.append(f"Not built: {rest}. Say `route {_team(card)}` to send "
                      "the rest to an engineer.")
     _post("\n".join(lines), thread_ts=ts)
@@ -617,10 +650,17 @@ def _build(ts: str, row: dict, card: dict, greenlit: bool,
 
 
 def _propose(ts: str, card: dict, alias: str, places: list,
-             several: bool = False):
+             several: bool = False, greenlit: bool = False):
     """The fix author's diff for one repo, written against the branch it
     will merge into. Same ladder as ticket_fix._propose, minus the Zoho
-    ticket, across every place in this repo."""
+    ticket, across every place in this repo.
+
+    A greenlit fix gets whole files plus the reference files it copies
+    from, and the Greenlight section that tells the fix author Sam approved
+    it. The first greenlit build (exemption rules, 2026-10-19) failed on all
+    three: a 60-line window that stopped before two of the three endpoints,
+    no copy of the sibling module it was told to copy, and a refusal of
+    "authorization logic" nobody had told it Sam had reviewed."""
     import sentry_code
     import sentry_fix
     import sentry_projects
@@ -631,13 +671,23 @@ def _propose(ts: str, card: dict, alias: str, places: list,
     if not repo:
         return {"reason": f"unknown repo {alias!r}"}, repo
     ref = sentry_projects.fix_target(repo.slug) or repo.branch
-    trace = "\n".join(f'File "{path}", line {line or 1}, in bug_report'
-                      for path, line in places)
-    gathered = sentry_code.gather(trace, repo.slug, ref, host=repo.host,
-                                  owner=repo.owner)
+    if greenlit:
+        source = _whole_source(repo, ref, places,
+                               _references(card, alias))
+    else:
+        trace = "\n".join(f'File "{path}", line {line or 1}, in bug_report'
+                          for path, line in places)
+        source = sentry_code.gather(trace, repo.slug, ref, host=repo.host,
+                                    owner=repo.owner).get("files", "")
     fix = str(code.get("fix") or "")
     if several:
         fix += f" (this pull request covers the {alias} part only)"
+    extra = {}
+    if greenlit:
+        extra["greenlight"] = (
+            "Sam read the problem, this fix and its risk in #bug-reports "
+            f"and said yes. Risk as he saw it: {card.get('risk_plain') or ''}"
+            " He reviews the pull request before it merges.")
     proposal = sentry_fix.propose({
         "root_cause": code.get("finding") or "",
         "proposed_fix": fix,
@@ -649,9 +699,74 @@ def _propose(ts: str, card: dict, alias: str, places: list,
         "confidence": code.get("confidence") or "medium",
         "needs_migration": False,
         "files": list(dict.fromkeys(path for path, _line in places)),
-    }, {"source": gathered.get("files", ""), "repo": repo.slug,
-        "branch": ref, "issue_id": _issue_key(ts, alias if several else "")})
+    }, {"source": source, "repo": repo.slug, "branch": ref,
+        "issue_id": _issue_key(ts, alias if several else ""), **extra})
     return proposal, repo
+
+
+def _references(card: dict, alias: str) -> list[tuple[str, int]]:
+    """Files the fix copies from (`code_check.references`), in this repo."""
+    import ticket_fix
+
+    out = []
+    for place in (card.get("code_check") or {}).get("references") or []:
+        place = str(place or "").strip()
+        if _EXACT_WHERE.match(place):
+            ref_alias, path, line = ticket_fix.parse_where(place)
+            if ref_alias == alias and path:
+                out.append((path, line))
+    return out
+
+
+def _whole_source(repo, ref: str, places: list, references: list) -> str:
+    """Numbered source for a greenlit fix: each file it edits whole (wide
+    windows around each spot past WHOLE_FILE_CHARS), then each reference
+    file marked read only. Never silent about a file it could not read."""
+    import sentry_fix
+    from vomeos.integrations import code_search
+
+    reader = code_search.GitHub() if repo.host == "github" \
+        else code_search.Bitbucket()
+    kwargs = {"owner": repo.owner} if repo.host == "github" and repo.owner \
+        else {}
+    chunks, budget = [], SOURCE_BUDGET
+
+    def numbered(path, lines_wanted, label, window):
+        result = reader.read_file(repo.slug, path, ref=ref,
+                                  max_bytes=sentry_fix.APPLY_MAX_BYTES,
+                                  **kwargs)
+        text, why = sentry_fix._file_text(result)
+        if text is None:
+            return f"--- {path} could not be read ({why}) ---"
+        lines = text.splitlines()
+        if len(text) <= WHOLE_FILE_CHARS:
+            spans = [(1, len(lines))]
+        else:
+            spans = [(max(1, n - window), min(len(lines), n + window))
+                     for n in sorted({n or 1 for n in lines_wanted})]
+        width = len(str(len(lines)))
+        parts = []
+        for start, end in spans:
+            body = "\n".join(f"   {str(i).rjust(width)} | {lines[i - 1]}"
+                             for i in range(start, end + 1))
+            parts.append(f"--- {path} lines {start}-{end}{label} ---\n{body}")
+        return "\n\n".join(parts)
+
+    edits: dict[str, list[int]] = {}
+    for path, line in places:
+        edits.setdefault(path, []).append(line)
+    for path, lines_wanted in edits.items():
+        chunk = numbered(path, lines_wanted, "", GREENLIT_WINDOW)
+        chunks.append(chunk[:budget])
+        budget -= len(chunks[-1])
+    for path, line in references:
+        if path in edits or budget <= 0:
+            continue
+        chunk = numbered(path, [line], ", REFERENCE, read only: copy its "
+                         "pattern and imports, do not edit", 80)
+        chunks.append(chunk[:budget])
+        budget -= len(chunks[-1])
+    return "\n\n".join(chunks)
 
 
 def _file_fix_task(card: dict, prs: list, ts: str) -> str:
@@ -1171,7 +1286,14 @@ if __name__ == "__main__":
     parser.add_argument("--backfill", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--limit", type=int, default=20)
+    parser.add_argument("--build", metavar="TS",
+                        help="preview what Sam's yes would build (needs "
+                             "--dry-run; it never opens a PR)")
     args = parser.parse_args()
-    if args.backfill:
+    if args.build:
+        if not args.dry_run:
+            parser.error("--build only previews: add --dry-run")
+        preview_build(args.build)
+    elif args.backfill:
         results = backfill(args.dry_run, args.limit)
         print(f"\n{len(results)} report(s).")

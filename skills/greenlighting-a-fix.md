@@ -33,6 +33,11 @@ A greenlight never lifts these. Sam's yes cannot build them, so say so.
   across repos when the fix needs both (`core:...`, `web:...`). Keep it to
   what is needed: a pull request may change at most three files and sixty
   lines per repo.
+- `code_check.references`: files the fix copies from, one `repo:path:line`
+  each ("make it match step_status/views.py" means that file goes here).
+  The fix author is shown them read only, so it uses their real imports
+  and helpers instead of guessing. The first greenlit build failed without
+  one.
 - `code_check.fix`: the change in one line, the way Sam will read it.
 - `risk_plain`: what could break, in product words ("guests could be booked
   into full shifts if the capacity check is skipped"). Not "medium risk".

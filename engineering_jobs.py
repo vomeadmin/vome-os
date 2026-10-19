@@ -147,6 +147,20 @@ def _register_code_access() -> None:
     )
 
 
+def _register_workflow_log() -> None:
+    """"Log this on ClickUp" from any Slack thread, into Agent Workflows.
+    Idempotent on the trigger message ts (an @-mention arrives twice)."""
+    from workflow_log import HANDLER_KEY, handle
+
+    register_event_handler(
+        HANDLER_KEY,
+        handle,
+        queue=QUEUE,
+        time_limit=300,
+        description="Log a Slack thread to the Agent Workflows list",
+    )
+
+
 def _register_bug_reports() -> None:
     """#bug-reports: one report, or one reply in its thread. Idempotent on
     the report's Slack ts and the last reply handled."""
@@ -194,6 +208,7 @@ def register_all() -> None:
     _register_sentry()
     _register_code_access()
     _register_bug_reports()
+    _register_workflow_log()
     _register_feature_desk()
 
 

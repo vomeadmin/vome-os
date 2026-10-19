@@ -62,3 +62,23 @@ def test_older_models_get_neither(monkeypatch):
 
 def test_effort_levels_are_the_apis():
     assert EFFORT_LEVELS == ("low", "medium", "high", "xhigh", "max")
+
+
+def test_senior_agents_keep_high_effort_on_opus_5_5(monkeypatch):
+    """Opus 5.5 defaults to medium; the senior agents were tuned at Opus
+    5's high (2026-10-19), so their tier pins it unless a manifest says
+    otherwise."""
+    client = _Client()
+    monkeypatch.setattr(runner, "_client", client)
+    senior = SimpleNamespace(
+        qualified="customer_success.test",
+        model=ModelSpec(tier="senior", max_tokens=1000),
+        limits=SimpleNamespace(max_retries=0, timeout_seconds=30))
+    runner._call_model(senior, "sys", "user", "claude-opus-5-5")
+    assert client.calls[0]["output_config"] == {"effort": "high"}
+    own = SimpleNamespace(
+        qualified="customer_success.test",
+        model=ModelSpec(tier="senior", max_tokens=1000, effort="medium"),
+        limits=SimpleNamespace(max_retries=0, timeout_seconds=30))
+    runner._call_model(own, "sys", "user", "claude-opus-5-5")
+    assert client.calls[1]["output_config"] == {"effort": "medium"}

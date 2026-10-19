@@ -1,0 +1,34 @@
+[identity]
+name = "workflow_logger"
+division = "engineering"
+title = "Workflow Logger"
+reports_to = "sam"
+hired = "2026-10-19"
+
+[model]
+# Standard tier. It turns a Slack thread into a ClickUp task Sam will read
+# days later with no memory of the conversation, so the summary has to stand
+# on its own. Nothing it writes leaves the company.
+tier = "standard"
+max_tokens = 1500
+
+[job]
+charter = "charter.md"
+requires_context = ["thread", "channel", "logged_by", "request"]
+output = "json"
+
+[guards]
+output = ["json_shape", "non_empty"]
+client_facing = false
+
+[limits]
+timeout_seconds = 60
+max_retries = 2
+
+[approval]
+# Its only effect is a task in Sam and Ron's own Agent Workflows list.
+requires_ceo_approval = false
+escalate_to = "#vome-agent-log"
+
+[evals]
+path = "evals/cases.jsonl"

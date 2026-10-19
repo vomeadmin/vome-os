@@ -14,11 +14,16 @@ tier = "senior"
 # Generous because the output carries a unified diff with context lines, and
 # a truncated patch fails the shape check and is thrown away whole. The
 # charter caps the prose; this is the headroom for the diff itself.
-max_tokens = 3000
+# 8000, not 3000: the first greenlit #bug-reports fix (six spots in one file,
+# 2026-10-19) ran out mid-diff at 3000 and was thrown away. Patch safety
+# still caps what can merge at 60 changed lines.
+max_tokens = 8000
 
 [job]
 charter = "charter.md"
-skills = []
+# Only acts when the context carries a Greenlight section (#bug-reports,
+# Sam approved the fix himself). Every other run ignores it.
+skills = ["building-a-greenlit-fix"]
 requires_context = [
     "root_cause",
     "proposed_fix",

@@ -51,6 +51,7 @@ from field_feedback import handle_field_feedback
 from on_prod_handler import handle_on_prod
 from release_watcher import run_release_watcher
 import bug_reports
+import workflow_log
 import feature_desk
 import shadow_triage
 import sprint_batch
@@ -568,6 +569,12 @@ async def slack_events_webhook(request: Request):
 
     # app_mention - @Agent was mentioned in a channel
     if event_type == "app_mention":
+        # "@Vome Agent log this": Sam or Ron logging the thread to Agent
+        # Workflows. The same message also arrives as a channel message;
+        # the worker claims it once.
+        if workflow_log.wants(event, mentioned=True):
+            workflow_log.handle_message(event)
+            return {"status": "ok"}
         handle_agent_mention(event)
         return {"status": "ok"}
 
@@ -598,6 +605,12 @@ async def slack_events_webhook(request: Request):
         user = event.get("user")
         text = event.get("text", "")
         files = event.get("files", [])
+
+        # "Log this for us on ClickUp", in any channel the bot is in. Before
+        # the channel routing below, so a channel's own commands never see it.
+        if workflow_log.wants(event):
+            workflow_log.handle_message(event)
+            return {"status": "ok"}
 
         _reply_channels = (
             SLACK_TICKETS_CHANNEL,

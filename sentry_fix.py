@@ -80,16 +80,21 @@ def propose(analysis: dict, context: dict) -> dict:
     try:
         from vomeos import run_agent
 
+        fix_context = {
+            "root_cause": analysis.get("root_cause", ""),
+            "proposed_fix": analysis.get("proposed_fix", ""),
+            "files": ", ".join(analysis.get("files") or []),
+            "source": context.get("source", ""),
+            "repo": context.get("repo", ""),
+            "branch": context.get("branch", ""),
+        }
+        # #bug-reports: Sam read the problem, fix and risk and said yes. The
+        # fix author's skill building-a-greenlit-fix reads this section.
+        if context.get("greenlight"):
+            fix_context["greenlight"] = context["greenlight"]
         result = run_agent(
             "engineering.fix_author",
-            context={
-                "root_cause": analysis.get("root_cause", ""),
-                "proposed_fix": analysis.get("proposed_fix", ""),
-                "files": ", ".join(analysis.get("files") or []),
-                "source": context.get("source", ""),
-                "repo": context.get("repo", ""),
-                "branch": context.get("branch", ""),
-            },
+            context=fix_context,
             subject_type="sentry_issue",
             subject_id=context.get("issue_id", ""),
         )

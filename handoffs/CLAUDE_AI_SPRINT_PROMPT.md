@@ -1,5 +1,12 @@
 # Vome support sprint: Claude.ai project instructions
 
+**Not in use (2026-10-19).** Sam's Claude.ai project does not paste this:
+its instructions load the ClickUp Support Sprint Playbook (doc 3dztm-3311,
+page 3dztm-1871) and the System Configuration doc, plus the
+vome-support-sprint-os skill (source in `handoffs/skills/`). The Playbook
+is the source of truth (`handoffs/PLAYBOOK_v2.1.md` is its v2.1 text).
+Change the Playbook, not this file; this is kept as a standalone fallback.
+
 Paste everything below the line into the instructions of the Claude.ai
 project Sam runs support sprints in. The project needs these connectors:
 **Vome OS** (required), **Zoho Desk**, **ClickUp**, **Slack** (optional).

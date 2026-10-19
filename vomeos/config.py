@@ -58,6 +58,9 @@ SKILLS_DIR = HOME / "skills"
 
 MODEL_FAST = os.environ.get("VOMEOS_MODEL_FAST", "claude-haiku-4-5")
 MODEL_STANDARD = os.environ.get("VOMEOS_MODEL_STANDARD", "claude-sonnet-5")
+# Still Opus 5. On 2026-10-19 Opus 5.5 (at the same "high" effort) scored
+# lower on the engineering and help-centre agents' evals, so only the two
+# support agents moved, to the "premium" tier in their own manifests.
 MODEL_SENIOR = os.environ.get("VOMEOS_MODEL_SENIOR", "claude-opus-5")
 # Three tiers added for the video marketing team (2026-10-18), so moving it
 # to newer models did not move every agent in the support app with it.
@@ -77,6 +80,15 @@ TIERS: dict[str, str] = {
     "current": MODEL_CURRENT,
     "premium": MODEL_PREMIUM,
     "executive": MODEL_EXECUTIVE,
+}
+
+# Effort for a tier whose agents do not set one in their manifest. Senior
+# agents were tuned on Claude Opus 5, whose default effort is "high"; Opus
+# 5.5 defaults to "medium". Pinning "high" makes the 2026-10-19 move to
+# Opus 5.5 a change of model and price only, not of how hard they think.
+# Lower it here (and re-run the evals) as a separate, measured decision.
+EFFORT_BY_TIER: dict[str, str] = {
+    "senior": os.environ.get("VOMEOS_EFFORT_SENIOR", "high"),
 }
 
 # Models that accept the server-side refusal fallback. A safety classifier

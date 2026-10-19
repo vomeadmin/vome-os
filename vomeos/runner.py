@@ -142,6 +142,12 @@ _DEPRECATED_PARAM_RE = re.compile(
 CACHE = {"type": "ephemeral"}
 
 
+def _effort(manifest: AgentManifest) -> str | None:
+    """The manifest's effort, else its tier's (config.EFFORT_BY_TIER)."""
+    return manifest.model.effort or config.EFFORT_BY_TIER.get(
+        manifest.model.tier) or None
+
+
 def _system_blocks(system: str):
     if not system:
         return system
@@ -182,9 +188,10 @@ def _call_with_tools(
     calls: list[dict] = []
     nudged = False
     total_in = total_out = total_read = total_write = total_attempts = 0
+    effort = _effort(manifest)
     while True:
         final = len(calls) >= budget
-        response, attempts = _request(manifest, {
+        kwargs = {
             "model": model,
             "max_tokens": manifest.model.max_tokens,
             "system": _system_blocks(system),
@@ -193,7 +200,10 @@ def _call_with_tools(
             "tool_choice": {"type": "none"} if final else {"type": "auto"},
             "cache_control": CACHE,
             "timeout": manifest.limits.timeout_seconds,
-        })
+        }
+        if effort:
+            kwargs["output_config"] = {"effort": effort}
+        response, attempts = _request(manifest, kwargs)
         used = _usage(response)
         total_in += used[0]
         total_out += used[1]
@@ -289,8 +299,9 @@ def _call_model(
             }
             if send_temperature:
                 kwargs["temperature"] = manifest.model.temperature
-            if manifest.model.effort:
-                kwargs["output_config"] = {"effort": manifest.model.effort}
+            effort = _effort(manifest)
+            if effort:
+                kwargs["output_config"] = {"effort": effort}
             if model in config.FALLBACK_MODELS:
                 # A safety classifier can decline a legitimate request on
                 # these models; the server then reruns it on a model that
