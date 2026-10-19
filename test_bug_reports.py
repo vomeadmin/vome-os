@@ -28,9 +28,16 @@ BUG = {
 }
 
 
+RON_CLICKUP = 4434980
+
+
 class Recorder:
     def __init__(self):
         self.posts, self.calls, self.saved = [], [], {}
+        # What GET /task returns: Ron's task, in Priority Queue, queued.
+        self.task = {"id": "868mg8nce", "creator": {"id": RON_CLICKUP},
+                     "list": {"id": bug_reports.PRIORITY_QUEUE},
+                     "status": {"status": "queued"}, "custom_fields": []}
 
 
 @pytest.fixture
@@ -44,6 +51,8 @@ def rec(monkeypatch):
 
     def clickup(method, path, body=None):
         r.calls.append((method, path, body))
+        if method == "GET":
+            return r.task
         return {"id": "newtask"}
 
     monkeypatch.setattr(bug_reports, "_clickup", clickup)
@@ -64,20 +73,61 @@ def _row(**over):
 # Verdicts
 # ---------------------------------------------------------------------------
 
+def _comments(rec) -> str:
+    return "\n".join(c[2]["comment_text"] for c in rec.calls
+                     if c[1].endswith("/comment"))
+
+
 def test_engineer_adopts_the_reporters_task_and_posts_in_their_channel(rec):
+    import sprint_thread
+
     card = {**BUG, "verdict": "engineer"}
     out = bug_reports.act(TS, _row(), card)
     assert out["verdict"] == "engineer"
-    # Ron's own task is assigned, not a second one created.
+    # Ron's own task: OnlyG in, Sam out, still queued, no second task.
     assert ("PUT", "/task/868mg8nce",
-            {"assignees": {"add": [49257687], "rem": []}}) in rec.calls
+            {"assignees": {"add": [49257687],
+                           "rem": [bug_reports.SAM_CLICKUP]}}) in rec.calls
     assert not any(c[1].startswith("/list/") for c in rec.calls)
-    assert any(c[1] == f"/task/868mg8nce/field/{bug_reports.FIELD_SOURCE}"
-               for c in rec.calls)
-    channels = [p[0] for p in rec.posts]
-    import sprint_thread
-    assert sprint_thread.ENG_BACKEND in channels
+    assert ("POST", f"/task/868mg8nce/field/{bug_reports.FIELD_SOURCE}",
+            {"value": bug_reports.SOURCE_SLACK}) in rec.calls
+    # Ron set no Type, so it becomes Bug.
+    assert ("POST", f"/task/868mg8nce/field/{bug_reports.FIELD_TYPE}",
+            {"value": bug_reports.TYPE_BUG}) in rec.calls
+    # The analysis lives on ClickUp; Slack carries the short message.
+    assert "The old lookup returns None" in _comments(rec)
+    eng = [p for p in rec.posts if p[0] == sprint_thread.ENG_BACKEND][0][2]
+    assert "app.clickup.com/t/868mg8nce" in eng
+    assert "The old lookup" not in eng
+    thread = rec.posts[-1][2]
+    assert thread.startswith(
+        ":white_check_mark: Logged on ClickUp for OnlyG and sent in "
+        f"<#{sprint_thread.ENG_BACKEND}> for communication about it.")
+    assert "The old lookup" not in thread
     assert rec.saved["status"] == bug_reports.ROUTED
+
+
+def test_routing_keeps_the_type_ron_chose(rec):
+    rec.task["custom_fields"] = [{"id": bug_reports.FIELD_TYPE, "value": 1}]
+    bug_reports.act(TS, _row(), {**BUG, "verdict": "engineer"})
+    assert not any(c[1].endswith(bug_reports.FIELD_TYPE) for c in rec.calls)
+
+
+def test_routing_reopens_a_done_task_as_queued(rec):
+    rec.task["status"] = {"status": "declined"}
+    bug_reports.act(TS, _row(), {**BUG, "verdict": "engineer"})
+    put = [c for c in rec.calls if c[0] == "PUT"][0]
+    assert put[2]["status"] == "queued"
+
+
+def test_task_outside_priority_queue_gets_a_priority_queue_task(rec):
+    rec.task["list"] = {"id": "somewhere-else"}
+    out = bug_reports.act(TS, _row(), {**BUG, "verdict": "engineer"})
+    created = [c for c in rec.calls
+               if c[1] == f"/list/{bug_reports.PRIORITY_QUEUE}/task"]
+    assert len(created) == 1 and created[0][2]["assignees"] == [49257687]
+    assert ("POST", "/task/868mg8nce/link/newtask", None) in rec.calls
+    assert out["task"] == "newtask"
 
 
 def test_engineer_without_a_linked_task_creates_one_marked_slack(rec):
@@ -124,11 +174,44 @@ def test_closing_verdicts_file_nothing(rec, verdict):
     assert rec.saved["status"] == bug_reports.CLOSED
 
 
+def _certain(verdict, confidence="high"):
+    return {"verdict": verdict, "analysis": "On development already.",
+            "code_check": {"verdict": "works_as_designed",
+                           "confidence": confidence}}
+
+
+def test_already_fixed_closes_ron_task_as_completed(rec):
+    bug_reports.act(TS, _row(), _certain("already_fixed"))
+    assert ("PUT", "/task/868mg8nce", {"status": "Closed"}) in rec.calls
+    assert ("POST", f"/task/868mg8nce/field/{bug_reports.FIELD_RESOLUTION}",
+            {"value": bug_reports.RESOLUTION_COMPLETED}) in rec.calls
+    assert "On development already." in _comments(rec)
+    assert "Marked closed on ClickUp" in rec.posts[-1][2]
+
+
+def test_not_a_bug_declines_ron_task(rec):
+    bug_reports.act(TS, _row(), _certain("not_a_bug"))
+    assert ("PUT", "/task/868mg8nce", {"status": "declined"}) in rec.calls
+
+
+def test_unsure_close_leaves_the_task_open_for_sam(rec):
+    bug_reports.act(TS, _row(), _certain("already_fixed", "medium"))
+    assert not any(c[0] == "PUT" for c in rec.calls)
+    assert f"<@{bug_reports.SAM_SLACK}> to confirm" in rec.posts[-1][2]
+
+
+def test_reporter_fix_hands_the_task_back_to_ron(rec):
+    bug_reports.act(TS, _row(), _certain("reporter_fix"))
+    assert ("PUT", "/task/868mg8nce", {"assignees": {
+        "add": [RON_CLICKUP], "rem": [bug_reports.SAM_CLICKUP]}}) in rec.calls
+
+
 def test_risky_agent_fix_falls_back_to_an_engineer(rec):
     card = {**BUG, "code_check": {**BUG["code_check"], "fix_risk": "medium"}}
     out = bug_reports.act(TS, _row(), card)
     assert out["verdict"] == "engineer"
-    assert "fix risk is 'medium'" in rec.posts[-1][2]
+    # The reason is recorded on ClickUp, not in the thread.
+    assert "fix risk is 'medium'" in _comments(rec)
 
 
 def test_no_code_read_asks_sam_instead_of_routing(rec):

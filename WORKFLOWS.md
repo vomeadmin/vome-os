@@ -162,12 +162,12 @@ flowchart TD
   AN -->|agent_fix| FX["Fix author + patch safety<br/>PR into the dev branch (cap 3/day)"]:::built
   FX --> AF["Agent Fixes task, Source = Slack<br/>linked to Ron's task; release watcher takes it"]:::built
   FX -->|PR refused or declined| EN
-  AN -->|engineer| EN["Ron's task (or a new Priority Queue task)<br/>assigned to OnlyG / Sanjay, Source = Slack"]:::built
-  EN --> CH["Post in the backend / frontend channel<br/>with the analysis and links"]:::built
+  AN -->|engineer| EN["ClickUp: Ron's Priority Queue task (or a new one)<br/>engineer assigned, Sam removed, queued,<br/>Source = Slack, analysis as a comment"]:::built
+  EN --> CH["Short post in the backend / frontend channel<br/>(headline + ClickUp link)"]:::built
   AN -->|decision| SAM["Sam asked in the thread"]:::built
   AN -->|needs_info| ASK["Reporter asked one question<br/>(4 rounds, then Sam)"]:::built
-  AN -->|not a bug, already fixed, only in Ron's branch| FIN["Finding posted, nothing filed"]:::built
-  FX & EN & SAM & ASK & FIN --> TH["Outcome posted in the report's thread"]:::built
+  AN -->|not a bug, already fixed, only in Ron's branch| FIN["Ron's task: closed or declined (high confidence),<br/>or handed back to Ron; analysis as a comment"]:::built
+  FX & EN & SAM & ASK & FIN --> TH["Thread: check mark, one line, ClickUp link<br/>(ClickUp holds the record, Slack the conversation)"]:::built
   SAM --> CMD["Sam replies: fix / route backend|frontend|both / close<br/>or answers, and the analysis runs again"]:::built
   ASK --> RE["Reporter answers, analysis runs again"]:::built
 ```

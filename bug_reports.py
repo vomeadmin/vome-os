@@ -35,9 +35,17 @@ analysis again with the thread.
 THE REPORTER'S OWN TASK
 -----------------------
 Ron files a ClickUp task for every report and links it (Sam chose to adopt
-it rather than file a second one). It gets Source = Slack, the analysis as a
-comment, and the engineer as assignee. A new task is created only when the
-report links none.
+it rather than file a second one). ClickUp is the record and Slack is the
+conversation (Sam, 2026-10-19): the analysis goes on the task as a comment,
+and Slack gets a check mark, one line and the link.
+
+    engineer       his task, kept in Priority Queue: the engineer assigned,
+                   Sam removed, an open status (queued), Source = Slack,
+                   Type Bug if he set none. Outside Priority Queue, or no
+                   task linked: a new Priority Queue task, linked to his.
+    already_fixed  Closed, Resolution Completed  } only when the code check
+    not_a_bug      declined, Resolution Declined } is high confidence
+    reporter_fix   assigned back to the reporter, Sam removed
 
 SWITCHES
 --------
@@ -69,6 +77,18 @@ SAM_CLICKUP = 3691763
 PRIORITY_QUEUE = "901113386257"
 FIELD_SOURCE = "857e1262-cb5c-4c22-b8da-770a8fcfa82e"
 SOURCE_SLACK = "e62588d7-4b72-45a8-a9ab-a2c20a860903"
+FIELD_TYPE = "e0e439f5-397d-432d-addd-e90fbf50cd30"
+TYPE_BUG = "d9c82e67-c46b-48d1-95f7-9c1f5b2fc2df"
+FIELD_RESOLUTION = "63ef3458-cfa6-4a0b-ae44-18858cd555f0"
+RESOLUTION_COMPLETED = "c51c9782-0bca-4c40-a4fe-a272427dc347"
+RESOLUTION_DECLINED = "8600a963-ab55-430f-a86f-2b1d0f911156"
+
+# Statuses an engineer is already working from. Anything else (a done
+# status on a reopened report) goes back to `queued` when it is routed.
+# Never `on prod`: that status emails clients through the on-prod handler.
+ENGINEER_OPEN = ("queued", "in progress", "escalated")
+COMPLETE = {"status": "Closed", "resolution": RESOLUTION_COMPLETED}
+DECLINE = {"status": "declined", "resolution": RESOLUTION_DECLINED}
 
 # A report that keeps coming back for more information stops asking after
 # this many runs and goes to Sam.
@@ -230,7 +250,7 @@ def analyse(ts: str, dry_run: bool = False) -> dict:
               verdict=str(card.get("verdict") or ""),
               team=str(card.get("team") or ""), card=json.dumps(card),
               rounds=rounds, status=CHECKING)
-    row = {**row, "ts": ts, "task_id": task_id,
+    row = {**row, "ts": ts, "task_id": task_id, "text": report["text"],
            "reporter": report["reporter"],
            "reporter_id": report["reporter_id"], "rounds": rounds}
     return act(ts, row, card, dry_run=dry_run)
@@ -256,36 +276,57 @@ def act(ts: str, row: dict, card: dict, dry_run: bool = False) -> dict:
     if verdict == "engineer":
         return _route(ts, row, card, _team(card), dry_run=dry_run)
 
-    analysis = str(card.get("analysis") or "")
+    # ClickUp holds the record; Slack carries a short message and the link
+    # (Sam, 2026-10-19). The analysis only goes in the thread when there is
+    # no task to put it on.
+    task_id = row.get("task_id") or ""
+    url = f"https://app.clickup.com/t/{task_id}" if task_id else ""
+    details = (f"Details on ClickUp: <{url}|task>" if url
+               else str(card.get("analysis") or ""))
     question = str(card.get("question") or "")
+    # Closing a teammate's task on the agent's word needs a certain call.
+    certain = (card.get("code_check") or {}).get("confidence") == "high"
+    task_change: dict = {}
     if verdict == "needs_info":
         who = row.get("reporter_id") or ""
-        text = (f"{f'<@{who}> ' if who else ''}{question}\n\n"
-                f"_What I found so far:_ {analysis}")
+        text = f"{f'<@{who}> ' if who else ''}{question}"
         status = NEEDS_INFO
-    elif verdict == "not_a_bug":
-        text = f"*Not a bug.* {analysis}"
-        status = CLOSED
-    elif verdict == "already_fixed":
-        text = f"*Already fixed.* {analysis}"
+    elif verdict in ("not_a_bug", "already_fixed"):
+        label = ("Not a bug" if verdict == "not_a_bug" else "Already fixed")
+        if url and certain:
+            task_change = (DECLINE if verdict == "not_a_bug" else COMPLETE)
+            done = ("declined" if verdict == "not_a_bug" else "closed")
+            text = f":white_check_mark: {label}. Marked {done} on ClickUp: " \
+                   f"<{url}|task>"
+        elif url:
+            text = (f":white_check_mark: {label}, I think. Left open on "
+                    f"ClickUp for <@{SAM_SLACK}> to confirm: <{url}|task>")
+        else:
+            text = f":white_check_mark: {label}. {details}"
         status = CLOSED
     elif verdict == "reporter_fix":
-        text = (f"*Only in your branch.* {analysis}\n"
-                "Nothing to fix on development or develop.")
+        if url:
+            task_change = {"to_reporter": True}
+            text = (":white_check_mark: This only exists in your branch, so "
+                    f"it's yours to fix. Assigned back to you on ClickUp: "
+                    f"<{url}|task>")
+        else:
+            text = (":white_check_mark: This only exists in your branch, so "
+                    f"it's yours to fix. {details}")
         status = CLOSED
     else:
-        text = (f"<@{SAM_SLACK}> *Needs your call.* {analysis}\n"
-                f"*Question:* {question}\n"
+        text = (f"<@{SAM_SLACK}> Needs your call: {question}\n{details}\n"
                 "Reply here with your answer, or `fix`, "
                 "`route backend|frontend|both`, `close`.")
         status = DECISION
-    headline = str(card.get("headline") or "")
     if dry_run:
-        return _dry(ts, card, [f"thread: {text}"])
-    _post(f"*{headline}*\n{text}" if headline else text, thread_ts=ts)
-    if row.get("task_id"):
-        _comment(row["task_id"], _comment_text(card, ts))
-        _set_source(row["task_id"])
+        return _dry(ts, card, [f"thread: {text}",
+                               f"ClickUp: {task_change or 'comment only'}"])
+    if task_id:
+        _comment(task_id, _comment_text(card, ts))
+        _set_source(task_id)
+        _apply(task_id, task_change)
+    _post(text, thread_ts=ts)
     _save(ts, status=status)
     return {"status": "ok", "verdict": verdict}
 
@@ -349,13 +390,11 @@ def _fix(ts: str, row: dict, card: dict, sam_approved: bool = False,
         _set_source(row["task_id"])
         _link(row["task_id"], fix_task)
     _save(ts, status=FIXING, pr_url=pr["url"], fix_task=fix_task)
-    _post("\n".join([
-        f"*Agent fix proposed.* {card.get('headline') or ''}",
-        str(card.get("analysis") or ""),
-        f"PR: <{pr['url']}|pull request into the dev branch>. Sam reviews "
-        "and merges.",
-        f"ClickUp: <{task_url}|Agent Fixes task>" if task_url else "",
-    ]).strip(), thread_ts=ts)
+    where = (f"Logged on ClickUp: <{task_url}|Agent Fixes task>" if task_url
+             else f"<@{SAM_SLACK}> the ClickUp task could not be saved.")
+    _post(f":white_check_mark: Fixed by the agent. "
+          f"<{pr['url']}|Pull request> into the dev branch, waiting for "
+          f"Sam to review and merge.\n{where}", thread_ts=ts)
     return {"status": "ok", "verdict": "agent_fix", "pr_url": pr["url"]}
 
 
@@ -457,77 +496,140 @@ def _engineers(team: str) -> list[tuple]:
     return [(key, *sprint_thread.ENGINEERS[key]) for key in keys]
 
 
+def _names(engineers: list[tuple]) -> str:
+    pretty = {"onlyg": "OnlyG", "sanjay": "Sanjay"}
+    return " and ".join(pretty.get(e[0], e[0]) for e in engineers)
+
+
 def _route(ts: str, row: dict, card: dict, team: str, reason: str = "",
            dry_run: bool = False) -> dict:
-    """Assign the reporter's task (or a new one) and post in each
-    engineer's channel. Sam chose auto-routing, 2026-10-19."""
+    """The engineer's Priority Queue task, then a short post in their
+    channel and in the report's thread. Sam chose auto-routing, and that
+    ClickUp holds the record while Slack carries the message (2026-10-19).
+    """
     engineers = _engineers(team)
-    names = " and ".join(e[0].replace("onlyg", "OnlyG")
-                         .replace("sanjay", "Sanjay") for e in engineers)
+    names = _names(engineers)
+    channels = " and ".join(f"<#{e[4]}>" for e in engineers)
     headline = str(card.get("headline") or "Bug report")
-    summary = str(card.get("engineer_summary") or card.get("analysis") or "")
     if dry_run:
         task = row.get("task_id") or "a new Priority Queue task"
         because = f", because {reason}" if reason else ""
         return _dry(ts, card, [
             f"route to {names} ({team}){because}",
-            f"ClickUp: assign {task}, Source = Slack, comment the analysis",
+            f"ClickUp: {task} in Priority Queue, assigned to {names} only, "
+            "queued, Source = Slack, analysis as a comment",
+            f"thread: :white_check_mark: Logged on ClickUp for {names} and "
+            f"sent in {channels} for communication about it.",
         ])
 
-    task_id = row.get("task_id") or ""
-    ids = [e[1] for e in engineers]
-    if task_id:
-        try:
-            _clickup("PUT", f"/task/{task_id}",
-                     {"assignees": {"add": ids, "rem": []}})
-        except Exception as exc:
-            print(f"[BUG REPORTS] could not assign {task_id}: {exc}")
-        _set_source(task_id)
-        _comment(task_id, _comment_text(card, ts, reason))
-    else:
-        task_id = _create_task(card, ts, ids, reason)
+    task_id = _engineer_task(row, card, ts, [e[1] for e in engineers],
+                             reason)
     task_url = f"https://app.clickup.com/t/{task_id}" if task_id else ""
-
     link = _permalink(ts)
     for _key, _clickup_id, slack_id, label, channel in engineers:
-        _post("\n".join([
-            f"<@{slack_id}> new {label} bug from #bug-reports "
+        _post("\n".join(p for p in (
+            f"<@{slack_id}> New {label} bug from #bug-reports "
             f"({row.get('reporter') or 'a teammate'}): *{headline}*",
-            summary,
-            " · ".join(p for p in (
-                f"ClickUp: {task_url}" if task_url else "",
-                f"Slack: {link}" if link else "") if p),
-        ]), channel=channel)
+            f"Details and the agent's analysis are on ClickUp: {task_url}"
+            if task_url else str(card.get("engineer_summary") or ""),
+            f"Report: {link}" if link else "",
+        ) if p), channel=channel)
 
     _save(ts, status=ROUTED, team=team, task_id=task_id)
-    _post("\n".join([
-        f"*Sent to {names}* ({team}). {headline}",
-        str(card.get("analysis") or ""),
-        f"_Why it went to an engineer:_ {reason}" if reason else "",
-        f"ClickUp: <{task_url}|task>" if task_url else "",
-    ]).strip(), thread_ts=ts)
+    if task_url:
+        text = (f":white_check_mark: Logged on ClickUp for {names} and sent "
+                f"in {channels} for communication about it.\n"
+                f"<{task_url}|{headline}>")
+    else:
+        text = (f":warning: Sent to {names} in {channels}, but the ClickUp "
+                f"task could not be saved. <@{SAM_SLACK}> it needs logging.")
+    _post(text, thread_ts=ts)
     return {"status": "ok", "verdict": "engineer", "team": team,
             "task": task_id}
 
 
-def _create_task(card: dict, ts: str, assignees: list, reason: str) -> str:
-    import ticket_fix as tf
+def _engineer_task(row: dict, card: dict, ts: str, ids: list,
+                   reason: str) -> str:
+    """The reporter's task when it is in Priority Queue, otherwise a new
+    Priority Queue task linked to it. Either way: assigned to the engineers
+    alone, an open engineer status, Source = Slack, Type kept if the
+    reporter set one, and the analysis as a comment."""
+    task_id = row.get("task_id") or ""
+    task = {}
+    if task_id:
+        try:
+            task = _clickup("GET", f"/task/{task_id}")
+        except Exception as exc:
+            print(f"[BUG REPORTS] could not read {task_id}: {exc}")
+    if not task or (task.get("list") or {}).get("id") != PRIORITY_QUEUE:
+        new = _create_task(card, ts, ids, reason, row.get("text") or "")
+        if task_id and new:
+            _link(task_id, new)
+            _comment(task_id, "Routed to an engineer. Work is tracked on "
+                              f"https://app.clickup.com/t/{new}")
+        return new or task_id
 
+    status = str((task.get("status") or {}).get("status") or "").lower()
+    body: dict = {"assignees": {
+        "add": ids, "rem": [SAM_CLICKUP] if SAM_CLICKUP not in ids else []}}
+    if status not in ENGINEER_OPEN:
+        body["status"] = "queued"
+    try:
+        _clickup("PUT", f"/task/{task_id}", body)
+    except Exception as exc:
+        print(f"[BUG REPORTS] could not assign {task_id}: {exc}")
+    _set_source(task_id)
+    if not _field_value(task, FIELD_TYPE):
+        _set_field(task_id, FIELD_TYPE, TYPE_BUG)
+    _comment(task_id, _comment_text(card, ts, reason))
+    return task_id
+
+
+def _field_value(task: dict, field_id: str):
+    for field in task.get("custom_fields") or []:
+        if field.get("id") == field_id:
+            return field.get("value")
+    return None
+
+
+def _create_task(card: dict, ts: str, assignees: list, reason: str,
+                 report: str = "") -> str:
+    description = _comment_text(card, ts, reason)
+    if report:
+        description += f"\n\n## The report\n{report}"
     try:
         task = _clickup("POST", f"/list/{PRIORITY_QUEUE}/task", {
             "name": str(card.get("headline") or "Bug report")[:180],
-            "markdown_description": _comment_text(card, ts, reason),
+            "markdown_description": description,
             "assignees": assignees,
             "status": "queued",
             "custom_fields": [
                 {"id": FIELD_SOURCE, "value": SOURCE_SLACK},
-                {"id": tf.FIELD_TYPE, "value": tf.TYPE_BUG},
+                {"id": FIELD_TYPE, "value": TYPE_BUG},
             ],
         })
         return str(task.get("id") or "")
     except Exception as exc:
         print(f"[BUG REPORTS] task not created for {ts}: {exc}")
         return ""
+
+
+def _apply(task_id: str, change: dict) -> None:
+    """Close, decline, or hand a teammate's task back to them."""
+    if not change:
+        return
+    try:
+        if change.get("to_reporter"):
+            task = _clickup("GET", f"/task/{task_id}")
+            creator = (task.get("creator") or {}).get("id")
+            if creator and creator != SAM_CLICKUP:
+                _clickup("PUT", f"/task/{task_id}", {"assignees": {
+                    "add": [creator], "rem": [SAM_CLICKUP]}})
+            return
+        _clickup("PUT", f"/task/{task_id}", {"status": change["status"]})
+        _set_field(task_id, FIELD_RESOLUTION, change["resolution"])
+    except Exception as exc:
+        print(f"[BUG REPORTS] could not update {task_id}: {exc}")
 
 
 def _comment_text(card: dict, ts: str, reason: str = "") -> str:
@@ -704,11 +806,15 @@ def _comment(task_id: str, text: str) -> None:
 
 
 def _set_source(task_id: str) -> None:
+    _set_field(task_id, FIELD_SOURCE, SOURCE_SLACK)
+
+
+def _set_field(task_id: str, field_id: str, value) -> None:
     try:
-        _clickup("POST", f"/task/{task_id}/field/{FIELD_SOURCE}",
-                 {"value": SOURCE_SLACK})
+        _clickup("POST", f"/task/{task_id}/field/{field_id}",
+                 {"value": value})
     except Exception as exc:
-        print(f"[BUG REPORTS] Source not set on {task_id}: {exc}")
+        print(f"[BUG REPORTS] field {field_id} not set on {task_id}: {exc}")
 
 
 def _link(task_id: str, other: str) -> None:

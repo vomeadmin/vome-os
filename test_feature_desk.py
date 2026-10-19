@@ -25,8 +25,9 @@ def _build_item(**over):
         "analysis": "The columns exist on User; two serializers omit them.",
         "evidence": "core:volunteer_app/serializers.py:812",
         "build": {"repo": "core",
-                  "anchors": ["volunteer_app/serializers.py:812",
-                              "volunteer_app/api_version/v2/serializers.py:40"],
+                  "anchors": [
+                      "volunteer_app/serializers.py:812",
+                      "volunteer_app/api_version/v2/serializers.py:40"],
                   "plan": "Add the four fields to both Meta.fields.",
                   "contract": "volunteer.address_city etc., strings or null"},
     }
@@ -115,6 +116,26 @@ def test_a_request_is_acknowledged_then_queued(monkeypatch, desk):
                        "parts on the volunteer profile load, thanks."})
     assert desk["posts"][0].startswith("Analysing this")
     assert queued == [{"ts": "1.1"}]
+
+
+def test_a_bare_clickup_link_is_a_request(monkeypatch, desk):
+    queued = []
+    monkeypatch.setattr("vomeos.worker.enqueue_event",
+                        lambda key, payload, queue="": queued.append(payload))
+    fd.handle_message({"ts": "1.1",
+                       "text": "<https://app.clickup.com/t/868mjq5gb>"})
+    assert queued == [{"ts": "1.1"}]
+
+
+def test_a_priority_queue_task_gets_one_thread(monkeypatch, desk):
+    monkeypatch.setattr(fd.store, "ensure_table", lambda name: True)
+    monkeypatch.setattr(fd.store, "query", lambda sql, params:
+                        [{"ts": "9.9"}])
+    monkeypatch.setattr(fd, "analyse", lambda *a, **k: pytest.fail("ran"))
+    result = fd.intake_task("868mjq5gb")
+    assert result == {"status": "skipped", "reason": "already has a thread",
+                      "ts": "9.9"}
+    assert desk["posts"] == []
 
 
 def test_a_reply_is_queued_against_its_post(monkeypatch, desk):

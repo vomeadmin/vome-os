@@ -168,7 +168,9 @@ def handle_message(event: dict) -> None:
         from vomeos.worker import enqueue_event
 
         if not thread_ts or thread_ts == ts:
-            if len(text) < MIN_REQUEST_CHARS:
+            # A bare ClickUp link is a request too: it is how Sam sends a
+            # Priority Queue handoff that never had a post of its own.
+            if len(text) < MIN_REQUEST_CHARS and not _TASK_LINK.search(text):
                 return
             _post("Analysing this. I'll check it against the backend and "
                   "reply here with what can be built and what needs Sam.",
@@ -306,11 +308,13 @@ def _command(ts: str, row: dict, items: dict, command: dict) -> dict:
 
 
 def analyse(ts: str, direction: str = "", approved: list | None = None,
-            dry_run: bool = False) -> dict:
-    """Run the architect on the post and act on each item's verdict."""
+            dry_run: bool = False, post: dict | None = None) -> dict:
+    """Run the architect on the post and act on each item's verdict.
+    `post` stands in for the Slack message when a ClickUp task is
+    analysed without one (a dry run of the Priority Queue)."""
     from vomeos import run_agent
 
-    post = _read_post(ts)
+    post = post or _read_post(ts)
     if not post:
         return {"status": "skipped", "reason": "message unreadable"}
     row = {} if dry_run else _row(ts)
@@ -834,7 +838,10 @@ def _read_post(ts: str) -> dict:
     if not replies:
         return {}
     parent = replies[0]
-    requester_id = str(parent.get("user") or "")
+    # A thread the desk opened itself for a Priority Queue task: the
+    # requester is whoever wrote the task, not the bot.
+    requester_id = "" if parent.get("bot_id") else str(parent.get("user")
+                                                       or "")
     thread = []
     for msg in replies[1:]:
         if msg.get("bot_id"):
@@ -847,9 +854,53 @@ def _read_post(ts: str) -> dict:
     text = str(parent.get("text") or "")
     match = _TASK_LINK.search(text)
     return {"text": text, "requester_id": requester_id,
-            "requester": _name(requester_id),
+            "requester": _name(requester_id) if requester_id
+            else "the task's author (from the Priority Queue)",
             "thread": "\n\n".join(thread),
             "task_id": match.group(1) if match else ""}
+
+
+# ---------------------------------------------------------------------------
+# The Priority Queue: handoffs that never had a Slack post
+# ---------------------------------------------------------------------------
+
+def _task_post(task_id: str) -> dict:
+    """A ClickUp task standing in for a Slack post. The spec itself goes to
+    the architect as `linked_task`; the request is its name and link."""
+    task = _clickup("GET", f"/task/{task_id}")
+    creator = (task.get("creator") or {}).get("username") or "unknown"
+    return {"text": f"{task.get('name')}\n"
+                    f"https://app.clickup.com/t/{task_id}",
+            "requester_id": "", "requester": creator, "thread": "",
+            "task_id": task_id}
+
+
+def analyse_task(task_id: str) -> dict:
+    """Dry run on one Priority Queue task. Nothing is posted or written."""
+    return analyse(f"task-{task_id}", dry_run=True,
+                   post=_task_post(task_id))
+
+
+def intake_task(task_id: str) -> dict:
+    """Open a thread in #feature-requests for a Priority Queue task and
+    analyse it there, so Sam answers it like any other request. Once per
+    task: a task the desk already has a thread for is skipped."""
+    if not store.ensure_table(LEDGER):
+        return {"status": "skipped", "reason": "no database"}
+    seen = store.query(f"SELECT ts FROM {LEDGER} WHERE task_id = :t",
+                       {"t": task_id})
+    if seen:
+        return {"status": "skipped", "reason": "already has a thread",
+                "ts": seen[0]["ts"]}
+    post = _task_post(task_id)
+    name = post["text"].split("\n", 1)[0]
+    ts = _post(f"*Backend handoff from the Priority Queue* (by "
+               f"{post['requester']}): <https://app.clickup.com/t/"
+               f"{task_id}|{name}>\nAnalysing it here.")
+    if not ts:
+        return {"status": "error", "reason": "could not post"}
+    _save(ts, task_id=task_id, status=ANALYSING)
+    return analyse(ts)
 
 
 def _name(user_id) -> str:
@@ -1053,7 +1104,15 @@ if __name__ == "__main__":
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--ts", default="", help="analyse one post, dry run")
+    parser.add_argument("--task", nargs="*", default=[],
+                        help="dry run on Priority Queue task ids")
+    parser.add_argument("--intake", nargs="*", default=[],
+                        help="open a thread for each task id and analyse it")
     args = parser.parse_args()
+    for task_id in args.task:
+        analyse_task(task_id)
+    for task_id in args.intake:
+        print(task_id, intake_task(task_id))
     if args.ts:
         analyse(args.ts, dry_run=True)
     elif args.backfill:
