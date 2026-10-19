@@ -177,6 +177,8 @@ def _record(ticket_id: str, number: str, outcome: str, reason: str,
         " pr_url, parent_task, child_task) VALUES (:t, :n, :o, :r, :p, :pa,"
         " :c) ON CONFLICT (ticket_id) DO UPDATE SET outcome = EXCLUDED."
         "outcome, reason = EXCLUDED.reason, pr_url = EXCLUDED.pr_url,"
+        # A retry is a new attempt: its time, not the first one's.
+        " attempted_at = NOW(),"
         " parent_task = EXCLUDED.parent_task, child_task = EXCLUDED."
         "child_task",
         {"t": ticket_id, "n": number, "o": outcome, "r": reason[:1000],
@@ -233,10 +235,16 @@ def _propose(ticket_id, ticket_number, account, card, zoho_url,
                 "pr_url": ""}
 
     # The fix author reads the same windowed source the Sentry analyst does,
-    # built from a one-frame trace at the line the code check named.
+    # built from a one-frame trace at the line the code check named...
     trace = f'File "{path}", line {line or 1}, in ticket_{ticket_number}'
     gathered = sentry_code.gather(trace, repo.slug, repo.branch,
                                   host=repo.host, owner=repo.owner)
+    # ...plus where the names the fix depends on are declared, which is
+    # rarely inside that window (#9582: line 6119 used state declared at
+    # 1687 and mirrored a helper in another file).
+    extra = extra_context(repo, path, line or 1, card)
+    if extra:
+        gathered["files"] = gathered.get("files", "") + "\n\n" + extra
     analysis = {
         "root_cause": code.get("finding") or "",
         "proposed_fix": code.get("fix") or "",
@@ -284,6 +292,166 @@ def _propose(ticket_id, ticket_number, account, card, zoho_url,
         f"https://app.clickup.com/t/{parent}" if parent else "")
     return {"outcome": "pr_opened", "reason": "", "pr_url": pr["url"],
             "parent": parent, "child": child, "zoho": zoho}
+
+
+# ---------------------------------------------------------------------------
+# Context beyond the window: what an engineer would open next
+# ---------------------------------------------------------------------------
+
+# Extra source handed to the fix author, on top of the window at the line.
+CONTEXT_CHARS = int(os.environ.get("TICKET_FIX_CONTEXT_CHARS", "40000"))
+CONTEXT_LINES = 25      # either side of each declaration in the same file
+OTHER_FILE_LINES = 60   # either side of a declaration in another file
+# Another file this short is shown whole: a helper's guard is rarely next
+# to its declaration (useColumnAutoFit declares at 33, guards at 233).
+WHOLE_FILE_LINES = 400
+MAX_NAMES = 12
+MAX_OTHER_FILES = 2
+
+_IDENT = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{5,}\b")
+
+
+def code_names(card: dict) -> list[str]:
+    """Identifiers the diagnosis talks about, in order, prose left out.
+
+    Only words shaped like code (camelCase, PascalCase with an inner
+    capital, snake_case), so "column" and "render" are not chased.
+    """
+    code = card.get("code_check") or {}
+    text = " ".join(str(code.get(k) or "") for k in ("fix", "finding"))
+    names: list[str] = []
+    for word in _IDENT.findall(text):
+        if not (re.search(r"[a-z][A-Z]", word) or "_" in word.strip("_")):
+            continue
+        if word not in names:
+            names.append(word)
+    return names[:MAX_NAMES]
+
+
+def _declaration_line(lines: list[str], name: str) -> int:
+    """1-based line declaring `name`, else its first use, else 0."""
+    word = re.compile(rf"\b{re.escape(name)}\b")
+    declares = (
+        re.compile(rf"\b(const|let|var|function|class|def|import)\b.*"
+                   rf"\b{re.escape(name)}\b"),
+        re.compile(rf"\b{re.escape(name)}\s*[:=]\s*[^=]"),
+        re.compile(rf"^\s*{re.escape(name)}\s*,?\s*$"),  # destructured prop
+    )
+    first = 0
+    for index, text in enumerate(lines, start=1):
+        if not word.search(text):
+            continue
+        if any(p.search(text) for p in declares):
+            return index
+        first = first or index
+    return first
+
+
+def _numbered(path: str, lines: list[str], start: int, end: int,
+              why: str) -> str:
+    """Lines start..end (1-based, inclusive), numbered like sentry_code."""
+    width = len(str(end))
+    body = "\n".join(f"   {str(i).rjust(width)} | {lines[i - 1]}"
+                     for i in range(start, end + 1))
+    return f"--- {path} lines {start}-{end} ({why}) ---\n{body}"
+
+
+def _merge(ranges: list[tuple[int, int, str]]) -> list[tuple[int, int, str]]:
+    merged: list[tuple[int, int, str]] = []
+    for start, end, why in sorted(ranges):
+        if merged and start <= merged[-1][1] + 1:
+            s, e, w = merged[-1]
+            merged[-1] = (s, max(e, end), w if why in w else f"{w}, {why}")
+        else:
+            merged.append((start, end, why))
+    return merged
+
+
+def _client(repo):
+    from vomeos.integrations.code_search import Bitbucket, GitHub
+
+    return GitHub() if repo.host == "github" else Bitbucket()
+
+
+def _read_text(repo, path: str) -> str:
+    kwargs = {"owner": repo.owner} if repo.host == "github" else {}
+    result = _client(repo).read_file(repo.slug, path, ref=repo.branch,
+                                     max_bytes=2_000_000, **kwargs)
+    return result.data if result.ok and isinstance(result.data, str) else ""
+
+
+def _defining_file(repo, name: str, skip: str) -> tuple[str, list[str], int]:
+    """(path, lines, line) of the file that declares `name`, or empty."""
+    kwargs = ({"owner": repo.owner, "ref": repo.branch}
+              if repo.host == "github" else {})
+    result = _client(repo).search_code(name, repo=repo.slug, **kwargs)
+    if not result.ok or not isinstance(result.data, dict):
+        return "", [], 0
+    paths = []
+    for item in (result.data.get("values") or result.data.get("items")
+                 or []):
+        found = (item.get("file") or {}).get("path") or item.get("path")
+        if found and found != skip and found not in paths:
+            paths.append(found)
+    # A file named after the symbol is the likeliest home (useX.js).
+    paths.sort(key=lambda p: p.rsplit("/", 1)[-1].split(".")[0] != name)
+    for candidate in paths[:4]:
+        lines = _read_text(repo, candidate).splitlines()
+        line = _declaration_line(lines, name)
+        if line and re.search(
+                rf"\b(const|let|var|function|class|def)\s+{re.escape(name)}"
+                rf"\b", lines[line - 1]):
+            return candidate, lines, line
+    return "", [], 0
+
+
+def extra_context(repo, path: str, line: int, card: dict) -> str:
+    """Where the diagnosis's names are declared, as numbered source.
+
+    Same file first (the declaration of each name, skipping what the main
+    window already shows), then up to two other files that declare names
+    this file does not. Never raises: missing context is a weaker proposal,
+    not a failure.
+    """
+    try:
+        names = code_names(card)
+        if not names:
+            return ""
+        lines = _read_text(repo, path).splitlines()
+        if not lines:
+            return ""
+        from sentry_code import WINDOW
+
+        shown = (line - WINDOW, line + WINDOW)
+        ranges, elsewhere = [], []
+        for name in names:
+            at = _declaration_line(lines, name)
+            if not at:
+                elsewhere.append(name)
+                continue
+            if shown[0] <= at <= shown[1]:
+                continue
+            ranges.append((max(1, at - CONTEXT_LINES),
+                           min(len(lines), at + CONTEXT_LINES),
+                           f"where {name} is declared"))
+        chunks = [_numbered(path, lines, s, e, why)
+                  for s, e, why in _merge(ranges)]
+        for name in elsewhere[:MAX_OTHER_FILES]:
+            other, other_lines, at = _defining_file(repo, name, path)
+            if not other:
+                continue
+            if len(other_lines) <= WHOLE_FILE_LINES:
+                s, e = 1, len(other_lines)
+            else:
+                s = max(1, at - OTHER_FILE_LINES)
+                e = min(len(other_lines), at + OTHER_FILE_LINES)
+            chunks.append(_numbered(other, other_lines, s, e,
+                                    f"{name}, defined in another file"))
+        text = "\n\n".join(chunks)
+        return text[:CONTEXT_CHARS]
+    except Exception as exc:  # weaker context, never a failed attempt
+        print(f"[TICKET FIX] extra context failed: {exc}")
+        return ""
 
 
 # ---------------------------------------------------------------------------

@@ -348,3 +348,126 @@ def test_a_finished_item_is_not_reopened_by_a_late_pr(db):
     sprint_store.decide(item["id"], sprint_store.SENT, "sent by Sam")
     sprint_store.set_fix_pr(item["id"], PR)
     assert sprint_store.get_item(item["id"])["status"] == "sent"
+
+
+# ---------------------------------------------------------------------------
+# What the fix author is shown beyond the window at the line
+# ---------------------------------------------------------------------------
+
+CARD_9582 = {"lane": "agent_fix", "code_check": {
+    "fix": "Build the same effective widths array used in useColumnAutoFit "
+           "and pass that to TableColumnResizing instead of raw "
+           "liveColumnWidths.",
+    "finding": "The list mirrors columnWidths into local liveColumnWidths "
+               "and re-syncs them in a useEffect."}}
+
+
+def test_only_code_shaped_words_are_chased():
+    names = ticket_fix.code_names(CARD_9582)
+    assert names[:2] == ["useColumnAutoFit", "TableColumnResizing"]
+    assert "liveColumnWidths" in names and "columnWidths" in names
+    assert "effective" not in names and "widths" not in names
+
+
+def _grid_file():
+    lines = [f"// filler {i}" for i in range(1, 6501)]
+    lines[1590] = "        columnWidths,"
+    lines[1686] = ("    const [liveColumnWidths, setLiveColumnWidths] = "
+                   "useState(columnWidths || []);")
+    lines[6118] = "                    columnWidths={liveColumnWidths}"
+    return "\n".join(lines) + "\n"
+
+
+HOOK = ("export const useColumnAutoFit = ({ columnWidths }) => {\n"
+        + "".join(f"    // body {i}\n" for i in range(200))
+        + "    const effectiveColumnWidths = columnWidths;\n};\n")
+
+
+@pytest.fixture
+def code(monkeypatch):
+    from vomeos.integrations.base import IntegrationResult
+
+    files = {"src/Grid.js": _grid_file(),
+             "src/hooks/useColumnAutoFit.js": HOOK,
+             "src/Other.js": "useColumnAutoFit();\n"}
+
+    class Client:
+        def read_file(self, repo, path, ref="", owner="", max_bytes=0):
+            return IntegrationResult("x", "read_file", True,
+                                     data=files.get(path, ""))
+
+        def search_code(self, q, repo="", owner="", ref=""):
+            hits = [{"path": p} for p, t in files.items() if q in t]
+            return IntegrationResult("x", "search_code", True,
+                                     data={"items": hits})
+
+    monkeypatch.setattr(ticket_fix, "_client", lambda repo: Client())
+
+    class Repo:
+        host, owner, slug, branch = "github", "o", "vome-react", "master"
+
+    return Repo()
+
+
+def test_declarations_far_from_the_line_are_included(code):
+    text = ticket_fix.extra_context(code, "src/Grid.js", 6119, CARD_9582)
+    assert "1591 |         columnWidths," in text
+    assert "1687 |     const [liveColumnWidths" in text
+    assert "where liveColumnWidths is declared" in text
+    # The window at the line is gather's job, not repeated here.
+    assert "6119 |" not in text
+
+
+def test_a_helper_in_another_file_is_shown_whole(code):
+    text = ticket_fix.extra_context(code, "src/Grid.js", 6119, CARD_9582)
+    assert "src/hooks/useColumnAutoFit.js lines 1-" in text
+    assert "effectiveColumnWidths" in text
+    assert "src/Other.js" not in text  # a caller, not the definition
+
+
+def test_no_names_no_extra_context(code):
+    card = {"code_check": {"fix": "add a guard", "finding": "it breaks"}}
+    assert ticket_fix.extra_context(code, "src/Grid.js", 10, card) == ""
+
+
+# ---------------------------------------------------------------------------
+# A declined attempt is visible on the queue card
+# ---------------------------------------------------------------------------
+
+def test_a_declined_attempt_shows_on_the_card(monkeypatch):
+    import sprint_tools
+
+    monkeypatch.setattr(sprint_tools, "_ledger", lambda tid: {
+        "outcome": "declined", "attempted_at": "2026-10-19 18:31",
+        "reason": "The source covers only lines 6059-6179"})
+    item = _item(status="open", fix_pr="", card=CARD_9582)
+    text = sprint_tools._agent_fix(item, CARD_9582)
+    assert text.startswith("the agent tried and did not open a PR")
+    assert "declined" in text and "6059-6179" in text
+
+
+def test_the_card_names_the_stage_when_a_pr_exists():
+    import sprint_tools
+
+    assert "waiting on your merge" in sprint_tools._agent_fix(
+        _item(), CARD_9582)
+
+
+def test_other_lanes_say_nothing_about_agent_fixes():
+    import sprint_tools
+
+    card = {"lane": "engineer"}
+    assert sprint_tools._agent_fix(_item(fix_pr="", card=card), card) == ""
+
+
+def test_a_retry_is_stamped_with_its_own_time(db):
+    db.execute(f"DROP TABLE IF EXISTS {ticket_fix.LEDGER}")
+    db.reset()
+    ticket_fix._record("T1", "9582", "declined", "file was empty")
+    db.execute(f"UPDATE {ticket_fix.LEDGER} SET attempted_at ="
+               " attempted_at - INTERVAL '2 hours'")
+    first = db.query(f"SELECT attempted_at FROM {ticket_fix.LEDGER}")[0]
+    ticket_fix._record("T1", "9582", "declined", "window too narrow")
+    row = db.query(f"SELECT attempted_at, reason FROM {ticket_fix.LEDGER}")[0]
+    assert row["reason"] == "window too narrow"
+    assert row["attempted_at"] > first["attempted_at"]

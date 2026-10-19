@@ -81,6 +81,26 @@ def find(ticket: str) -> tuple[str, dict]:
     return ticket_id, sprint_store.by_ticket(ticket_id)
 
 
+def _agent_fix(item: dict, card: dict) -> str:
+    """The fix's stage when a PR exists; for an agent-fix card without one,
+    what the agent's attempt came to, so a decline is never invisible."""
+    import sprint_batch
+
+    if item.get("fix_pr"):
+        return sprint_batch.fix_stage(item)
+    if card.get("lane") != "agent_fix":
+        return ""
+    try:
+        ledger = _ledger(str(item.get("ticket_id") or ""))
+    except Exception:
+        return ""
+    if not ledger:
+        return "the agent has not tried a fix yet"
+    return (f"the agent tried and did not open a PR ({ledger.get('outcome')}"
+            f", {ledger.get('attempted_at')}): "
+            f"{str(ledger.get('reason') or '')[:300]}")
+
+
 def view(item: dict) -> dict:
     """One item as the model needs it: the agent's first pass, the draft in
     full, and where it stands."""
@@ -120,9 +140,9 @@ def view(item: dict) -> dict:
         "recipients": {k: v for k, v in (item.get("recipients") or {}).items()
                        if k in ("to", "cc", "first_name")},
         "fix_pr": item.get("fix_pr") or "",
-        # Who owns the ticket now, in words: set whenever a fix PR exists.
-        "agent_fix": (sprint_batch.fix_stage(item)
-                      if item.get("fix_pr") else ""),
+        # Who owns the ticket now, in words: where the PR stands, or why
+        # the agent did not open one.
+        "agent_fix": _agent_fix(item, card),
         "decision": item.get("decision") or "",
     }
 
@@ -285,7 +305,9 @@ def fix_status(ticket: str) -> dict:
                    "it into the dev branch.")
     elif ledger:
         summary = (f"The agent tried and did not open a PR "
-                   f"({ledger.get('outcome')}: {ledger.get('reason')}).")
+                   f"({ledger.get('outcome')}: {ledger.get('reason')}). "
+                   "Next: Sam. Run propose_fix again, or route it to an "
+                   "engineer with the code check.")
     else:
         code = ((item or {}).get("card") or {}).get("code_check") or {}
         summary = ("No agent fix. Code check: "
