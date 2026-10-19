@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import re
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 import anthropic
@@ -91,6 +92,10 @@ class AgentResult:
     cache_write_tokens: int = 0
     duration_ms: int = 0
     attempts: int = 0
+    # The read-only tool calls the model made, [{"name", "input"}], so a
+    # caller can see what it looked at (#bug-reports passes the files the
+    # analyst opened to the fix author as references).
+    tool_calls: list[dict] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -170,6 +175,13 @@ _ANSWER_NOW = (
 )
 
 
+# run_agent sets this to a list for the duration of one run; the tool loop
+# copies its calls into it. A context variable rather than a parameter so
+# the loop's signature (and every test double of it) stays as it was.
+_TOOL_CALLS: ContextVar[list | None] = ContextVar("vomeos_tool_calls",
+                                                  default=None)
+
+
 def _call_with_tools(
     manifest: AgentManifest, system: str, user, model: str
 ) -> tuple[str, int, int, int, int, int]:
@@ -230,6 +242,9 @@ def _call_with_tools(
             if calls:
                 print(f"[VOMEOS] {manifest.qualified} used {len(calls)} "
                       f"tool call(s): {tool_kit.summarize(calls)}")
+            recorder = _TOOL_CALLS.get()
+            if recorder is not None:
+                recorder.extend(calls)
             return (text, total_in, total_out, total_attempts, total_read,
                     total_write)
         messages.append({"role": "assistant", "content": response.content})
@@ -394,11 +409,14 @@ def run_agent(
         user = image_tools.content_blocks(user, shown)
 
     started = time.monotonic()
+    tool_calls: list[dict] = []
+    token = _TOOL_CALLS.set(tool_calls)
     try:
         call = _call_with_tools if manifest.job.tools else _call_model
         text, in_tokens, out_tokens, attempts, cache_read, cache_write = \
             call(manifest, system, user, model)
     except Exception as exc:
+        _TOOL_CALLS.reset(token)
         duration = int((time.monotonic() - started) * 1000)
         result = AgentResult(
             agent=qualified, status=STATUS_ERROR, run_id=run_id,
@@ -410,6 +428,7 @@ def run_agent(
         _persist(manifest, result, subject_type, subject_id)
         return result
 
+    _TOOL_CALLS.reset(token)
     duration = int((time.monotonic() - started) * 1000)
 
     # Guards see the raw text. `agent` is passed through so a guard that logs
@@ -447,6 +466,7 @@ def run_agent(
         cache_write_tokens=cache_write,
         duration_ms=duration,
         attempts=attempts,
+        tool_calls=tool_calls,
     )
     if not passed:
         print(f"[RUNTIME] {qualified} blocked: {result.why()}")

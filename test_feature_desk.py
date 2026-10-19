@@ -40,7 +40,6 @@ def desk(monkeypatch):
     """Every outward call recorded instead of made."""
     calls = {"posts": [], "saves": [], "comments": [], "builds": [],
              "analyses": [], "tasks": []}
-    monkeypatch.setenv("FEATURE_DESK_ENABLED", "true")
     monkeypatch.setattr(fd, "_post", lambda text, thread_ts="", channel="":
                         calls["posts"].append(text) or "1.0")
     monkeypatch.setattr(fd, "_save", lambda ts, **f:
@@ -95,10 +94,16 @@ def test_a_bare_verb_never_touches_a_final_item():
 # The web side
 # ---------------------------------------------------------------------------
 
-def test_off_by_default(monkeypatch, desk):
+def test_always_listening_with_no_switch_set(monkeypatch, desk):
+    """Sam, 2026-10-19: no on switch. His first real post went unanswered
+    because FEATURE_DESK_ENABLED was never set."""
     monkeypatch.delenv("FEATURE_DESK_ENABLED", raising=False)
+    queued = []
+    monkeypatch.setattr("vomeos.worker.enqueue_event",
+                        lambda key, payload, queue="": queued.append(payload))
     fd.handle_message({"ts": "1.1", "text": "x" * 200})
-    assert desk["posts"] == []
+    assert desk["posts"][0].startswith("Analysing this")
+    assert queued == [{"ts": "1.1"}]
 
 
 def test_a_short_top_level_post_is_chat(monkeypatch, desk):

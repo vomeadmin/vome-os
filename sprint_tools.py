@@ -558,7 +558,8 @@ def log_ticket_request(ticket: str, caller: str, build: bool = False,
 # ---------------------------------------------------------------------------
 
 WALK_SECTIONS = ("urgent", "route", "with_engineer", "agent_fixing",
-                 "your_call", "answer", "close_quietly", "not_triaged")
+                 "your_call", "answer", "close_quietly", "old_card",
+                 "not_triaged")
 
 
 def _fix_attempt(item: dict) -> dict:
@@ -594,6 +595,11 @@ def _walk_one(item: dict) -> tuple[str, dict]:
     if item.get("fix_pr"):
         line["agent_fix"] = _agent_fix(item, card)
         return "agent_fixing", line
+    # Triaged before lanes existed (Oct 17 and 18): nothing here can say
+    # who should have it, so it is never routed on this card.
+    if not card.get("lane"):
+        line["triaged_at"] = str(item.get("updated_at") or "")[:10]
+        return "old_card", line
     fix = _fix_attempt(item)
     go, reason = tr.should_route(card, fix)
     if go:
@@ -653,7 +659,10 @@ def walk_queue() -> dict:
             "already owned: their reply is the acknowledgment, and sending it "
             "is what moves Zoho to In Progress. your_call needs Sam (feature "
             "requests to log, design questions, data or billing). "
-            "not_triaged tickets have no card yet: the 30-minute sweep picks "
+            "old_card tickets were triaged before lanes existed: offer to "
+            "re-run them with ticket_first_pass(refresh=true), about $0.40 "
+            "each, only on Sam's yes. not_triaged tickets have no card "
+            "yet: the 30-minute sweep picks "
             "them up, or use ticket_first_pass on one. If a line is wrong, "
             "that is a lesson: ask Sam for the rule and use teach_agents."),
     }

@@ -14,10 +14,13 @@ tier = "senior"
 # Generous because the output carries a unified diff with context lines, and
 # a truncated patch fails the shape check and is thrown away whole. The
 # charter caps the prose; this is the headroom for the diff itself.
-# 8000, not 3000: the first greenlit #bug-reports fix (six spots in one file,
-# 2026-10-19) ran out mid-diff at 3000 and was thrown away. Patch safety
-# still caps what can merge at 60 changed lines.
-max_tokens = 8000
+# 16000, not 3000: the first greenlit #bug-reports fix (six spots in one
+# file, whole file plus three reference files, 2026-10-19) ran out mid-diff
+# at 3000 and again at 8000, because the senior tier's "high" effort spends
+# output tokens thinking before it writes. Under 21333 so the SDK still
+# allows a non-streaming request. Patch safety still caps what can merge at
+# 60 changed lines.
+max_tokens = 16000
 
 [job]
 charter = "charter.md"

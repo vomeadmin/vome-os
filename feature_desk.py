@@ -50,7 +50,10 @@ request are written straight away: both are a settled outcome already.
 
 SWITCHES
 --------
-    FEATURE_DESK_ENABLED          default OFF. "true" listens to the channel.
+The desk always listens to the channel. FEATURE_DESK_ENABLED was removed
+at Sam's request, 2026-10-19: a default-off switch nobody set made the first
+real post go unanswered.
+
     FEATURE_DESK_PR_ENABLED       default OFF. "true" opens pull requests;
                                   off, an agent_build item waits for `go N`
                                   and is refused with the reason.
@@ -146,10 +149,6 @@ def _on(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() == "true"
 
 
-def enabled() -> bool:
-    return _on("FEATURE_DESK_ENABLED")
-
-
 def pr_enabled() -> bool:
     return _on("FEATURE_DESK_PR_ENABLED")
 
@@ -164,8 +163,6 @@ def daily_cap() -> int:
 
 def handle_message(event: dict) -> None:
     """One human message in #feature-requests. Cheap, never raises."""
-    if not enabled():
-        return
     ts = str(event.get("ts") or "")
     thread_ts = str(event.get("thread_ts") or "")
     text = str(event.get("text") or "").strip()
@@ -200,8 +197,8 @@ def handle_message(event: dict) -> None:
 def handle(message: dict) -> dict:
     """One request post, or one reply in its thread. Never raises."""
     ts = str(message.get("ts") or "")
-    if not ts or not enabled():
-        return {"status": "skipped", "reason": "disabled or no message"}
+    if not ts:
+        return {"status": "skipped", "reason": "no message"}
     if not store.ensure_table(LEDGER):
         return {"status": "skipped", "reason": "no database"}
     try:
@@ -455,8 +452,8 @@ def act(ts: str, row: dict, card: dict, items: dict,
         lines.append(_item_text(item, row))
 
     said = str(card.get("reply") or "").strip()
-    if only is not None and not lines and not (card.get("chime_in")
-                                                and said):
+    chimed = bool(card.get("chime_in") and said)
+    if only is not None and not lines and not chimed:
         if not dry_run:
             _save(ts, items=json.dumps(items))
             _record(ts, row, items)

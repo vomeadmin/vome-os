@@ -540,6 +540,70 @@ def test_greenlit_proposal_gets_whole_files_references_and_the_greenlight(
     assert "said yes" in seen["greenlight"]
 
 
+def test_files_the_analyst_opened_become_references():
+    """Second exemption build (2026-10-19): the analyst read
+    step_status/views.py but did not name it, so the fix author never saw
+    it. What it opened is passed on regardless."""
+    calls = [
+        {"name": "search_code", "input": {"repo": "core", "query": "x"}},
+        {"name": "read_code_file", "input": {
+            "repo": "core", "path": "sequence_app/step_exemption/views.py"}},
+        {"name": "read_code_file", "input": {
+            "repo": "core", "path": "sequence_app/step_status/views.py",
+            "start_line": 48, "end_line": 85}},
+        {"name": "read_code_file", "input": {"repo": "core",
+                                             "path": "sequence_app/"}},
+        {"name": "read_code_file", "input": {
+            "repo": "core", "path": "user_app/utils.py", "start_line": 143}},
+    ]
+    read = bug_reports._files_read(calls)
+    assert read == ["core:sequence_app/step_exemption/views.py:1",
+                    "core:sequence_app/step_status/views.py:48",
+                    "core:user_app/utils.py:143"]
+    card = {"read": read, "code_check": {
+        "references": ["core:sequence_app/step_status/views.py:48",
+                       "web:src/x.js:1"]}}
+    assert bug_reports._references(card, "core") == [
+        ("sequence_app/step_status/views.py", 48),
+        ("sequence_app/step_exemption/views.py", 1),
+        ("user_app/utils.py", 143)]
+    assert bug_reports._references(card, "web") == [("src/x.js", 1)]
+
+
+def test_the_stored_card_keeps_what_the_analyst_read(monkeypatch):
+    import types
+
+    result = types.SimpleNamespace(
+        ok=True, data={"verdict": "greenlight"},
+        tool_calls=[{"name": "read_code_file", "input": {
+            "repo": "core", "path": "user_app/utils.py"}}])
+    monkeypatch.setattr(bug_reports, "_task_text", lambda t: "")
+    monkeypatch.setattr(bug_reports, "_existing", lambda t: "")
+    card = bug_reports._analyst_card(
+        TS, {"text": "r", "reporter": "Ron", "thread": "", "task_id": ""},
+        lambda *a, **k: result)
+    assert card["read"] == ["core:user_app/utils.py:1"]
+
+
+def test_run_agent_reports_the_tool_calls_it_made(monkeypatch):
+    from vomeos import runner
+
+    def fake_loop(manifest, system, user, model):
+        runner._TOOL_CALLS.get().append(
+            {"name": "read_code_file", "input": {"repo": "core",
+                                                 "path": "a.py"}})
+        return '{"verdict": "decision"}', 1, 1, 1, 0, 0
+
+    monkeypatch.setattr(runner, "_call_with_tools", fake_loop)
+    monkeypatch.setattr(runner, "_persist", lambda *a, **k: None)
+    result = runner.run_agent(bug_reports.AGENT, context={
+        "report": "r", "reporter": "Ron", "thread": "t",
+        "linked_task": "", "existing_tasks": ""})
+    assert result.tool_calls == [{"name": "read_code_file", "input": {
+        "repo": "core", "path": "a.py"}}]
+    assert runner._TOOL_CALLS.get() is None  # reset after the run
+
+
 def test_after_a_greenlight_a_rerun_never_routes_alone(rec):
     row = _row(greenlit=True)
     out = bug_reports.act(TS, row, COOKIES)

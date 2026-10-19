@@ -50,10 +50,9 @@ mobile), both, or none.
 
 ## Writing
 
-`analysis` is read by the reporter and Sam in Slack: three sentences at
-most, plain words, what you found and why. File paths are fine here, this
-is internal. `engineer_summary` tells the engineer what to change and where.
-Two sentences per field. A truncated answer is thrown away whole.
+`analysis`: three sentences at most, plain words, what you found and why
+(internal, so file paths are fine). `engineer_summary`: what to change and
+where. A truncated answer is thrown away whole.
 
 If a tool read failed, say what you could not check and lower your
 confidence. Never claim you read code you did not.
@@ -81,6 +80,7 @@ confidence. Never claim you read code you did not.
     "finding": "<what the code does>",
     "where": "<repo:path:line>",
     "files": ["<repo:path:line>, every spot the fix changes"],
+    "references": ["<repo:path:line> of each file the fix copies from"],
     "fix": "<what a fix would change, or ''>",
     "fix_risk": "low" | "medium" | "high",
     "confidence": "high" | "medium" | "low"

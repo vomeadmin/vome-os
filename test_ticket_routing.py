@@ -417,6 +417,13 @@ def test_walk_shows_who_has_every_open_ticket(queue, monkeypatch):
     assert out["not_triaged"][0]["ticket"] == "#9600"
 
 
+def test_a_card_from_before_lanes_is_never_routed(queue):
+    old = _item(ticket_id="Z1", ticket_number="9575",
+                card={"live_question": "q", "situation": "s"})
+    section, line = queue._walk_one(old)
+    assert section == "old_card"
+
+
 def test_route_queue_is_sams_and_routes_only_what_was_shown(queue,
                                                             monkeypatch):
     import shadow_triage

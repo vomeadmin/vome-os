@@ -134,6 +134,7 @@ _LEFT_OUT = re.compile(r"Left out:\s*(.+)", re.I | re.S)
 WHOLE_FILE_CHARS = 60_000
 GREENLIT_WINDOW = 150
 SOURCE_BUDGET = 120_000
+MAX_REFERENCES = 6
 _MULTI_PR = re.compile(r"Bug report PR:\s*(\S+)")
 
 # Sam's greenlight. Only his replies count, and only whole answers: "yes but
@@ -321,7 +322,9 @@ def _analyst_card(ts: str, report: dict, run_agent) -> dict:
     result = run_agent(AGENT, context=context,
                        subject_type="slack_bug_report", subject_id=ts)
     if result.ok:
-        return result.data or {}
+        card = dict(result.data or {})
+        card["read"] = _files_read(getattr(result, "tool_calls", []))
+        return card
     return {"verdict": DECISION, "team": "none",
             "headline": "The analysis did not finish",
             "analysis": f"The analyst returned nothing usable "
@@ -704,18 +707,43 @@ def _propose(ts: str, card: dict, alias: str, places: list,
     return proposal, repo
 
 
+def _files_read(tool_calls: list) -> list[str]:
+    """`repo:path:line` for every file the analyst opened, in order.
+
+    The second greenlit build of the exemption fix (2026-10-19) failed
+    because the analyst read step_status/views.py but did not list it in
+    `references`, so the fix author never saw it. What the analyst looked at
+    is passed on whether or not it remembered to name it."""
+    out = []
+    for call in tool_calls or []:
+        if call.get("name") != "read_code_file":
+            continue
+        args = call.get("input") or {}
+        path = str(args.get("path") or "").strip("/")
+        # A directory listing is no use as a reference.
+        if not path or "." not in path.rsplit("/", 1)[-1]:
+            continue
+        place = f"{args.get('repo')}:{path}:{args.get('start_line') or 1}"
+        if place not in out:
+            out.append(place)
+    return out
+
+
 def _references(card: dict, alias: str) -> list[tuple[str, int]]:
-    """Files the fix copies from (`code_check.references`), in this repo."""
+    """Files the fix copies from, in this repo: the ones the analyst named
+    in `code_check.references`, then every file it opened while checking."""
     import ticket_fix
 
-    out = []
-    for place in (card.get("code_check") or {}).get("references") or []:
+    named = (card.get("code_check") or {}).get("references") or []
+    out: list[tuple[str, int]] = []
+    for place in list(named) + list(card.get("read") or []):
         place = str(place or "").strip()
         if _EXACT_WHERE.match(place):
             ref_alias, path, line = ticket_fix.parse_where(place)
-            if ref_alias == alias and path:
+            if ref_alias == alias and path and \
+                    path not in (p for p, _l in out):
                 out.append((path, line))
-    return out
+    return out[:MAX_REFERENCES]
 
 
 def _whole_source(repo, ref: str, places: list, references: list) -> str:
