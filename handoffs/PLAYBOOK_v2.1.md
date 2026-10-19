@@ -6,13 +6,13 @@ This is how Vome runs support sprints in [Claude.ai](http://Claude.ai) with the 
 
 ## What changed from v2.0
 
-Work starts when a ticket arrives, not when Sam runs a sprint. A bug the agent cannot fix is routed to the engineer automatically. Zoho New or Processing now means one thing: the client is owed a reply from Sam. "It's fixed" emails send and close on their own; every other client email still waits for Sam. #support-sprints is for urgent work only. Two new tools: `walk_queue` and `route_queue`. The sprint no longer re-triages tickets to learn their status.
+Work starts when a ticket arrives, not when Sam runs a sprint. A bug the agent cannot fix is routed to the engineer automatically. Zoho New or Processing now means one thing: the client is owed a reply from Sam. "It's fixed" emails send and close on their own, agent fixes included. The engineer-triggered handlers (user education, needs client info) stay automatic as before. Every other agent-written client email, acknowledgments included, still waits for Sam. #support-sprints is for urgent work only. Two new tools: `walk_queue` and `route_queue`. The sprint no longer re-triages tickets to learn their status.
 
 ## Critical rules
 
 **Rule 1: Never name an engineer in client-facing content.** "Our team" only. Names live in ClickUp and internal Slack.
 
-**Rule 2: Client email needs Sam's explicit word, except "it's fixed" emails.** A reply goes out only when Sam's own message in this conversation says to send it ("send", "approve", "go ahead") for that ticket or a range he named, passed verbatim as `sam_said`. Silence, "looks good" or moving on is not approval. If he asks for a change, show the complete new reply and wait; never edit and send in one step. If the customer wrote again since the draft, stop, run `ticket_first_pass` and show the new draft. Acknowledgments ("Thanks, our team is going to look into this.") always wait for Sam.
+**Rule 2: Client email needs Sam's explicit word, except the automatic sends listed below.** A reply goes out only when Sam's own message in this conversation says to send it ("send", "approve", "go ahead") for that ticket or a range he named, passed verbatim as `sam_said`. Silence, "looks good" or moving on is not approval. If he asks for a change, show the complete new reply and wait; never edit and send in one step. If the customer wrote again since the draft, stop, run `ticket_first_pass` and show the new draft. Acknowledgments ("Thanks, our team is going to look into this.") always wait for Sam.
 
 The intended automatic sends: the resolution email when a fix reaches production (the on-prod handler when an engineer moves a Priority Queue task to `on prod`, and the release watcher when an agent fix is proven live), short and closed automatically; the engineer-triggered user-education and needs-client-info handlers; and auth and activation replies. All are signed "Sam | Vome team". Nobody moves an Agent Fixes task to `on prod` by hand.
 
@@ -133,4 +133,4 @@ Every correction teaches the agents. An edited reply sent through `send_ticket_r
 
 * * *
 
-_v2.1, October 19, 2026: Automatic routing of bugs the agent cannot fix; Zoho New or Processing reserved for "owed a reply from Sam" (Rule 6); "it's fixed" emails send and close on their own for agent fixes too; #support-sprints urgent only; `walk_queue` and `route_queue`; no re-triage to learn status. This page now wins over every other loaded page except newer Lessons Log entries. v2.0 is in this page's version history._
+_v2.1, October 19, 2026: Automatic routing of bugs the agent cannot fix; Zoho New or Processing reserved for "owed a reply from Sam" (Rule 6); "it's fixed" emails send and close on their own for agent fixes too; engineer-triggered handlers unchanged; #support-sprints urgent only; `walk_queue` and `route_queue`; no re-triage to learn status. This page now wins over every other loaded page except newer Lessons Log entries. v2.0 is in this page's version history._

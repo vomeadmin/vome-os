@@ -155,6 +155,9 @@ and a deterministic heuristic backs it up.
 | `SENTRY_AUTO_PR_ENABLED` | **false** | diffs go in Slack only | branches and PRs are created |
 | `VOMEOS_CODE_REPOS` | empty = all reachable | which repos may be READ | |
 | `VOMEOS_CODE_WRITE_REPOS` | **empty = NONE** | which repos may be WRITTEN | |
+| `SENTRY_PATCH_PATH_ALLOWLIST` | empty = every path not forbidden (recommended since agent PRs are reviewed, 2026-10-19) | which paths an agent diff may touch | only these prefixes |
+| `SENTRY_PATCH_PATH_DENYLIST` | empty | paths agents never touch, beyond the built-in forbidden list (migrations, settings, auth, billing, permissions, deps, CI, tests) and the model schema check | e.g. `user_app/models.py,organization_app/` |
+| `SENTRY_PATCH_MAX_LINES` / `_MAX_FILES` | 60 / 3 | size of one agent PR per repo | |
 | `VOMEOS_PR_ALLOW_PROTECTED_TARGET` | false | a PR into `development` is refused | permitted |
 | `VOMEOS_PR_TARGETS` | the table in `sentry_projects.py` | `repo:branch,repo:branch`. A repo with no target can open no PR | |
 

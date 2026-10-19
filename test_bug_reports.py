@@ -110,6 +110,8 @@ def rec(monkeypatch):
 
     monkeypatch.setattr(bug_reports, "_propose", propose)
     monkeypatch.setattr(sentry_fix, "open_pull_request", open_pr)
+    # Cards here carry no "read" list; looking again finds nothing new.
+    monkeypatch.setattr(bug_reports, "_refresh_card", lambda ts: {})
     monkeypatch.setattr(bug_reports, "_post",
                         lambda text, thread_ts="", channel="":
                         r.posts.append((channel or "bug", thread_ts, text))
@@ -421,6 +423,28 @@ def test_every_form_of_sams_yes_builds(rec, monkeypatch, text):
     _greenlight_waiting(monkeypatch)
     out = bug_reports._on_reply(TS, _sam(text))
     assert out.get("pr_urls")
+
+
+def test_yes_on_a_card_saved_before_read_files_looks_again(rec,
+                                                           monkeypatch):
+    """The third exemption yes (2026-10-19) built from a card saved before
+    the analysis recorded the files it opened, so no references went to the
+    fix author."""
+    _greenlight_waiting(monkeypatch)  # GUEST has no "read" key
+    refreshed = []
+    monkeypatch.setattr(bug_reports, "_refresh_card",
+                        lambda ts: refreshed.append(ts)
+                        or {**GUEST, "read": ["core:a/b.py:1"]})
+    out = bug_reports._on_reply(TS, _sam("yes"))
+    assert refreshed == [TS] and out.get("pr_urls")
+
+
+def test_yes_on_a_current_card_builds_without_looking_again(rec,
+                                                           monkeypatch):
+    _greenlight_waiting(monkeypatch, card={**GUEST, "read": []})
+    monkeypatch.setattr(bug_reports, "_refresh_card",
+                        lambda ts: pytest.fail("should not re-run"))
+    assert bug_reports._on_reply(TS, _sam("yes")).get("pr_urls")
 
 
 def test_a_yes_from_anyone_else_does_nothing(rec, monkeypatch):

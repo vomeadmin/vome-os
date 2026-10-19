@@ -106,8 +106,101 @@ def changed_line_count(diff: str) -> int:
 
 
 def _allowlist() -> tuple[str, ...]:
+    """Optional. Empty (the recommended setting since agent PRs are reviewed
+    before they merge) means every path not refused above is in scope, so a
+    new app is fair game the day it exists."""
     raw = os.environ.get("SENTRY_PATCH_PATH_ALLOWLIST", "")
     return tuple(p.strip() for p in raw.split(",") if p.strip())
+
+
+def _denylist() -> tuple[str, ...]:
+    """Paths Sam never wants an agent to touch, beyond FORBIDDEN: path
+    prefixes such as `user_app/models.py` or `organization_app/`."""
+    raw = os.environ.get("SENTRY_PATCH_PATH_DENYLIST", "")
+    return tuple(p.strip() for p in raw.split(",") if p.strip())
+
+
+# ---------------------------------------------------------------------------
+# Schema changes without a migration file
+# ---------------------------------------------------------------------------
+#
+# Migrations are generated on deploy here, so a diff that changes a model's
+# fields IS a schema change even though it carries no migration: the deploy
+# writes one nobody reviewed. The migrations/ rule above cannot see that.
+# Inside a models file, a changed line is refused when it sits at model-class
+# level outside any method (a field, a field's continuation lines, Meta and
+# its options, the class line itself). Method bodies, imports and module
+# helpers stay editable. When a hunk does not show enough to tell, it is
+# refused: a model method fix is rare, an unreviewed migration is an outage.
+
+_MODEL_FILE = re.compile(r"(^|/)models(\.py|/[^/]+\.py)$")
+_DEF = re.compile(r"^(async\s+)?def\s|^@")
+_CLASS = re.compile(r"^class\s")
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" \t"))
+
+
+_CLASS_LEVEL = re.compile(r"^\w+\s*(:[^=]+)?=|^class\s+Meta\b")
+
+
+def schema_change(diff: str) -> str:
+    """The first models-file change that alters the schema, or ""."""
+    current = top = kind = ""
+    for raw in (diff or "").splitlines():
+        if raw.startswith("+++ "):
+            match = _DIFF_FILE.match(raw)
+            current = match.group(1).strip() if match else ""
+            top = kind = ""
+            continue
+        if raw.startswith("--- ") or not _MODEL_FILE.search(current):
+            continue
+        if raw.startswith("@@"):
+            top = kind = ""  # what encloses the next lines is unknown again
+            continue
+        if not raw or raw[0] not in " +-":
+            continue
+        body = raw[1:]
+        text = body.strip()
+        if not text or text.startswith("#"):
+            continue
+        depth = _indent(body)
+        changed = raw[0] in "+-"
+        field = (f"{current}: changes a model field or Meta option "
+                 f"({text[:60]})")
+        if depth == 0:
+            if _CLASS.match(text):
+                if changed:
+                    return f"{current}: changes a model class ({text[:60]})"
+                top = "class"
+            else:
+                top = "func" if _DEF.match(text) else "module"
+            kind = ""
+            continue
+        if top == "func":
+            continue  # a module-level helper's body
+        if depth <= 4:
+            # In a model class: a method, a field, Meta or an option.
+            if _DEF.match(text):
+                kind = "def"
+            elif top == "class" or _CLASS_LEVEL.match(text):
+                kind = "class"
+                if changed:
+                    return field
+            else:
+                # A statement no class body holds (return, if, a call): the
+                # hunk is inside a function it does not show the top of.
+                kind = "def"
+            continue
+        # Deeper: inside whatever the last class-level line opened.
+        if changed and kind != "def":
+            if kind == "class":
+                return field
+            return (f"{current}: a change the hunk does not show enough of "
+                    f"to tell from a field ({text[:60]}); only method edits "
+                    "are allowed in models files")
+    return ""
 
 
 def inspect(diff: str) -> tuple[bool, str]:
@@ -148,6 +241,21 @@ def inspect(diff: str) -> tuple[bool, str]:
                 f"{path} is a test file. A fix that edits its own tests is "
                 "a fix that makes itself pass."
             )
+
+    for path in files:
+        for prefix in _denylist():
+            if path.startswith(prefix):
+                return False, (
+                    f"{path} is on SENTRY_PATCH_PATH_DENYLIST ({prefix}): "
+                    "Sam keeps agents out of it"
+                )
+
+    schema = schema_change(text)
+    if schema:
+        return False, (
+            f"{schema}. Migrations are generated on deploy, so this would "
+            "change the database schema with no reviewed migration"
+        )
 
     allowed = _allowlist()
     if allowed:

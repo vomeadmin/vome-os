@@ -275,6 +275,12 @@ def _on_reply(ts: str, reply: dict) -> dict:
         # `fix` works anywhere; the other yeses only answer a greenlight.
         if word == "fix" or (asking and _is_yes(text)):
             _save(ts, status=GREENLIT)
+            if "read" not in card:
+                # Saved before the analysis recorded which files it opened
+                # (deployed 2026-10-19 16:37), so the fix author would get no
+                # reference files: Sam's yes on the exemption thread failed
+                # that way. Look again first, then build.
+                card = _refresh_card(ts) or card
             return _build(ts, {**row, "greenlit": True}, card, greenlit=True)
         if asking:
             # A question or a change to the fix: think again with his note
@@ -330,6 +336,20 @@ def _analyst_card(ts: str, report: dict, run_agent) -> dict:
             "analysis": f"The analyst returned nothing usable "
                         f"({result.why()}).",
             "question": "Can you take a look at this one?"}
+
+
+def _refresh_card(ts: str) -> dict:
+    """Run the analyst again and save its card, or {} if it could not."""
+    from vomeos import run_agent
+
+    report = _read_report(ts)
+    if not report:
+        return {}
+    card = _analyst_card(ts, report, run_agent)
+    if card.get("verdict") == DECISION and not card.get("code_check"):
+        return {}  # the analysis did not finish: keep the card Sam approved
+    _save(ts, card=json.dumps(card))
+    return card
 
 
 def preview_build(ts: str) -> dict:

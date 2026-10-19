@@ -36,6 +36,7 @@ GOOD_DIFF = (
 def clean(monkeypatch):
     for name in (
         "SENTRY_AUTO_PR_ENABLED", "SENTRY_PATCH_PATH_ALLOWLIST",
+        "SENTRY_PATCH_PATH_DENYLIST",
         "VOMEOS_CODE_WRITE_REPOS", "VOMEOS_PR_ALLOW_PROTECTED_TARGET",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -183,6 +184,94 @@ def test_an_allowlist_narrows_further(monkeypatch):
 def test_a_real_fix_passes():
     ok, detail = patch_guard.inspect(GOOD_DIFF)
     assert ok, detail
+
+
+# ---------------------------------------------------------------------------
+# Open by default, with a denylist and a schema check (Sam, 2026-10-19)
+# ---------------------------------------------------------------------------
+
+def _edit(path, *lines):
+    return (f"--- a/{path}\n+++ b/{path}\n@@ -1,{len(lines)} "
+            f"+1,{len(lines)} @@\n" + "\n".join(lines) + "\n")
+
+
+def test_with_no_allowlist_a_new_app_is_in_scope():
+    """A new module is fair game the day it exists."""
+    diff = _edit("sequence_app/step_exemption/views.py",
+                 " def _institution(request):",
+                 "-    return request.user.institution",
+                 "+    return getattr(request, 'user_institution', None)")
+    ok, detail = patch_guard.inspect(diff)
+    assert ok, detail
+
+
+def test_the_denylist_keeps_agents_out(monkeypatch):
+    monkeypatch.setenv("SENTRY_PATCH_PATH_DENYLIST",
+                       "user_app/models.py, organization_app/")
+    for path in ("user_app/models.py", "organization_app/views.py"):
+        ok, detail = patch_guard.inspect(_edit(path, "-a", "+b"))
+        assert not ok and "DENYLIST" in detail, path
+    assert patch_guard.inspect(_edit("user_app/views.py", "-a", "+b"))[0]
+
+
+@pytest.mark.parametrize("lines", [
+    # a new field
+    (" class Rule(models.Model):",
+     "     name = models.CharField(max_length=80)",
+     "+    note = models.TextField(blank=True)"),
+    # a changed field, on its continuation line
+    (" class Rule(models.Model):",
+     "     institution = models.ForeignKey(",
+     "         Institution,",
+     "-        on_delete=models.CASCADE,",
+     "+        on_delete=models.CASCADE, null=True,"),
+    # a Meta option
+    (" class Rule(models.Model):",
+     "     class Meta:",
+     "-        ordering = ['order']",
+     "+        ordering = ['created_at']"),
+    # the model class itself
+    ("-class Rule(models.Model):", "+class ExemptionRule(models.Model):"),
+])
+def test_a_model_schema_change_is_refused(lines):
+    ok, detail = patch_guard.inspect(
+        _edit("sequence_app/step_exemption/models.py", *lines))
+    assert not ok
+    assert "schema" in detail
+
+
+@pytest.mark.parametrize("path,lines", [
+    # a method body, with the def in view
+    ("sequence_app/step_exemption/models.py",
+     (" class Rule(models.Model):",
+      "     def __str__(self):",
+      "-        return self.name",
+      "+        return self.name or 'Untitled rule'")),
+    # a module-level helper
+    ("form_app/models.py",
+     (" def _default_order():",
+      "-    return 0",
+      "+    return 1")),
+    # an import
+    ("form_app/models.py", ("-from x import a", "+from x import a, b")),
+    # a models package file, method edit
+    ("form_app/models/response.py",
+     ("     def label(self):",
+      "-        return self.title",
+      "+        return self.title.strip()")),
+])
+def test_model_method_and_helper_edits_are_allowed(path, lines):
+    ok, detail = patch_guard.inspect(_edit(path, *lines))
+    assert ok, detail
+
+
+def test_an_unclear_models_hunk_is_refused_not_guessed():
+    lines = ("         Institution,",
+             "-        on_delete=models.CASCADE,",
+             "+        on_delete=models.SET_NULL,")
+    ok, detail = patch_guard.inspect(_edit("form_app/models.py", *lines))
+    assert not ok
+    assert "does not show enough" in detail
 
 
 # ---------------------------------------------------------------------------
