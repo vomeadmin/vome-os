@@ -203,28 +203,36 @@ def _comment(task_id: str, text: str) -> None:
 
 
 def route(item: dict, card: dict, fix: dict, incident: dict,
-          arr: float) -> dict:
+          arr: float, owner: str = "") -> dict:
     """File or join the engineer's task for a triaged item. Never raises.
+
+    `owner` is Sam routing by hand (`route N to ...`, route_ticket): his
+    choice of engineer, past the lane check and the on/off switch, through
+    the same rules otherwise (Zoho status untouched, Slack only if urgent).
 
     {"routed": bool, "why": str, "task": {...}, "urgent": str}
     """
-    if not enabled():
+    if not owner and not enabled():
         return {"routed": False, "why": "auto-routing is off"}
     if (item.get("eng_task") or {}).get("url"):
         return {"routed": False, "why": "already with an engineer",
                 "task": item["eng_task"]}
-    go, reason = should_route(card, fix)
+    if owner:
+        go = True
+        reason = card.get("escalation_reason") or "sam_call"
+    else:
+        go, reason = should_route(card, fix)
     if not go:
         return {"routed": False, "why": reason}
     try:
-        return _route(item, card, incident, arr, reason)
+        return _route(item, card, incident, arr, reason, owner)
     except Exception as exc:
         print(f"[ROUTE] #{item.get('ticket_number')} not routed: {exc}")
         return {"routed": False, "why": f"routing failed ({exc})"}
 
 
 def _route(item: dict, card: dict, incident: dict, arr: float,
-           reason: str) -> dict:
+           reason: str, forced: str = "") -> dict:
     import sprint_thread
     import zoho_actions
 
@@ -235,7 +243,7 @@ def _route(item: dict, card: dict, incident: dict, arr: float,
     summary = (card.get("live_question") or item.get("summary") or "")[:90]
 
     task, joined = _existing_task(item, incident)
-    owner = task.get("owner") or engineer_for(card)
+    owner = forced or task.get("owner") or engineer_for(card)
     clickup_id, slack_id, team, channel = sprint_thread.ENGINEERS[owner]
     if task:
         _comment(task["id"],

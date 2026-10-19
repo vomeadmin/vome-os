@@ -282,6 +282,32 @@ def test_sams_go_builds_with_pull_requests_off(monkeypatch, desk):
     assert not any("is ready to build" in p for p in desk["posts"])
 
 
+def test_a_refused_pull_request_waits_for_a_retry(monkeypatch, desk):
+    """2026-10-19: Bitbucket refused the branch (token scope) and the item
+    was logged, so `go 1` could never try again."""
+    monkeypatch.setattr(fd, "_propose", lambda ts, item:
+                        ({"diff": "--- a/x.py\n+++ b/x.py\n"}, None))
+    monkeypatch.setattr(fd, "_open_pr", lambda *a: {
+        "opened": False, "reason": "could not branch: " + fd._host_error(
+            'HTTP 403: {"error": {"message": "Your credentials lack one or '
+            'more required privilege scopes."}}')})
+    items = {"1": {**_build_item(), "state": fd.HELD}}
+    fd._build("1.1", {"task_id": "T1"}, items, "1", sam_approved=True)
+    assert items["1"]["state"] == fd.HELD
+    assert desk["comments"] == []
+    assert "VOMEOS_BITBUCKET_WRITE_TOKEN" in desk["posts"][-1]
+    assert "say `go 1` to try again" in desk["posts"][-1]
+
+
+def test_go_retries_a_build_that_was_logged_by_a_failure(monkeypatch, desk):
+    items = {"1": {**_build_item(), "state": fd.LOGGED}}
+    monkeypatch.setattr(fd, "_row", lambda ts: _row(items))
+    monkeypatch.setattr(fd, "_build", lambda ts, row, items, n, **k:
+                        desk["builds"].append(n))
+    fd._on_reply("1.1", {"ts": "3", "user": SAM, "text": "go 1"})
+    assert desk["builds"] == ["1"]
+
+
 def test_the_daily_cap_holds_but_sam_lifts_it(monkeypatch, desk):
     monkeypatch.setenv("FEATURE_DESK_PR_ENABLED", "true")
     monkeypatch.setattr(fd, "_opened_today", lambda: 99)

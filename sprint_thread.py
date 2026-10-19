@@ -1529,6 +1529,12 @@ def _task_description(item: dict, footer: str = SAM_FOOTER) -> str:
 
 
 def _route(item: dict, who: str) -> str:
+    """Sam routes by hand (`route N to onlyg`, route_ticket). Same path and
+    rules as triage's own routing (ticket_routing): the task, a private
+    Zoho note, Slack only when urgent, and the Zoho status left alone,
+    because New or Processing means the client is still owed Sam's reply
+    (Rule 6, 2026-10-19). Sending that reply hands the ticket over."""
+    import ticket_routing as tr
     import zoho_actions
 
     n = item.get("number")
@@ -1540,48 +1546,31 @@ def _route(item: dict, who: str) -> str:
     if filed.get("url"):
         return (f"*{n}.* already with {filed.get('owner')}: {filed['url']}. "
                 "Nothing new was filed.")
-    clickup_id, slack_id, team, channel = ENGINEERS[key]
     card = item.get("card") or {}
-    summary = (card.get("live_question") or item.get("summary") or "")[:90]
-    task = _clickup_create(PRIORITY_QUEUE, {
-        "name": f"[#{item.get('ticket_number')}] "
-                f"{(item.get('account') or '').split('(')[0].strip()} -- "
-                f"{summary}",
-        "markdown_description": _task_description(item),
-        "assignees": [clickup_id],
-        "status": "queued",
-        "custom_fields": [
-            {"id": FIELD_ZOHO_TICKET_LINK,
-             "value": zoho_actions.ticket_url(item.get("ticket_id"))},
-            {"id": FIELD_SOURCE, "value": SOURCE_ZOHO_TICKET},
-        ],
-    })
-    url = task.get("url") or f"https://app.clickup.com/t/{task.get('id')}"
-    sprint_store.set_eng_task(item["id"], {
-        "id": task.get("id"), "url": url, "owner": key, "urgent": False,
-        "how": "sam"})
-    _post(f"<@{slack_id}> new {team} ticket: {summary}\n"
-          f"ClickUp: {url} · Zoho: "
-          f"{zoho_actions.ticket_url(item.get('ticket_id'))}",
-          channel=channel)
-    try:
-        zoho_actions.set_in_progress(item["ticket_id"], team)
-    except Exception as exc:
-        print(f"[SPRINT] Zoho status not set on {item['ticket_id']}: {exc}")
-    try:
-        from zoho_desk_api import add_ticket_comment
-
-        add_ticket_comment(item["ticket_id"], f"ClickUp task: {url}")
-    except Exception:
-        pass
-    # The reason feeds "what still escalates, and why" (G27). The card's own
-    # reason when triage gave one, else it was Sam's call.
-    reason = str(card.get("escalation_reason") or "sam_call")
-    reason = re.sub(r"\W+", "_", reason).strip("_") or "sam_call"
-    sprint_store.decide(item["id"], sprint_store.ROUTED,
-                        f"routed to {key} ({reason})")
-    return (f"*{n}.* routed to {key}: {url}. Zoho set In Progress. No reply "
-            "was sent; say `send` on a draft if one is owed.")
+    out = tr.route(item, card, {}, tr.incident_of(item),
+                   tr.arr_of(item.get("account") or ""), owner=key)
+    if not out.get("routed"):
+        return f"*{n}.* not routed: {out.get('why')}."
+    task = out["task"]
+    urgent = (f" Urgent ({out['urgent']}): {key} and you were pinged."
+              if out.get("urgent") else "")
+    if item.get("sent_at"):
+        # Already acknowledged earlier: nothing is owed now, so the ticket
+        # is the engineer's from here.
+        try:
+            zoho_actions.set_in_progress(item["ticket_id"],
+                                         ENGINEERS[key][2])
+        except Exception as exc:
+            print(f"[SPRINT] Zoho status not set on {item['ticket_id']}: "
+                  f"{exc}")
+        reason = re.sub(r"\W+", "_", str(task.get("reason") or "sam_call"))
+        sprint_store.decide(item["id"], sprint_store.ROUTED,
+                            f"routed to {key} ({reason.strip('_')})")
+        return (f"*{n}.* routed to {key}: {task['url']}. The client was "
+                f"already told, so Zoho is now In Progress.{urgent}")
+    return (f"*{n}.* routed to {key}: {task['url']} ({task['how']}). Zoho "
+            "left as it is: the client is still owed your reply, and sending "
+            f"it hands the ticket over.{urgent}")
 
 
 def _close_quietly(item: dict) -> str:

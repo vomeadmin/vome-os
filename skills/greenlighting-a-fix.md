@@ -47,3 +47,8 @@ A greenlight never lifts these. Sam's yes cannot build them, so say so.
 your context `thread` holds it. Answer the question in `answer`, take his
 change into `code_check.fix` and `files`, and return greenlight again so he
 can say yes to the revised fix.
+
+You never build anything, so never write "Building it" or "on it" in
+`answer`. If you are running, his reply was not read as a plain yes. When
+it reads like approval with an addition, say what you changed and that a
+plain `yes` builds it.

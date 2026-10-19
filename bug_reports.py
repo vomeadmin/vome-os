@@ -139,8 +139,16 @@ _MULTI_PR = re.compile(r"Bug report PR:\s*(\S+)")
 
 # Sam's greenlight. Only his replies count, and only whole answers: "yes but
 # use option 2" is a conversation, not a yes.
-YES = {"yes", "y", "yep", "yeah", "go", "go ahead", "do it", "execute",
-       "ship it", "fix", "build it", "please", "yes please", "approved"}
+# A reply is a yes when every word is one of these and at least one is in
+# YES_SIGNAL: "yes build it", "go ahead and ship it", "build the PR". Any
+# other word ("but", "why", "don't", "only") makes it a conversation. "Yes
+# build it" (2026-10-19) was read as a conversation by the first version,
+# which matched whole phrases only.
+YES_SIGNAL = {"yes", "y", "yep", "yeah", "yup", "go", "build", "ship",
+              "execute", "fix", "approved", "approve", "lgtm", "do"}
+YES_FILLER = {"it", "ahead", "please", "now", "the", "this", "that", "a",
+              "pr", "pull", "request", "and", "open", "make", "ok", "okay",
+              "sure", "thanks", "thank", "you", "go"}
 
 # What a greenlight never lifts (Sam, 2026-10-19). The analyst names one in
 # `hard_limit`; these are the words the thread shows.
@@ -510,11 +518,12 @@ def _spots(card: dict, greenlit: bool) -> dict[str, list[tuple[str, int]]]:
 
 
 def _is_yes(text: str) -> bool:
-    """"yes", "go", "ship it", "yes, do it". Anything with more in it ("yes
-    but use option 2") is a conversation, not a greenlight."""
-    parts = re.split(r"[,.!]+|\s+and\s+", text.lower())
-    parts = [p.strip() for p in parts if p.strip()]
-    return bool(parts) and all(p in YES for p in parts)
+    """"yes", "yes build it", "go ahead and ship it". Anything with more in
+    it ("yes but use option 2") is a conversation, not a greenlight."""
+    plain = re.sub(r"<[^>]*>", " ", text.lower())  # mentions and links
+    words = re.findall(r"[a-z']+", plain)
+    return (bool(words) and any(w in YES_SIGNAL for w in words)
+            and all(w in YES_SIGNAL or w in YES_FILLER for w in words))
 
 
 def _ask_greenlight(ts: str, row: dict, card: dict, why: str,

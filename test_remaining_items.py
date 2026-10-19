@@ -111,22 +111,36 @@ def test_close_one_item(closing):
 # ---------------------------------------------------------------------------
 
 def test_route_records_the_reason(monkeypatch):
+    """The reason travels with the task and is recorded when the ticket is
+    handed over: at once if the client was already told, else when Sam's
+    reply goes out (sprint_thread._after_send)."""
+    import clickup_search
     import zoho_actions
 
-    decided = []
+    decided, filed, moved = [], [], []
     monkeypatch.setattr(sprint_thread, "_clickup_create",
                         lambda list_id, b: {"id": "T1", "url": "u"})
     monkeypatch.setattr(sprint_thread, "_post", lambda *a, **k: "ts")
-    monkeypatch.setattr(zoho_actions, "set_in_progress", lambda *a: None)
+    monkeypatch.setattr(zoho_actions, "set_in_progress",
+                        lambda *a: moved.append(a))
+    monkeypatch.setattr("zoho_desk_api.add_ticket_comment",
+                        lambda tid, text: None)
+    monkeypatch.setattr(clickup_search, "linked_tasks", lambda n, t: [])
+    monkeypatch.setattr(sprint_store, "set_eng_task",
+                        lambda i, t: filed.append(t))
     monkeypatch.setattr(sprint_store, "decide",
                         lambda i, s, d: decided.append(d))
     item = _item(3, card={"lane": "engineer",
                           "escalation_reason": "data_lookup",
                           "live_question": "When was the reminder sent?"})
     sprint_thread._route(item, "onlyg")
-    assert decided == ["routed to onlyg (data_lookup)"]
-    sprint_thread._route(_item(4), "sanjay")
+    assert filed[-1]["reason"] == "data_lookup"
+    assert decided == [] and moved == []
+    told = _item(4, sent_at="2026-10-19 10:00")
+    sprint_thread._route(told, "sanjay")
+    assert filed[-1]["reason"] == "sam_call"
     assert decided[-1] == "routed to sanjay (sam_call)"
+    assert moved[-1][1] == "frontend"
 
 
 def test_week_line_counts_engineers_and_reasons():

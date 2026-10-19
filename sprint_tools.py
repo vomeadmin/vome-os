@@ -476,8 +476,9 @@ def send_ticket_reply(ticket: str, sam_said: str, caller: str,
 
 def route_ticket(ticket: str, engineer: str, caller: str) -> dict:
     """Hand a ticket to an engineer: Priority Queue task with the agent's
-    first pass as the engineer summary, a notice in their Slack channel,
-    Zoho In Progress with the team as owner, and the reason recorded."""
+    first pass as the engineer summary and a private Zoho note. The Zoho
+    status is left alone until Sam's reply goes out (Rule 6); Slack only
+    when the ticket is urgent."""
     _sam_only(caller, "route tickets")
     import sprint_thread
 

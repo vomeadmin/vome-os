@@ -577,9 +577,11 @@ def build() -> MCPServer:
             description="onlyg: backend (data, API, auth, notifications, "
             "imports). sanjay: frontend and mobile")],
     ) -> dict:
-        """Hand a ticket to an engineer (Sam only): Priority Queue task with
-        the agent's findings as the engineer summary, Slack notice, Zoho In
-        Progress with the team as owner. Sends nothing to the customer."""
+        """Hand one ticket to an engineer (Sam only), when its `engineer`
+        field is empty: Priority Queue task with the agent's findings and a
+        private Zoho note. Sends nothing to the customer and leaves the Zoho
+        status alone (New or Processing means Sam's reply is still owed);
+        Slack only when urgent. Prefer route_queue for several."""
         return await _run("route_ticket", sprint_tools.route_ticket,
                           ticket=ticket, engineer=engineer, caller=caller())
 

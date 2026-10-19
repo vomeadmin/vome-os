@@ -439,8 +439,8 @@ def test_yes_on_a_card_saved_before_read_files_looks_again(rec,
     assert refreshed == [TS] and out.get("pr_urls")
 
 
-def test_yes_on_a_current_card_builds_without_looking_again(rec,
-                                                           monkeypatch):
+def test_yes_on_a_current_card_builds_without_looking_again(
+        rec, monkeypatch):
     _greenlight_waiting(monkeypatch, card={**GUEST, "read": []})
     monkeypatch.setattr(bug_reports, "_refresh_card",
                         lambda ts: pytest.fail("should not re-run"))
@@ -644,11 +644,24 @@ def test_sam_fix_outside_a_greenlight_lifts_the_risk_bar(rec, monkeypatch):
     assert out["pr_urls"] == ["https://pr/core-repo"]
 
 
-def test_yes_parsing():
-    assert bug_reports._is_yes("Ship it!")
-    assert bug_reports._is_yes("yes, do it")
-    assert not bug_reports._is_yes("yes but use option 2")
-    assert not bug_reports._is_yes("why is the risk high?")
+@pytest.mark.parametrize("text", [
+    "Ship it!", "yes, do it", "Yes build it", "go ahead and build it",
+    "build the PR", "yes please", "ok build it", "LGTM", "yep",
+    f"<@{bug_reports.SAM_SLACK}> yes build it",
+])
+def test_yes_parsing_accepts_plain_approval(text):
+    # "Yes build it" (2026-10-19) was read as a conversation by the first,
+    # phrase-only version and the build never ran.
+    assert bug_reports._is_yes(text)
+
+
+@pytest.mark.parametrize("text", [
+    "yes but use option 2", "why is the risk high?", "don't build it",
+    "yes but only the backend", "ok", "thanks", "not yet",
+    "build it without the 403 part",
+])
+def test_yes_parsing_leaves_conversation_alone(text):
+    assert not bug_reports._is_yes(text)
 
 
 # ---------------------------------------------------------------------------

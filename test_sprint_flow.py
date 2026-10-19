@@ -164,10 +164,14 @@ def test_edit_shows_guard_concerns_without_rewriting(world):
     assert "Check before sending" in out
 
 
-def test_route_files_the_task_notifies_and_sets_zoho(monkeypatch, world):
+def test_route_files_the_task_and_leaves_zoho_alone(monkeypatch, world):
+    """Rule 6 (2026-10-19): routing by hand follows triage's own routing.
+    New or Processing means Sam's reply is still owed, so the status, the
+    Slack channel (not urgent) and the item all wait for that reply."""
+    import clickup_search
     import zoho_actions
 
-    created, status = [], []
+    created, status, filed = [], [], []
     monkeypatch.setattr(sprint_thread, "_clickup_create",
                         lambda list_id, body: created.append(
                             (list_id, body)) or {"id": "86x",
@@ -176,17 +180,18 @@ def test_route_files_the_task_notifies_and_sets_zoho(monkeypatch, world):
                         lambda tid, team: status.append((tid, team)))
     monkeypatch.setattr("zoho_desk_api.add_ticket_comment",
                         lambda tid, text: None)
+    monkeypatch.setattr(clickup_search, "linked_tasks", lambda n, t: [])
+    monkeypatch.setattr(sprint_store, "set_eng_task",
+                        lambda i, t: filed.append(t))
     out = sprint_thread._route(_item(), "sanjay")
     list_id, body = created[0]
     assert list_id == sprint_thread.PRIORITY_QUEUE
     assert body["assignees"] == [4434086]
-    assert status == [("569440000042922001", "frontend")]
-    assert any(ch == sprint_thread.ENG_FRONTEND and "U0AQJ8YJF6Y" in text
-               for ch, text in world.posts)
-    assert world.decided[0][1] == sprint_store.ROUTED
+    assert filed[0]["owner"] == "sanjay"
+    assert status == [] and world.posts == [] and world.decided == []
     # Routing is not a reply.
     assert world.zoho == []
-    assert "No reply was sent" in out
+    assert "still owed your reply" in out
 
 
 def test_route_to_an_unknown_person(world):

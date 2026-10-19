@@ -302,9 +302,14 @@ def _command(ts: str, row: dict, items: dict, command: dict) -> dict:
     # go: an item already planned for an agent builds now; anything else
     # is re-decided with Sam's choice as direction, because the build plan
     # for the option he picked has not been written yet.
+    # LOGGED counts while nothing is recorded yet: a build that fell through
+    # before 2026-10-19 was logged, and Sam's `go` is how it is retried.
     ready = [n for n, opt in command["targets"]
              if not opt and items[n].get("verdict") == "agent_build"
-             and items[n].get("state") in (HELD, WAITING_SAM)]
+             and not items[n].get("pr_url")
+             and (items[n].get("state") in (HELD, WAITING_SAM)
+                  or (items[n].get("state") == LOGGED
+                      and not items[n].get("recorded")))]
     rest = [(n, opt) for n, opt in command["targets"] if n not in ready]
     results = [_build(ts, row, items, n, sam_approved=True) for n in ready]
     _record(ts, row, items)
@@ -589,8 +594,17 @@ def _build(ts: str, row: dict, items: dict, n: str,
                              f"the builder declined: {reason}")
     pr = _open_pr(ts, row, item, proposal, repo)
     if not pr.get("opened"):
-        return _fell_through(ts, row, items, n,
-                             f"the PR did not open: {pr.get('reason')}")
+        # The diff was written and checked; only the host refused (a token,
+        # a permission, a network error). That is fixable, so the item
+        # waits for `go N` again instead of being logged as if the plan
+        # were wrong (2026-10-19: a 403 on branch creation logged item 1).
+        why = str(pr.get("reason") or "unknown")
+        item["state"] = HELD
+        _save(ts, items=json.dumps(items))
+        _post(f"*{n}* is written and passed the safety check, but the pull "
+              f"request couldn't open: {why}. <@{SAM_SLACK}> once that's "
+              f"fixed, say `go {n}` to try again.", thread_ts=ts)
+        return {"n": n, "built": False, "reason": why}
 
     fix_task = _file_fix_task(item, repo, pr["url"], ts, row)
     task_url = f"https://app.clickup.com/t/{fix_task}" if fix_task else ""
@@ -690,15 +704,15 @@ def _open_pr(ts: str, row: dict, item: dict, proposal: dict, repo) -> dict:
     try:
         created = writer.create_branch(repo.slug, branch, ref, **kwargs)
         if not created.ok:
-            return {"opened": False,
-                    "reason": f"could not branch: {created.error[:140]}"}
+            return {"opened": False, "reason": "could not branch: "
+                                               + _host_error(created.error)}
         for path, body in contents.items():
             written = writer.commit_file(repo.slug, branch, path, body,
                                          message, **kwargs)
             if not written.ok:
-                return {"opened": False, "reason": f"could not commit "
-                                                   f"{path}: "
-                                                   f"{written.error[:120]}"}
+                return {"opened": False,
+                        "reason": f"could not commit {path}: "
+                                  + _host_error(written.error)}
         opened = writer.open_pull_request(
             repo.slug, branch, ref, title=message,
             body=_pr_body(ts, row, item, proposal), **kwargs)
@@ -706,9 +720,20 @@ def _open_pr(ts: str, row: dict, item: dict, proposal: dict, repo) -> dict:
         return {"opened": False, "reason": f"refused: {exc}"}
     if not opened.ok:
         return {"opened": False,
-                "reason": f"could not open PR: {opened.error[:140]}"}
+                "reason": "could not open PR: " + _host_error(opened.error)}
     return {"opened": True, "url": sentry_fix._pr_url(opened.data),
             "branch": branch}
+
+
+def _host_error(error: str) -> str:
+    """The host's refusal in words Sam can act on. A missing token scope
+    otherwise arrives as raw JSON cut off mid-word in Slack."""
+    text = str(error or "")
+    if "privilege scopes" in text or "scope" in text.lower() and "403" in text:
+        return ("the write token lacks a required scope. "
+                "VOMEOS_BITBUCKET_WRITE_TOKEN on vome-os-worker needs "
+                "repository write and pull request write")
+    return text[:200]
 
 
 def _pr_body(ts: str, row: dict, item: dict, proposal: dict) -> str:
