@@ -54,11 +54,12 @@ The desk always listens to the channel. FEATURE_DESK_ENABLED was removed
 at Sam's request, 2026-10-19: a default-off switch nobody set made the first
 real post go unanswered.
 
-    FEATURE_DESK_PR_ENABLED       default OFF. "true" opens pull requests;
-                                  off, an agent_build item waits for `go N`
-                                  and is refused with the reason.
-    FEATURE_DESK_PR_DAILY_CAP     pull requests per day, default 3. Sam's
-                                  `go N` is not counted against it.
+    FEATURE_DESK_PR_ENABLED       default OFF. "true" lets the agent open
+                                  pull requests on its own; off, an
+                                  agent_build item waits for Sam's `go N`,
+                                  which always builds.
+    FEATURE_DESK_PR_DAILY_CAP     agent-initiated PRs per day, default 3.
+                                  Sam's `go N` is never held by it.
     SLACK_CHANNEL_FEATURE_REQUESTS default C0ALL4VPWK0 (shared with
                                   sprint_thread's feature posts).
 
@@ -426,9 +427,14 @@ def act(ts: str, row: dict, card: dict, items: dict,
                                 f"{MAX_ROUNDS} times. Can you take it?")
         if verdict == "agent_build":
             ok, why = _can_build(item)
-            if ok:
+            if ok and (pr_enabled() or item.get("sam_approved")):
                 item["state"] = BUILDING
                 to_build.append(n)
+            elif ok:
+                # PRs wait for Sam: say so once, in this reply, rather than
+                # "building now" followed by a second message that it is not.
+                item["state"] = HELD
+                asks_sam = True
             else:
                 item["verdict"], item["state"] = "log", ""
                 item["analysis"] = (f"{item.get('analysis') or ''} "
@@ -514,6 +520,9 @@ def _item_text(item: dict, row: dict) -> str:
         lines.append(f"_Question:_ {item['question']}")
     if item.get("state") == BUILDING:
         lines.append("Building it now. The pull request link follows here.")
+    elif item.get("state") == HELD:
+        lines.append(f"Ready to build. `go {item['n']}` opens the pull "
+                     "request.")
     if verdict == "log" and item.get("state") == LOGGED:
         lines.append("Logged for Sam. It goes on the linked ClickUp task "
                      "once nothing in this thread is open.")
@@ -554,18 +563,24 @@ def _build(ts: str, row: dict, items: dict, n: str,
     item = items[n]
     sam_approved = sam_approved or bool(item.get("sam_approved"))
     ok, why = _can_build(item)
-    if ok and not pr_enabled():
-        ok, why = False, "pull requests are switched off " \
-                         "(FEATURE_DESK_PR_ENABLED)"
-    if ok and not sam_approved and _opened_today() >= daily_cap():
-        ok, why = False, f"the daily cap of {daily_cap()} pull requests " \
-                         "is reached"
     if not ok:
-        item["state"] = HELD
-        _save(ts, items=json.dumps(items))
-        _post(f"*{n}* is ready to build, but {why}. Sam can say "
-              f"`go {n}` once that's cleared, or `log {n}`.", thread_ts=ts)
-        return {"n": n, "built": False, "reason": why}
+        # The plan itself is unbuildable; no word of Sam's changes that.
+        return _fell_through(ts, row, items, n, why)
+    # FEATURE_DESK_PR_ENABLED and the daily cap only stop the agent opening
+    # pull requests on its own. Sam's `go N` always builds (Sam, 2026-10-19:
+    # his `go 1` was refused with "say go 1", which he had just said).
+    if not sam_approved:
+        if not pr_enabled():
+            why = "the agent waits for your word before opening a PR"
+        elif _opened_today() >= daily_cap():
+            why = f"the daily cap of {daily_cap()} agent PRs is reached"
+        if why:
+            item["state"] = HELD
+            _save(ts, items=json.dumps(items))
+            _post(f"*{n}* is ready to build ({why}). <@{SAM_SLACK}> say "
+                  f"`go {n}` to open the pull request, or `log {n}`.",
+                  thread_ts=ts)
+            return {"n": n, "built": False, "reason": why}
 
     proposal, repo = _propose(ts, item)
     if not proposal.get("diff"):

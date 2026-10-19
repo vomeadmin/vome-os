@@ -160,12 +160,26 @@ def test_a_reply_is_queued_against_its_post(monkeypatch, desk):
 # ---------------------------------------------------------------------------
 
 def test_a_concrete_plan_in_core_is_built(monkeypatch, desk):
+    monkeypatch.setenv("FEATURE_DESK_PR_ENABLED", "true")
     monkeypatch.setattr(fd, "_build", lambda ts, row, items, n, **k:
                         desk["builds"].append(n))
     items = {"1": _build_item()}
     fd.act("1.1", {"task_id": ""}, {"summary": "Address"}, items)
     assert desk["builds"] == ["1"]
     assert items["1"]["state"] == fd.BUILDING
+
+
+def test_with_prs_off_the_reply_says_ready_not_building(monkeypatch, desk):
+    """Sam, 2026-10-19: the reply said "Building it now" and the next
+    message said it was not."""
+    monkeypatch.delenv("FEATURE_DESK_PR_ENABLED", raising=False)
+    monkeypatch.setattr(fd, "_build", lambda *a, **k: pytest.fail("built"))
+    items = {"1": _build_item()}
+    fd.act("1.1", {"task_id": ""}, {"summary": "Address"}, items)
+    assert items["1"]["state"] == fd.HELD
+    assert len(desk["posts"]) == 1
+    assert "`go 1` opens the pull request" in desk["posts"][0]
+    assert "Building it now" not in desk["posts"][0]
 
 
 @pytest.mark.parametrize("build,why", [
@@ -252,6 +266,20 @@ def test_pull_requests_off_holds_the_item(monkeypatch, desk):
     assert result["built"] is False
     assert items["1"]["state"] == fd.HELD
     assert "go 1" in desk["posts"][0]
+
+
+def test_sams_go_builds_with_pull_requests_off(monkeypatch, desk):
+    """Sam, 2026-10-19: `go 1` was refused with "say go 1". The switch only
+    stops the agent opening PRs on its own."""
+    monkeypatch.delenv("FEATURE_DESK_PR_ENABLED", raising=False)
+    proposed = []
+    monkeypatch.setattr(fd, "_propose", lambda ts, item:
+                        proposed.append(item["n"]) or
+                        ({"reason": "declined"}, None))
+    items = {"1": {**_build_item(), "state": fd.HELD}}
+    fd._build("1.1", {"task_id": "T1"}, items, "1", sam_approved=True)
+    assert proposed == ["1"]
+    assert not any("is ready to build" in p for p in desk["posts"])
 
 
 def test_the_daily_cap_holds_but_sam_lifts_it(monkeypatch, desk):
