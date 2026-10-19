@@ -398,19 +398,42 @@ class GitHub(Connector):
         }
 
     def search_code(
-        self, query: str, repo: str = "", owner: str = ""
+        self, query: str, repo: str = "", owner: str = "", ref: str = ""
     ) -> IntegrationResult:
+        """GitHub code search, falling back to a grep of the live code.
+
+        GitHub's index covers the default branch only, and for vome-react it
+        never completes: every query returns no items with
+        `incomplete_results`. In that case the repository is downloaded at
+        `ref` and searched directly (see code_mirror.py). If that also
+        fails, the original incomplete result is returned with
+        `mirror_error`, which callers report as "not searched".
+        """
         if repo and not _repo_permitted(repo, self.allowlist):
             return self._denied("search_code", repo)
         who = owner or self.owner
         scope = f"repo:{who}/{repo}" if repo else f"user:{who}"
-        return self._call(
+        result = self._call(
             "search_code",
             "GET",
             "/search/code",
             params={"q": f"{query} {scope}", "per_page": 20},
-            headers=self.headers(who),
+            # text-match adds the matching fragments, not just the paths.
+            headers={**self.headers(who),
+                     "Accept": "application/vnd.github.text-match+json"},
         )
+        data = result.data if isinstance(result.data, dict) else {}
+        if not (repo and result.ok and data.get("incomplete_results")
+                and not data.get("items")):
+            return result
+        from vomeos.integrations import code_mirror
+
+        mirrored = code_mirror.search(who, repo, query, self.headers(who),
+                                      ref=ref)
+        if mirrored.ok:
+            return mirrored
+        data["mirror_error"] = mirrored.error
+        return result
 
     def read_file(
         self, repo: str, path: str, ref: str = "", owner: str = "",

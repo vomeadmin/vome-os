@@ -477,10 +477,22 @@ def _github_hits(data) -> list[dict]:
     hits = []
     items = data.get("items", []) if isinstance(data, dict) else []
     for item in items:
+        lines = []
+        # A grep of the downloaded code carries real line numbers.
+        for match in item.get("content_matches") or []:
+            for line in match.get("lines") or []:
+                text = "".join(seg.get("text", "")
+                               for seg in line.get("segments") or [])
+                lines.append({"line": line.get("line"), "text": text})
+        # GitHub's own index gives fragments without line numbers.
+        for match in item.get("text_matches") or []:
+            fragment = (match.get("fragment") or "").strip()
+            if fragment:
+                lines.append({"line": None, "text": fragment[:300]})
         hits.append({
             "repo": (item.get("repository") or {}).get("name"),
             "path": item.get("path"),
-            "lines": [],
+            "lines": lines[:6],
         })
     return hits
 
@@ -522,22 +534,31 @@ def search_code(query: str, repo: str = "") -> dict:
         else:
             result = connector.search_code(
                 query, repo=target.slug, owner=target.owner,
+                ref=target.live_ref,
             )
             label = target.slug
             parsed = _github_hits(result.data) if result.ok else []
         # GitHub answers a search it could not finish with 200, no items and
         # incomplete_results. vome-react (~500 MB) gets that for every query,
         # so "searched, 0 files" there meant "unknown", and the triage agent
-        # read it as "not in the code" (#9582, 2026-10-19).
-        incomplete = (
-            result.ok and not parsed and isinstance(result.data, dict)
-            and result.data.get("incomplete_results")
-        )
-        if incomplete:
+        # read it as "not in the code" (#9582, 2026-10-19). The connector now
+        # greps a downloaded copy instead; this branch is only reached when
+        # that download failed too.
+        data = result.data if isinstance(result.data, dict) else {}
+        mirror = data.get("mirror") if result.ok else None
+        incomplete = result.ok and not parsed and data.get("incomplete_results")
+        if mirror:
+            sources[label] = (
+                f"searched, {len(parsed)} files (full copy of "
+                f"{mirror['ref']} at {mirror['sha']}, "
+                f"{data.get('total_count', len(parsed))} matching in all)"
+            )
+        elif incomplete:
             sources[label] = (
                 "NOT searched (GitHub's index for this repository is "
-                "incomplete, so no hits is unknown, not absent; open files "
-                "with read_code_file instead)"
+                "incomplete and the full-copy fallback failed: "
+                f"{str(data.get('mirror_error', ''))[:120]}; no hits is "
+                "unknown, not absent; open files with read_code_file instead)"
             )
         else:
             sources[label] = (

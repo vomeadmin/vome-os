@@ -179,8 +179,11 @@ def _cap(text: str) -> str:
 
 
 def _search(repo: Repo, query: str) -> str:
+    # GitHub repos take the branch so a full-copy fallback greps the code
+    # that runs (see code_mirror.py); Bitbucket search has no such option.
+    extra = {"ref": repo.branch} if repo.host == "github" else {}
     result = _client(repo).search_code(query, repo=repo.slug,
-                                       **_kwargs(repo))
+                                       **_kwargs(repo), **extra)
     if not result.ok:
         return f"Search failed: {result.error[:200]}. This is NOT 'no match'."
     data = result.data if isinstance(result.data, dict) else {}
@@ -194,10 +197,25 @@ def _search(repo: Repo, query: str) -> str:
                                for seg in line.get("segments") or [])
                 if text.strip():
                     hits.append(f"  {line.get('line')}: {text.strip()[:160]}")
+        for match in item.get("text_matches") or []:
+            fragment = " ".join((match.get("fragment") or "").split())
+            if fragment:
+                hits.append(f"  ~ {fragment[:160]}")
         lines.append(path + ("\n" + "\n".join(hits[:4]) if hits else ""))
+    if not lines and data.get("incomplete_results"):
+        return (f"Search failed: GitHub's index of {repo.alias} is incomplete "
+                "and the full-copy fallback failed "
+                f"({str(data.get('mirror_error', ''))[:120]}). This is NOT "
+                "'no match'; read the files directly.")
     if not lines:
-        return (f"No matches for {query!r} in {repo.alias}. The index "
-                "follows the default branch, so confirm by reading.")
+        where = (f"the live code ({data['mirror']['ref']} at "
+                 f"{data['mirror']['sha']})" if data.get("mirror")
+                 else "the default branch")
+        return (f"No matches for {query!r} in {repo.alias}. Searched "
+                f"{where}, so confirm by reading.")
+    if data.get("mirror"):
+        lines.insert(0, f"(searched {data['mirror']['ref']} at "
+                        f"{data['mirror']['sha']})")
     return "\n".join(lines)
 
 

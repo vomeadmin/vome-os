@@ -562,7 +562,8 @@ def test_workspace_search_drops_repos_the_connector_may_not_read(
                                               file("some-other-repo"),
                                           ]}))
     monkeypatch.setattr(GitHub, "search_code",
-                        lambda self, q, repo="", owner="": IntegrationResult(
+                        lambda self, q, repo="", owner="", ref="":
+                        IntegrationResult(
                             "github", "search_code", True, data={"items": []}))
     found = tools.search_code("phone_number")
     assert [f["repo"] for f in found["files"]] == ["vomedjango-chats-app"]
