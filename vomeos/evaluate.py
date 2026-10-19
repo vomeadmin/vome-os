@@ -135,10 +135,16 @@ def compare(expected: dict, actual: dict | None) -> list[str]:
         return ["agent produced no usable output"]
     problems = []
     for key, want in expected.items():
-        # "code_check.verdict" reads a nested field.
+        # "code_check.verdict" reads a nested field; "items.0.verdict" reads
+        # into a list.
         got = actual
         for part in key.split("."):
-            got = got.get(part) if isinstance(got, dict) else None
+            if isinstance(got, dict):
+                got = got.get(part)
+            elif isinstance(got, list) and part.isdigit():
+                got = got[int(part)] if int(part) < len(got) else None
+            else:
+                got = None
         if not _same(want, got):
             problems.append(f"{key}: expected {want!r}, got {got!r}")
     return problems

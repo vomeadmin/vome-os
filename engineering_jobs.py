@@ -142,10 +142,40 @@ def _register_code_access() -> None:
     )
 
 
+def _register_bug_reports() -> None:
+    """#bug-reports: one report, or one reply in its thread. Idempotent on
+    the report's Slack ts and the last reply handled."""
+    from bug_reports import HANDLER_KEY, handle
+
+    register_event_handler(
+        HANDLER_KEY,
+        handle,
+        queue=QUEUE,
+        time_limit=600,
+        description="Check a #bug-reports report and act on it",
+    )
+
+
+def _register_feature_desk() -> None:
+    """#feature-requests: one request post, or one reply in its thread.
+    Idempotent on the post's Slack ts and the last reply handled."""
+    from feature_desk import HANDLER_KEY, handle
+
+    register_event_handler(
+        HANDLER_KEY,
+        handle,
+        queue=QUEUE,
+        time_limit=900,
+        description="Shape a #feature-requests post and build what fits",
+    )
+
+
 def register_all() -> None:
     """Register everything engineering owns. Idempotent."""
     _register_sentry()
     _register_code_access()
+    _register_bug_reports()
+    _register_feature_desk()
 
 
 # Importing this module registers the work, which is what

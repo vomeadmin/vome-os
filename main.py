@@ -50,6 +50,8 @@ from database import init_db
 from field_feedback import handle_field_feedback
 from on_prod_handler import handle_on_prod
 from release_watcher import run_release_watcher
+import bug_reports
+import feature_desk
 import shadow_triage
 import sprint_batch
 import sprint_thread
@@ -646,6 +648,26 @@ async def slack_events_webhook(request: Request):
                 "ts": event.get("ts", ""),
                 "thread_ts": thread_ts,
                 "channel": channel,
+            })
+
+        elif channel == bug_reports.CHANNEL:
+            # #bug-reports. A top-level message is a new report; a reply is
+            # Sam's command or the reporter's answer to a question.
+            bug_reports.handle_message({
+                "user": user,
+                "text": text,
+                "ts": event.get("ts", ""),
+                "thread_ts": thread_ts,
+            })
+
+        elif channel == feature_desk.CHANNEL:
+            # #feature-requests. A top-level message is a new request; a
+            # reply is Sam's command or direction, or the requester's answer.
+            feature_desk.handle_message({
+                "user": user,
+                "text": text,
+                "ts": event.get("ts", ""),
+                "thread_ts": thread_ts,
             })
 
         elif event.get("channel_type") == "im":
