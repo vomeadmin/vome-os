@@ -546,7 +546,8 @@ def search_code(query: str, repo: str = "") -> dict:
         # that download failed too.
         data = result.data if isinstance(result.data, dict) else {}
         mirror = data.get("mirror") if result.ok else None
-        incomplete = result.ok and not parsed and data.get("incomplete_results")
+        incomplete = (result.ok and not parsed
+                      and data.get("incomplete_results"))
         if mirror:
             sources[label] = (
                 f"searched, {len(parsed)} files (full copy of "
@@ -611,11 +612,15 @@ def read_code_file(
 
     ref = (ref or "").strip() or found.live_ref
     connector = _connector_for(found)
+    # The whole file: line windows below are cut from it, and the reading
+    # cap would otherwise make every line past ~60 KB unreachable.
     if found.host == "bitbucket":
-        result = connector.read_file(found.slug, path, ref=ref)
+        result = connector.read_file(found.slug, path, ref=ref,
+                                     max_bytes=2_000_000)
     else:
         result = connector.read_file(
             found.slug, path, ref=ref, owner=found.owner,
+            max_bytes=2_000_000,
         )
     if not result.ok:
         failure = {

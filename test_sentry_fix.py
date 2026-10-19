@@ -427,3 +427,74 @@ def test_pr_targets_can_be_overridden_without_a_deploy(monkeypatch):
     assert sentry_projects.fix_target("VomeApp") == "development"
     # The override must not leak into repositories it does not name.
     assert sentry_projects.fix_target("vome-react") == "develop"
+
+
+# ---------------------------------------------------------------------------
+# Reading the file a fix is applied to (#9582, 2026-10-19)
+# ---------------------------------------------------------------------------
+
+def _big_file(lines: int = 6500) -> str:
+    return "".join(f"const line{i} = {i};\n" for i in range(1, lines + 1))
+
+
+_LATE_PATCH = (
+    "--- a/src/Grid.js\n+++ b/src/Grid.js\n"
+    "@@ -6119,1 +6119,1 @@\n"
+    "-const line6119 = 6119;\n"
+    "+const line6119 = effective;\n"
+)
+
+
+def _reader(monkeypatch, cls, data):
+    from vomeos.integrations import code_search
+    from vomeos.integrations.base import IntegrationResult
+
+    seen = {}
+
+    def read_file(self, repo, path, ref="", owner="", max_bytes=0):
+        seen["max_bytes"] = max_bytes
+        return code_search._truncate(
+            IntegrationResult("x", "read_file", True, data=data), max_bytes)
+
+    monkeypatch.setattr(getattr(code_search, cls), "read_file", read_file)
+    return seen
+
+
+def test_github_files_are_decoded_before_the_patch_is_applied(monkeypatch):
+    # GitHub answers with JSON and the file base64 encoded. This used to be
+    # rejected as "not text", so no GitHub fix could ever open.
+    import base64
+
+    original = _big_file()
+    encoded = {"encoding": "base64",
+               "content": base64.b64encode(original.encode()).decode()}
+    _reader(monkeypatch, "GitHub", encoded)
+    contents, error = sentry_fix._apply_to_repo(
+        "vome-react", "develop", "github", "vomeadmin", _LATE_PATCH)
+    assert error == ""
+    assert "const line6119 = effective;" in contents["src/Grid.js"]
+    assert contents["src/Grid.js"].count("\n") == original.count("\n")
+
+
+def test_large_files_are_read_whole(monkeypatch):
+    # ~150 KB: past the 60 KB reading cap, so a capped read cannot reach the
+    # hunk and, worse, would commit a cut-off file if it could.
+    original = _big_file()
+    assert len(original) > 60_000
+    seen = _reader(monkeypatch, "Bitbucket", original)
+    contents, error = sentry_fix._apply_to_repo(
+        "vomedjango-restored-core-app", "development", "bitbucket", "",
+        _LATE_PATCH)
+    assert error == ""
+    assert seen["max_bytes"] == sentry_fix.APPLY_MAX_BYTES
+    assert contents["src/Grid.js"].endswith("const line6500 = 6500;\n")
+
+
+def test_a_truncated_read_is_refused_not_committed(monkeypatch):
+    huge = "x = 1\n" * (sentry_fix.APPLY_MAX_BYTES // 6 + 10)
+    _reader(monkeypatch, "Bitbucket", huge)
+    contents, error = sentry_fix._apply_to_repo(
+        "vomedjango-restored-core-app", "development", "bitbucket", "",
+        "--- a/a.py\n+++ b/a.py\n@@ -1,1 +1,1 @@\n-x = 1\n+x = 2\n")
+    assert contents == {}
+    assert "larger than" in error

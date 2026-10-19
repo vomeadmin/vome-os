@@ -202,3 +202,41 @@ def test_commit_history_can_be_asked_for_a_branch():
     for cls in (code_search.Bitbucket, code_search.GitHub):
         sig = inspect.signature(cls.recent_commits)
         assert "ref" in sig.parameters, cls.__name__
+
+
+# ---------------------------------------------------------------------------
+# GitHub files come back as text (#9582, 2026-10-19)
+# ---------------------------------------------------------------------------
+
+def test_github_read_file_returns_text_like_bitbucket(monkeypatch):
+    # The contents API wraps the file in JSON, base64 encoded. Callers that
+    # accept only text (the Sentry analyst, the fix author) used to get an
+    # empty file for every GitHub repository.
+    from vomeos.integrations.base import IntegrationResult
+
+    _clear(monkeypatch)
+    monkeypatch.setenv("VOMEOS_GITHUB_TOKEN", "t")
+    body = "line\n" * 20_000  # ~100 KB, past the default reading cap
+    payload = {"encoding": "base64",
+               "content": base64.b64encode(body.encode()).decode()}
+    client = code_search.GitHub()
+    monkeypatch.setattr(client, "_call", lambda *a, **k: IntegrationResult(
+        "github", "read_file", True, data=payload))
+
+    whole = client.read_file("vome-react", "a.js", owner="vomeadmin",
+                             max_bytes=2_000_000)
+    assert whole.data == body
+    capped = client.read_file("vome-react", "a.js", owner="vomeadmin")
+    assert "truncated at" in capped.data
+
+
+def test_github_directory_listing_is_left_alone(monkeypatch):
+    from vomeos.integrations.base import IntegrationResult
+
+    _clear(monkeypatch)
+    monkeypatch.setenv("VOMEOS_GITHUB_TOKEN", "t")
+    listing = [{"name": "src", "type": "dir"}]
+    client = code_search.GitHub()
+    monkeypatch.setattr(client, "_call", lambda *a, **k: IntegrationResult(
+        "github", "read_file", True, data=listing))
+    assert client.read_file("vome-react", "", owner="vomeadmin").data == listing

@@ -130,6 +130,33 @@ def propose(analysis: dict, context: dict) -> dict:
     }
 
 
+# Large enough for any source file we hold (MyVolunteerUserList.js is ~295 KB)
+# and under GitHub's 1 MB limit for inline file contents.
+APPLY_MAX_BYTES = 1_000_000
+
+
+def _file_text(result) -> tuple[str | None, str]:
+    """The full text of a read_file result, or (None, why not).
+
+    Bitbucket returns the raw file. GitHub's contents API returns JSON with
+    the file base64 encoded, which this step used to reject as "not text",
+    so no agent fix could ever open on a GitHub repository (#9582,
+    2026-10-19). A truncated read is refused outright.
+    """
+    if not result.ok:
+        return None, result.error[:120]
+    data = result.data
+    if isinstance(data, dict) and data.get("encoding") == "base64":
+        import base64
+
+        data = base64.b64decode(data.get("content") or "").decode("utf-8")
+    if not isinstance(data, str):
+        return None, "the response was not a file"
+    if data.endswith(f"... truncated at {APPLY_MAX_BYTES} bytes ..."):
+        return None, f"larger than {APPLY_MAX_BYTES} bytes"
+    return data, ""
+
+
 def _apply_to_repo(repo: str, ref: str, host: str, owner: str,
                    patch: str) -> tuple[dict, str]:
     """Apply each file's hunks to the real current file. (contents, error).
@@ -143,11 +170,16 @@ def _apply_to_repo(repo: str, ref: str, host: str, owner: str,
 
     contents: dict[str, str] = {}
     for path, file_diff in diff_tools.split_by_file(patch).items():
-        result = reader.read_file(repo, path, ref=ref, **kwargs)
-        if not result.ok or not isinstance(result.data, str):
-            return {}, f"could not read {path}: {result.error[:120]}"
+        # The whole file, not the 60 KB reading cap: whatever comes back here
+        # is what gets committed, so a cut-off file would become a PR that
+        # deletes everything past the cut.
+        result = reader.read_file(repo, path, ref=ref,
+                                  max_bytes=APPLY_MAX_BYTES, **kwargs)
+        text, why = _file_text(result)
+        if text is None:
+            return {}, f"could not read {path}: {why}"
         try:
-            contents[path] = diff_tools.apply(result.data, file_diff)
+            contents[path] = diff_tools.apply(text, file_diff)
         except diff_tools.DiffError as exc:
             return {}, f"{path}: {exc}"
     return contents, ""

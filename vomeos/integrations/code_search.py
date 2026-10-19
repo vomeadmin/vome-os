@@ -456,6 +456,18 @@ class GitHub(Connector):
             params=params,
             headers=self.headers(who),
         )
+        # A file comes back as JSON with the text base64 encoded. Hand back
+        # the text, as Bitbucket does: callers that only accept text (the
+        # Sentry analyst, the fix author) silently saw an empty file for
+        # every GitHub repository (#9582, 2026-10-19). Directory listings and
+        # over-1MB files ("encoding": "none") stay as GitHub sent them.
+        data = result.data
+        if result.ok and isinstance(data, dict) \
+                and data.get("encoding") == "base64":
+            import base64
+
+            result.data = base64.b64decode(data.get("content") or "").decode(
+                "utf-8", errors="replace")
         return _truncate(result, max_bytes)
 
     def recent_commits(
