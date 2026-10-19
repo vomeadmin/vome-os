@@ -101,6 +101,22 @@ def _agent_fix(item: dict, card: dict) -> str:
             f"{str(ledger.get('reason') or '')[:300]}")
 
 
+def _engineer(item: dict) -> dict:
+    """Who has it when triage routed it, read live from ClickUp, so the
+    sprint reports where the work stands without triaging it again."""
+    filed = item.get("eng_task") or {}
+    if not filed.get("url"):
+        return {}
+    import ticket_routing
+
+    state = ticket_routing.task_state(filed)
+    return {"owner": filed.get("owner"), "task": filed.get("url"),
+            "status": state.get("status") or "unknown",
+            "shipped": bool(state.get("shipped")),
+            "urgent": bool(filed.get("urgent")),
+            "filed": filed.get("how") or ""}
+
+
 def view(item: dict) -> dict:
     """One item as the model needs it: the agent's first pass, the draft in
     full, and where it stands."""
@@ -143,6 +159,8 @@ def view(item: dict) -> dict:
         # Who owns the ticket now, in words: where the PR stands, or why
         # the agent did not open one.
         "agent_fix": _agent_fix(item, card),
+        # The engineer task triage filed or joined, with its live status.
+        "engineer": _engineer(item),
         "decision": item.get("decision") or "",
     }
 
@@ -163,6 +181,14 @@ def sprint_queue(include_finished: bool = False) -> dict:
     if not sprint_store.ready():
         _refuse("the sprint database is not reachable")
     items = sprint_store.working_set()
+    # Routed by triage and already shipped: the on-prod handler emailed the
+    # client, so the acknowledgment waiting here is stale and finishes.
+    import sprint_thread
+
+    items = [i for i in items
+             if not ((i.get("eng_task") or {}).get("id")
+                     and i.get("status") in sprint_store.CARRIES
+                     and sprint_thread._engineer_shipped(i))]
     groups: dict[str, list] = {name: [] for name in SECTIONS}
     finished = []
     for item in sorted(items, key=sprint_batch._priority):
@@ -199,9 +225,15 @@ def sprint_queue(include_finished: bool = False) -> dict:
             "fixing this, here is the acknowledgment to send). "
             "agent_fixing lists tickets already acknowledged that the agent "
             "still owns: one line each with agent_fix, nothing to do unless "
-            "it says Sam's merge. needs_decision carries the agent's first "
-            "pass (code_check, recommended_action, escalation_reason). For "
-            "a ticket not listed, call ticket_first_pass."),
+            "it says Sam's merge. An item with engineer set is already with "
+            "that engineer (triage filed the ClickUp task on its own): do "
+            "not route it again, and its reply is an acknowledgment that "
+            "the team is on it, with no timeline. When the engineer ships, "
+            "the client is emailed and the ticket closes automatically. "
+            "needs_decision carries the agent's first pass (code_check, "
+            "recommended_action, escalation_reason). Never re-triage a "
+            "listed item to learn its status: engineer and agent_fix are "
+            "read live. For a ticket not listed, call ticket_first_pass."),
     }
     if include_finished:
         out["finished_recently"] = finished
@@ -519,3 +551,154 @@ def log_ticket_request(ticket: str, caller: str, build: bool = False,
     mode = existing_task_id.strip() or ("new" if confirm_new else "")
     return {"result": sprint_thread._feature(
         item, "build" if build else "log", mode)}
+
+
+# ---------------------------------------------------------------------------
+# Walking the Zoho queue
+# ---------------------------------------------------------------------------
+
+WALK_SECTIONS = ("urgent", "route", "with_engineer", "agent_fixing",
+                 "your_call", "answer", "close_quietly", "not_triaged")
+
+
+def _fix_attempt(item: dict) -> dict:
+    """What the agent's fix attempt came to, as ticket_routing reads it."""
+    if item.get("fix_pr"):
+        return {"pr_url": item["fix_pr"]}
+    try:
+        ledger = _ledger(str(item.get("ticket_id") or ""))
+    except Exception:
+        ledger = {}
+    return {"outcome": ledger.get("outcome") or "",
+            "reason": ledger.get("reason") or "",
+            "pr_url": ledger.get("pr_url") or ""}
+
+
+def _walk_one(item: dict) -> tuple[str, dict]:
+    """(section, line) for one triaged ticket. Reads, never writes."""
+    import ticket_routing as tr
+
+    card = item.get("card") or {}
+    code = card.get("code_check") if isinstance(
+        card.get("code_check"), dict) else {}
+    line = {"ticket": f"#{item.get('ticket_number')}",
+            "account": item.get("account"),
+            "waiting_on": card.get("live_question") or item.get("summary"),
+            "lane": card.get("lane") or "",
+            "code_check": code.get("verdict") or "",
+            "draft": item.get("draft_status") or "none",
+            "client_told": bool(item.get("sent_at"))}
+    if (item.get("eng_task") or {}).get("url"):
+        line["engineer"] = _engineer(item)
+        return "with_engineer", line
+    if item.get("fix_pr"):
+        line["agent_fix"] = _agent_fix(item, card)
+        return "agent_fixing", line
+    fix = _fix_attempt(item)
+    go, reason = tr.should_route(card, fix)
+    if go:
+        urgent = tr.urgency(tr.arr_of(item.get("account") or ""),
+                            item.get("account") or "", tr.incident_of(item))
+        line.update({"route_to": tr.engineer_for(card), "reason": reason,
+                     "urgent": urgent})
+        return ("urgent" if urgent else "route"), line
+    lane = card.get("lane") or ""
+    if (lane in ("feature", "sam_ops")
+            or code.get("verdict") == "design_question"
+            or card.get("escalation_reason") == "product_decision"
+            or (lane == "agent_fix" and not go)):
+        line["why_yours"] = (card.get("why_human") or reason
+                             or card.get("recommended_action") or "")
+        return "your_call", line
+    if lane == "housekeeping" or item.get("category") == "awaiting_client":
+        return "close_quietly", line
+    return "answer", line
+
+
+def walk_queue() -> dict:
+    """Every Zoho ticket at New or Processing (each one owes the client a
+    reply), and what the system does with it now: routes it to an engineer,
+    leaves it with the agent's fix, or puts it in front of Sam. Read-only,
+    and no agent runs: it uses the cards triage already wrote."""
+    import sprint_batch
+
+    if not sprint_store.ready():
+        _refuse("the sprint database is not reachable")
+    try:
+        tickets = sprint_batch._queue()
+    except Exception as exc:
+        _refuse(f"the Zoho queue could not be read ({exc}); that is not "
+                "the same as an empty queue")
+    groups: dict[str, list] = {name: [] for name in WALK_SECTIONS}
+    for ticket in tickets:
+        item = sprint_store.by_ticket(str(ticket.get("id")))
+        if not item or not item.get("card"):
+            groups["not_triaged"].append({
+                "ticket": f"#{ticket.get('ticketNumber')}",
+                "subject": ticket.get("subject") or "",
+                "zoho_status": ticket.get("status")})
+            continue
+        section, line = _walk_one(item)
+        line["zoho_status"] = ticket.get("status")
+        groups[section].append(line)
+    return {
+        "open_in_zoho": len(tickets),
+        "counts": {name: len(groups[name]) for name in WALK_SECTIONS},
+        **groups,
+        "how_to_use_this": (
+            "Every ticket here is New or Processing in Zoho, so every one is "
+            "owed a reply from Sam (except close_quietly). urgent and route "
+            "are what route_queue would file now (urgent ones also ping the "
+            "engineer's channel and Sam). with_engineer and agent_fixing are "
+            "already owned: their reply is the acknowledgment, and sending it "
+            "is what moves Zoho to In Progress. your_call needs Sam (feature "
+            "requests to log, design questions, data or billing). "
+            "not_triaged tickets have no card yet: the 30-minute sweep picks "
+            "them up, or use ticket_first_pass on one. If a line is wrong, "
+            "that is a lesson: ask Sam for the rule and use teach_agents."),
+    }
+
+
+def route_queue(caller: str, tickets: str = "") -> dict:
+    """Do what walk_queue shows under urgent and route (Sam only): file or
+    join the engineer task for each, with no client email and no Zoho
+    status change. `tickets` limits it to those numbers ("9500 9501")."""
+    _sam_only(caller, "route the queue")
+    import ticket_routing as tr
+    from error_reports import is_error_report
+
+    import shadow_triage
+
+    wanted = {n.lstrip("#") for n in (tickets or "").replace(",", " ").split()}
+    walked = walk_queue()
+    results = []
+    for line in walked["urgent"] + walked["route"]:
+        number = line["ticket"].lstrip("#")
+        if wanted and number not in wanted:
+            continue
+        _, item = find(number)
+        if is_error_report(item.get("subject") or ""):
+            results.append({"ticket": line["ticket"],
+                            "result": "error report: stays the agent's"})
+            continue
+        release = shadow_triage.release_state(number,
+                                              str(item.get("ticket_id")))
+        if release.get("task_id"):
+            results.append({"ticket": line["ticket"],
+                            "result": "already linked to an agent fix"})
+            continue
+        out = tr.route(item, item.get("card") or {}, _fix_attempt(item),
+                       tr.incident_of(item),
+                       tr.arr_of(item.get("account") or ""))
+        results.append({"ticket": line["ticket"],
+                        "result": (f"{out['task']['how']} for "
+                                   f"{out['task']['owner']}: "
+                                   f"{out['task']['url']}"
+                                   + (f" (URGENT: {out['urgent']})"
+                                      if out.get("urgent") else ""))
+                        if out.get("routed") else
+                        f"not routed: {out.get('why')}"})
+    return {"routed": results,
+            "note": ("Nothing was sent to any client and Zoho statuses did "
+                     "not change. Each still needs Sam's acknowledgment from "
+                     "the sprint.")}

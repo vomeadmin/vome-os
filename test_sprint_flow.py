@@ -484,18 +484,25 @@ def test_command_is_run_once_per_slack_message(db, monkeypatch, world):
     assert runs == [1]
 
 
-def test_incident_is_announced_once_a_day(db, world):
-    item = _upsert("t-7001")
-    incident = {"key": "sentry:1", "symptom": "s", "same_as": ["7000"],
-                "sentry_issue": "1", "reason": "r", "confidence": "high"}
-    monkeypatch_thread = sprint_thread.ensure_thread
-    sprint_thread.ensure_thread = lambda day=None: "1.1"
-    try:
-        assert sprint_thread.announce_incident(item, incident) is True
-        assert sprint_thread.announce_incident(item, incident) is False
-    finally:
-        sprint_thread.ensure_thread = monkeypatch_thread
-    assert any("U01B9FQNSBU" in text for _, text in world.posts)
+def test_the_engineer_task_survives_a_retriage(db):
+    """A new customer message re-triages the item; the task triage filed
+    must stay, or the next pass files a second one (ticket_routing)."""
+    item = _upsert("t-8001")
+    sprint_store.set_eng_task(item["id"], {"id": "86x", "url": "u",
+                                           "owner": "onlyg"})
+    again = _upsert("t-8001", thread_id="T2")
+    assert again["eng_task"]["id"] == "86x"
+    found = sprint_store.by_ticket_numbers(["8001", "9999"])
+    assert [i["ticket_number"] for i in found] == ["8001"]
+    assert found[0]["eng_task"]["owner"] == "onlyg"
+
+
+def test_urgent_alert_is_posted_once_a_day(db, world):
+    """Only urgent work interrupts Sam (2026-10-19), and only once."""
+    assert sprint_thread.alert_sam("urgent:86x", "Urgent, with onlyg") is True
+    assert sprint_thread.alert_sam("urgent:86x", "Urgent, with onlyg") is False
+    assert sprint_thread.alert_sam("urgent:86y", "another task") is True
+    assert sum("U01B9FQNSBU" in text for _, text in world.posts) == 2
 
 
 # ---------------------------------------------------------------------------

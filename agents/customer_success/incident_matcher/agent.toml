@@ -25,7 +25,9 @@ timeout_seconds = 45
 max_retries = 2
 
 [approval]
-# Its only effect is an internal alert to Sam.
+# Its effects are internal: a matching ticket joins the engineer task
+# already filed for the same problem, and a second account makes it urgent
+# (ticket_routing).
 requires_ceo_approval = false
 escalate_to = "#support-sprints"
 

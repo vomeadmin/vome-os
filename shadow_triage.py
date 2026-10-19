@@ -50,7 +50,9 @@ RESOLUTION_NOTES = (
     "This is a resolution reply: the linked fix is live. Say only that the "
     "update is live, what they will notice, and invite them to try it. Do "
     "not apologise, do not refer to anything we sent before, and do not "
-    "bring up any other topic from the thread."
+    "bring up any other topic from the thread. Two or three short "
+    "sentences: it usually sends without review (Sam, 2026-10-19), so word "
+    "it for this client and this issue rather than as a template."
 )
 
 # Categories that get a drafted reply. The rest wait for Sam's decision:
@@ -149,17 +151,32 @@ def _recent_errors() -> str:
         rows = []
     if not rows:
         return "No production errors in the last 48 hours."
+    # `first_seen_at` is when OUR ledger first logged the issue (often the
+    # 08:15 ET backfill), not when Sentry first saw it. Labelled as a start
+    # time, every issue "began at 12:15 UTC, before the ticket" and the
+    # matcher paged Sam at high confidence on an error 177k events old
+    # (Sentry 4863823688, 2026-10-19).
     return "\n".join(
-        f"Sentry {r['issue_id']}: {r['title']}\n   in {r['culprit']}, first "
-        f"seen {str(r['first_seen_at'])[:16]} UTC, "
-        f"{r.get('times_seen') or 0} events"
+        f"Sentry {r['issue_id']}: {r['title']}\n   in {r['culprit']}, "
+        f"{r.get('times_seen') or 0} events in total. Logged by our monitor "
+        f"{str(r['first_seen_at'])[:16]} UTC; this is NOT when the error "
+        "started, which may be much earlier"
         for r in rows
     )
 
 
+def _nothing_broken(card: dict) -> bool:
+    """The customer is not waiting on a fix: it works again, a thank-you,
+    an auto-reply. Two of those are not an incident (#9556 and #9552 paged
+    Sam on 2026-10-19 after both customers had confirmed the fix)."""
+    return (card.get("lane") == "housekeeping"
+            or card.get("category") == "awaiting_client")
+
+
 def _recent_tickets(exclude_ticket: str) -> str:
     rows = [r for r in sprint_store.recent(24)
-            if str(r.get("ticket_number")) != str(exclude_ticket)]
+            if str(r.get("ticket_number")) != str(exclude_ticket)
+            and not _nothing_broken(r.get("card") or {})]
     if not rows:
         return "No other tickets triaged in the last 24 hours."
     lines = []
@@ -178,6 +195,9 @@ def match_incident(ticket_number: str, account: str, card: dict,
                    when: str) -> dict:
     """Run the matcher. {} when nothing matches or it could not run."""
     from vomeos import run_agent
+
+    if _nothing_broken(card):
+        return {}
 
     new_ticket = (
         f"#{ticket_number} {account} ({when})\n"
@@ -371,7 +391,14 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
     if not context:
         return {"status": "skipped", "reason": "ticket unreadable"}
     status = context.pop("_status", "")
-    if status and status not in OPEN_STATUSES and not force:
+    # In Progress is usually someone else's, but the sprint sets it itself
+    # once Sam has acknowledged a ticket an engineer or the agent is fixing
+    # (sprint_thread._after_send). A customer writing again on one of those
+    # still needs a fresh card, or their new message waits unseen.
+    ours = bool(existing and ((existing.get("eng_task") or {}).get("url")
+                              or existing.get("fix_pr")))
+    if (status and status not in OPEN_STATUSES and not force
+            and not (status == "In Progress" and ours)):
         return {"status": "skipped", "reason": f"ticket is {status}"}
 
     ticket_number = context.get("ticket_number") or ticket_id
@@ -477,15 +504,28 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
         sprint_store.set_fix_pr(item["id"], fix["pr_url"])
         item["fix_pr"] = fix["pr_url"]
 
+    # Whatever the agent cannot fix goes to an engineer now, not when Sam
+    # next runs a sprint; only urgent work reaches Slack (ticket_routing).
+    # A "Vome Error Report" stays the agent's (Sam, 2026-10-16), and a
+    # live fix needs nobody.
+    import ticket_routing
+
+    routed = {}
+    if not release.get("task_id") and not is_error_report(subject):
+        routed = ticket_routing.route(item, card, fix, incident, arr)
+    if fix.get("pr_url"):
+        ticket_routing.flag_urgent_fix(item, card, fix["pr_url"], incident,
+                                       arr)
+
     import sprint_thread
 
     sprint_thread.post_card(item, release=release)
-    if incident:
-        sprint_thread.announce_incident(item, incident)
 
     print(f"[SHADOW] #{ticket_number} -> item {item.get('number')} "
           f"{category} draft={draft['status']} "
-          f"incident={incident.get('key', '')}")
+          f"incident={incident.get('key', '')} "
+          f"routed={routed.get('routed', False)}")
     return {"status": "ok", "item": item.get("number"),
             "category": category, "draft": draft["status"],
-            "incident": incident.get("key", "")}
+            "incident": incident.get("key", ""),
+            "routed": bool(routed.get("routed"))}

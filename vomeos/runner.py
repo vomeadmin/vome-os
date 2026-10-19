@@ -83,8 +83,12 @@ class AgentResult:
     error: str = ""
     model: str = ""
     tier: str = ""
+    # All input the model read, cached or not; the two below say how much
+    # of it was a cache read (about a tenth of the price) or a cache write.
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     duration_ms: int = 0
     attempts: int = 0
 
@@ -125,6 +129,35 @@ _DEPRECATED_PARAM_RE = re.compile(
 )
 
 
+# Prompt caching (2026-10-19). Until now every request paid full price for
+# everything: the triage director's code-reading loop resends the thread,
+# the screenshots and every file it has read on each step, which is how one
+# run averaged 75k input tokens and the director cost ~$74 in a week. Two
+# breakpoints, both content-neutral:
+#   - the system prompt (charter, skills, live lessons): identical for every
+#     run of an agent, so runs on different tickets share it;
+#   - the end of the conversation, inside a tool loop (top-level
+#     cache_control): each step reads the previous step's prefix back.
+# Nothing per-run may go into the system prompt, or it silently stops caching.
+CACHE = {"type": "ephemeral"}
+
+
+def _system_blocks(system: str):
+    if not system:
+        return system
+    return [{"type": "text", "text": system, "cache_control": CACHE}]
+
+
+def _usage(response) -> tuple[int, int, int, int]:
+    """(all input, output, cache read, cache write) for one response."""
+    usage = getattr(response, "usage", None)
+    plain = int(getattr(usage, "input_tokens", 0) or 0)
+    read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+    write = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    out = int(getattr(usage, "output_tokens", 0) or 0)
+    return plain + read + write, out, read, write
+
+
 _ANSWER_NOW = (
     "Your tool budget is spent. Write your final answer now, in exactly the "
     "output format your instructions require, using what you have found."
@@ -133,7 +166,7 @@ _ANSWER_NOW = (
 
 def _call_with_tools(
     manifest: AgentManifest, system: str, user, model: str
-) -> tuple[str, int, int, int]:
+) -> tuple[str, int, int, int, int, int]:
     """The model may call its granted read-only tools, then must answer.
 
     Loops request -> tool calls -> results until the model answers in text
@@ -148,21 +181,24 @@ def _call_with_tools(
     budget = manifest.job.max_tool_calls
     calls: list[dict] = []
     nudged = False
-    total_in = total_out = total_attempts = 0
+    total_in = total_out = total_read = total_write = total_attempts = 0
     while True:
         final = len(calls) >= budget
         response, attempts = _request(manifest, {
             "model": model,
             "max_tokens": manifest.model.max_tokens,
-            "system": system,
+            "system": _system_blocks(system),
             "messages": messages,
             "tools": definitions,
             "tool_choice": {"type": "none"} if final else {"type": "auto"},
+            "cache_control": CACHE,
             "timeout": manifest.limits.timeout_seconds,
         })
-        usage = getattr(response, "usage", None)
-        total_in += int(getattr(usage, "input_tokens", 0) or 0)
-        total_out += int(getattr(usage, "output_tokens", 0) or 0)
+        used = _usage(response)
+        total_in += used[0]
+        total_out += used[1]
+        total_read += used[2]
+        total_write += used[3]
         total_attempts += attempts
         uses = [b for b in response.content
                 if getattr(b, "type", "") == "tool_use"]
@@ -184,7 +220,8 @@ def _call_with_tools(
             if calls:
                 print(f"[VOMEOS] {manifest.qualified} used {len(calls)} "
                       f"tool call(s): {tool_kit.summarize(calls)}")
-            return text, total_in, total_out, total_attempts
+            return (text, total_in, total_out, total_attempts, total_read,
+                    total_write)
         messages.append({"role": "assistant", "content": response.content})
         results = []
         for use in uses:
@@ -229,13 +266,14 @@ def _request(manifest: AgentManifest, kwargs: dict):
 
 def _call_model(
     manifest: AgentManifest, system: str, user, model: str
-) -> tuple[str, int, int, int]:
+) -> tuple[str, int, int, int, int, int]:
     """Call the API with backoff.
 
     `user` is the message content: a string, or a list of blocks when the
     agent is being shown images.
 
-    Returns (text, input_tokens, output_tokens, attempts).
+    Returns (text, input_tokens, output_tokens, attempts, cache_read,
+    cache_write).
     """
     last: Exception | None = None
     attempts = manifest.limits.max_retries + 1
@@ -245,7 +283,7 @@ def _call_model(
             kwargs = {
                 "model": model,
                 "max_tokens": manifest.model.max_tokens,
-                "system": system,
+                "system": _system_blocks(system),
                 "messages": [{"role": "user", "content": user}],
                 "timeout": manifest.limits.timeout_seconds,
             }
@@ -277,13 +315,8 @@ def _call_model(
                 block.text for block in response.content
                 if getattr(block, "type", "") == "text"
             ).strip()
-            usage = getattr(response, "usage", None)
-            return (
-                text,
-                int(getattr(usage, "input_tokens", 0) or 0),
-                int(getattr(usage, "output_tokens", 0) or 0),
-                attempt,
-            )
+            used = _usage(response)
+            return text, used[0], used[1], attempt, used[2], used[3]
         except _RETRYABLE as exc:
             last = exc
             if attempt < attempts:
@@ -352,9 +385,8 @@ def run_agent(
     started = time.monotonic()
     try:
         call = _call_with_tools if manifest.job.tools else _call_model
-        text, in_tokens, out_tokens, attempts = call(
-            manifest, system, user, model
-        )
+        text, in_tokens, out_tokens, attempts, cache_read, cache_write = \
+            call(manifest, system, user, model)
     except Exception as exc:
         duration = int((time.monotonic() - started) * 1000)
         result = AgentResult(
@@ -400,6 +432,8 @@ def run_agent(
         tier=manifest.model.tier,
         input_tokens=in_tokens,
         output_tokens=out_tokens,
+        cache_read_tokens=cache_read,
+        cache_write_tokens=cache_write,
         duration_ms=duration,
         attempts=attempts,
     )
@@ -426,6 +460,8 @@ def _persist(
         subject_id=subject_id,
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,
+        cache_read_tokens=result.cache_read_tokens,
+        cache_write_tokens=result.cache_write_tokens,
         duration_ms=result.duration_ms,
         attempts=result.attempts,
         guards=[

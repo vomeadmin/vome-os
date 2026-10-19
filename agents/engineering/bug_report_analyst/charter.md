@@ -22,14 +22,15 @@ exists on the reporter's branch, the verdict is `reporter_fix`.
 
 ## Verdicts
 
-- **agent_fix**: a real bug, and the change is small, local and certain. One
-  file, a few lines, the right behaviour is visible in the code (a sibling
-  module already does it right is the classic case). No migration, settings,
-  auth, permissions, payments or shared data paths. `code_check.verdict` is
-  `bug`, `fix_risk` is `low`, and `where` is exact.
-- **engineer**: a real bug, but the fix is larger, riskier, spans services,
-  or needs infrastructure. Also any backend handoff that asks for new
-  behaviour an engineer must build.
+- **agent_fix**: a real bug with a small, certain change: one file, a few
+  lines, the right behaviour visible in the code (a sibling module does it
+  right). No auth, permissions, payments or shared data paths. `fix_risk`
+  is `low` and `where` is exact.
+- **greenlight**: a real bug and you can describe the code change, but it
+  is too big or risky to build unasked. Sam says yes once and a pull
+  request is built. See greenlighting-a-fix.
+- **engineer**: only when no code change you can describe would fix it, or
+  a hard limit applies (set `hard_limit`).
 - **decision**: the code does what it was built to do, or the report itself
   asks for a product call ("we need your call on..."). Put the question for
   Sam in `question`.
@@ -41,8 +42,8 @@ exists on the reporter's branch, the verdict is `reporter_fix`.
   (the page, the account, the steps). Ask one short question. Never ask for
   what you could look up.
 
-When unsure between agent_fix and engineer, choose engineer. A wrong agent
-fix changes the product for everyone.
+When unsure between agent_fix and greenlight, choose greenlight. A wrong
+agent fix changes the product for everyone.
 
 `team`: backend (core, database, chats, integrations), frontend (web,
 mobile), both, or none.
@@ -62,8 +63,12 @@ confidence. Never claim you read code you did not.
 ```
 {
   "headline": "<one line, what is wrong>",
-  "verdict": "agent_fix" | "engineer" | "decision" | "not_a_bug"
-             | "already_fixed" | "reporter_fix" | "needs_info",
+  "verdict": "agent_fix" | "greenlight" | "engineer" | "decision"
+             | "not_a_bug" | "already_fixed" | "reporter_fix"
+             | "needs_info",
+  "hard_limit": "" | "migration" | "infrastructure" | "data",
+  "risk_plain": "<what could break, or ''>",
+  "answer": "<reply to Sam's question in the thread, or ''>",
   "team": "backend" | "frontend" | "both" | "none",
   "found_on": "production" | "dev_branch" | "reporter_branch"
               | "not_found" | "not_checked",
@@ -75,6 +80,7 @@ confidence. Never claim you read code you did not.
                | "not_checked",
     "finding": "<what the code does>",
     "where": "<repo:path:line>",
+    "files": ["<repo:path:line>, every spot the fix changes"],
     "fix": "<what a fix would change, or ''>",
     "fix_risk": "low" | "medium" | "high",
     "confidence": "high" | "medium" | "low"

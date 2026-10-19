@@ -159,15 +159,21 @@ flowchart TD
 flowchart TD
   R["Report posted in #bug-reports<br/>(usually Ron, written by Claude, links his own ClickUp task)"]:::built --> ACK["'Looking into this' in the thread"]:::built
   ACK --> AN["Bug report analyst reads the code:<br/>production, development / develop, RON_DEVELOP"]:::built
-  AN -->|agent_fix| FX["Fix author + patch safety<br/>PR into the dev branch (cap 3/day)"]:::built
+  AN -->|"bug + fix, low risk"| FX["Fix author + patch safety<br/>PR into the dev branch (cap 3/day)"]:::built
+  AN -->|"bug + fix, not low risk or over the cap"| GL["Greenlight post: @Sam with problem,<br/>fix + repos, risk in plain words<br/>(task stays with Sam)"]:::built
+  FX -->|small PR did not work out| GL
+  GL -->|"Sam: yes / go / do it / ship it / fix"| GB["Risk bar lifted: every file the fix names,<br/>one PR per repo (hard limits + patch safety stay)"]:::built
+  GL -->|"Sam asks or changes the fix"| AN
+  GB --> AF
+  GB -->|"part or all not built"| OFF["Says what is left, offers route<br/>(never routes on its own after a yes)"]:::built
+  AF --> RU["Multi-repo: roll-up every 15 min puts every<br/>commit in Fix Commit once all PRs merge"]:::built
   FX --> AF["Agent Fixes task, Source = Slack<br/>linked to Ron's task; release watcher takes it"]:::built
-  FX -->|PR refused or declined| EN
-  AN -->|engineer| EN["ClickUp: Ron's Priority Queue task (or a new one)<br/>engineer assigned, Sam removed, queued,<br/>Source = Slack, analysis as a comment"]:::built
+  AN -->|"no workable fix, or a hard limit<br/>(migration, infra/settings, data)"| EN["ClickUp: Ron's Priority Queue task (or a new one)<br/>engineer assigned, Sam removed, queued,<br/>Source = Slack, analysis as a comment"]:::built
   EN --> CH["Short post in the backend / frontend channel<br/>(headline + ClickUp link)"]:::built
   AN -->|decision| SAM["Sam asked in the thread"]:::built
   AN -->|needs_info| ASK["Reporter asked one question<br/>(4 rounds, then Sam)"]:::built
   AN -->|not a bug, already fixed, only in Ron's branch| FIN["Ron's task: closed or declined (high confidence),<br/>or handed back to Ron; analysis as a comment"]:::built
-  FX & EN & SAM & ASK & FIN --> TH["Thread: check mark, one line, ClickUp link<br/>(ClickUp holds the record, Slack the conversation)"]:::built
+  FX & GB & EN & SAM & ASK & FIN --> TH["Thread: check mark, one line, ClickUp link<br/>(ClickUp holds the record, Slack the conversation)"]:::built
   SAM --> CMD["Sam replies: fix / route backend|frontend|both / close<br/>or answers, and the analysis runs again"]:::built
   ASK --> RE["Reporter answers, analysis runs again"]:::built
 ```
@@ -254,6 +260,8 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 | G33 | fix | Ticket bugs become fix PRs on their own | deployed | Never fired before Oct 18: it needed high confidence (0 of 16 cards) and VOMEOS_CODE_WRITE_REPOS was unset, so no repo was writable (Sentry PRs too) | Gate is now medium; allowlist set Oct 18 (core, database, web). Watch for the first PR | agent |
 | G34 | director | Sprints run in Claude.ai through the Vome OS connector | built | Sam works sprints in Claude.ai (2026-10-18); Slack batches paused until he wants them back (SPRINT_BATCHES_ENABLED) | Push; paste handoffs/CLAUDE_AI_SPRINT_PROMPT.md into the Claude.ai project; tools sprint_queue, ticket_first_pass, fix_status, sprint_followups, propose_fix, send_ticket_reply, route_ticket, close_ticket_quietly, log_ticket_request, teach_agents | Sam |
 | G35 | bugreports | #bug-reports handled by the agent: code check, agent fix PR, auto-route to engineers, adopt the reporter's ClickUp task | built | Ron's reports each waited for Sam to read, check the code and route | Push; dry-run backfill of the first 5 reports, then `py bug_reports.py --backfill` | Sam |
+| G40 | bugreports | Greenlight step: a bug with a fix asks Sam for one yes instead of routing; his yes lifts the risk bar and builds across files and repos | built | The guest shift report had a concrete fix and went straight to both engineers because it was high risk | Push, re-run the dry run, then `promote 5` (live lesson L5 now in the charter and skill greenlighting-a-fix) | Sam |
+| G41 | bugreports | Patch safety caps an agent PR at 3 files and 60 lines per repo, even after a greenlight | decide | Larger greenlit fixes (likely guest shifts) are refused at that guard and offered to an engineer | Keep, or raise SENTRY_PATCH_MAX_LINES (shared with Sentry fixes) | Sam |
 | G36 | bugreports | Ron's own task is not moved when an agent fix ships | proposed | The Agent Fixes task goes on dev / Live, but Ron's Priority Queue task stays queued (it is linked and commented) | Close or move Ron's task when its linked Agent Fixes task goes Live | agent |
 | G37 | featuredesk | #feature-requests shaped by an architect before anything is built; additive handoffs become PRs, shape forks go to Sam with options | built | The frontend asks for the right screen, not always the right backend shape; building each ask as written makes the backend messy | Prove on real posts (`py feature_desk.py --backfill --dry-run`, needs the worker's code-read token), evals, then FEATURE_DESK_ENABLED=true | Sam |
 | G38 | featuredesk | Agent-built PRs from #feature-requests (`FEATURE_DESK_PR_ENABLED`) | decide | Off, an agent_build item is held and Sam says `go N` | Turn on after a week of verdicts Sam agrees with | Sam |

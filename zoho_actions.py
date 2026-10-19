@@ -210,16 +210,15 @@ AGENT_FIX_TAG = "agent-fix"
 def mark_agent_fix(ticket_id: str, pr_url: str, task_url: str = "") -> str:
     """The agent opened a fix PR: show it in Zoho, without emailing anyone.
 
-    In Progress (the status routing to an engineer uses, which sends the
-    client nothing), assigned to Sam because his merge is the next human
-    step, tagged `agent-fix`, with a private note linking the PR. Each part
+    Tagged `agent-fix`, with a private note linking the PR. The status is
+    left alone. Sam's rule (2026-10-19): New or Processing in Zoho means
+    "this client is owed a reply", so nothing the agents do on their own
+    moves a ticket out of it. `set_agent_fixing` moves it once Sam's
+    acknowledgment is sent (`sprint_thread._after_send`). Each part
     fails on its own and is reported, never raised: the PR already exists.
     """
     notes = []
     steps = (
-        ("status", lambda: _send("PATCH", f"/tickets/{ticket_id}",
-                                 {"status": "In Progress",
-                                  "assigneeId": SAM_AGENT})),
         ("tag", lambda: _send("POST", f"/tickets/{ticket_id}/associateTag",
                               {"tags": [AGENT_FIX_TAG]})),
         ("note", lambda: _send("POST", f"/tickets/{ticket_id}/comments", {
@@ -236,6 +235,13 @@ def mark_agent_fix(ticket_id: str, pr_url: str, task_url: str = "") -> str:
         except Exception as exc:
             notes.append(f"Zoho {name} not set ({str(exc)[:120]})")
     return "; ".join(notes)
+
+
+def set_agent_fixing(ticket_id: str) -> dict:
+    """The client has been told and the agent's fix is in flight: In
+    Progress, assigned to Sam because his merge is the next human step."""
+    return _send("PATCH", f"/tickets/{ticket_id}",
+                 {"status": "In Progress", "assigneeId": SAM_AGENT})
 
 
 def unmark_agent_fix(ticket_id: str, pr_url: str) -> str:

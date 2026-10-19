@@ -49,6 +49,7 @@ def desk(monkeypatch):
                         calls["comments"].append((task, text)))
     monkeypatch.setattr(fd, "_set_source", lambda task: None)
     monkeypatch.setattr(fd, "_permalink", lambda ts: "")
+    monkeypatch.setattr(fd, "_name", lambda user: "Ron")
     monkeypatch.setattr(fd, "_create_task", lambda item, ts, row:
                         calls["tasks"].append(item["n"]) or "T-NEW")
     return calls
@@ -327,11 +328,32 @@ def test_sam_go_on_a_decision_reanalyses_with_his_choice(monkeypatch, desk):
 
 
 def test_only_sam_can_command(monkeypatch, desk):
+    seen = {}
     monkeypatch.setattr(fd, "_row", lambda ts: _row(
         {"1": {**_build_item(), "state": fd.HELD}}))
     monkeypatch.setattr(fd, "_build", lambda *a, **k: pytest.fail("built"))
-    result = fd._on_reply("1.1", {"ts": "2", "user": RON, "text": "go 1"})
-    assert result["status"] == "skipped"
+    monkeypatch.setattr(fd, "analyse", lambda ts, **k: seen.update(k))
+    fd._on_reply("1.1", {"ts": "2", "user": RON, "text": "go 1"})
+    assert seen == {"direction": "", "reply": "Ron: go 1"}
+
+
+def test_ron_and_sam_talking_is_read(monkeypatch, desk):
+    seen = {}
+    monkeypatch.setattr(fd, "_row", lambda ts: _row(
+        {"1": {"n": "1", "state": fd.WAITING_SAM}}))
+    monkeypatch.setattr(fd, "analyse", lambda ts, **k: seen.update(k))
+    fd._on_reply("1.1", {"ts": "2", "user": RON,
+                         "text": "I'll hold the frontend gate until then"})
+    assert seen["reply"] == "Ron: I'll hold the frontend gate until then"
+    assert seen["direction"] == ""
+
+
+def test_a_closed_thread_is_not_read(monkeypatch, desk):
+    monkeypatch.setattr(fd, "_row", lambda ts: _row({}, status=fd.CLOSED))
+    monkeypatch.setattr(fd, "analyse", lambda *a, **k: pytest.fail("ran"))
+    result = fd._on_reply("1.1", {"ts": "2", "user": SAM,
+                                  "text": "Actually make it a step type"})
+    assert result["reason"] == "thread closed"
 
 
 def test_the_requester_answering_a_question_reanalyses(monkeypatch, desk):
@@ -348,6 +370,131 @@ def test_a_reply_is_handled_once(monkeypatch, desk):
     monkeypatch.setattr(fd, "_row", lambda ts: _row({}, last_reply_ts="2"))
     result = fd._on_reply("1.1", {"ts": "2", "user": SAM, "text": "go"})
     assert result["reason"] == "reply already handled"
+
+
+# ---------------------------------------------------------------------------
+# Reading the thread: chiming in only when there is something to add
+# ---------------------------------------------------------------------------
+
+WAITING = {"n": "1", "title": "Custom HTML for Trial orgs",
+           "verdict": "decision", "state": fd.WAITING_SAM,
+           "analysis": "Plan entitlement.", "question": "A or B?"}
+
+
+def test_a_read_with_nothing_to_add_posts_nothing(desk):
+    items = {"1": dict(WAITING)}
+    result = fd.act("1.1", {"task_id": "T1"},
+                    {"summary": "s", "chime_in": False}, items, only=[])
+    assert result["action"] == "read, stayed quiet"
+    assert desk["posts"] == [] and desk["comments"] == []
+
+
+def test_chiming_in_posts_the_line_not_the_card(desk):
+    items = {"1": dict(WAITING)}
+    fd.act("1.1", {"task_id": ""},
+           {"summary": "s", "chime_in": True,
+            "reply": "The gate reads plan_type only."}, items, only=[])
+    assert desk["posts"] == ["The gate reads plan_type only."]
+
+
+def test_a_changed_verdict_is_said_on_its_own(desk):
+    items = {"1": {**WAITING, "verdict": "already_exists", "state": "",
+                   "analysis": "Trials keep plan 3 or 4."},
+             "2": {**WAITING, "n": "2", "title": "Other"}}
+    fd.act("1.1", {"task_id": ""},
+           {"summary": "Whole card", "chime_in": True,
+            "reply": "Agreed, nothing to build."}, items, only=["1"])
+    text = desk["posts"][0]
+    assert text.startswith("Agreed, nothing to build.")
+    assert "Custom HTML for Trial orgs" in text and "Other" not in text
+    assert "Whole card" not in text and f"<@{SAM}>" not in text
+    assert items["1"]["state"] == fd.EXISTS
+
+
+def test_a_reply_round_keeps_unchanged_items(monkeypatch, desk):
+    previous = {"1": {**WAITING, "options": [{"key": "A"}]},
+                "2": {**_build_item(n="2"), "state": fd.HELD}}
+
+    class Result:
+        ok = True
+        data = {"summary": "s", "chime_in": False, "reply": "", "items": [
+            {"n": 1, "verdict": "decision", "title": "reworded"},
+            {"n": 2, "verdict": "agent_build", "title": "reworded"}]}
+
+    acted = {}
+    monkeypatch.setattr(fd, "_row", lambda ts: _row(previous))
+    monkeypatch.setattr(fd, "_read_post", lambda ts: {
+        "text": "req", "requester": "Ron", "requester_id": RON,
+        "thread": "Sam: later", "task_id": "T1"})
+    monkeypatch.setattr(fd, "_task_text", lambda t: "")
+    monkeypatch.setattr(fd, "_existing", lambda t: "")
+    monkeypatch.setattr("vomeos.run_agent", lambda *a, **k: Result())
+    monkeypatch.setattr(fd, "act", lambda ts, row, card, items, **k:
+                        acted.update(items=items, **k))
+    fd.analyse("1.1", reply="Sam: later")
+    assert acted["only"] == []
+    assert acted["items"]["1"]["title"] == WAITING["title"]
+    assert acted["items"]["2"]["state"] == fd.HELD
+
+
+def test_a_failed_read_stays_out_of_the_thread(monkeypatch, desk):
+    class Result:
+        ok = False
+        data = None
+
+        def why(self):
+            return "timeout"
+
+    monkeypatch.setattr(fd, "_row", lambda ts: _row({"1": dict(WAITING)}))
+    monkeypatch.setattr(fd, "_read_post", lambda ts: {
+        "text": "req", "requester": "Ron", "requester_id": RON,
+        "thread": "", "task_id": ""})
+    monkeypatch.setattr(fd, "_task_text", lambda t: "")
+    monkeypatch.setattr(fd, "_existing", lambda t: "")
+    monkeypatch.setattr("vomeos.run_agent", lambda *a, **k: Result())
+    result = fd.analyse("1.1", reply="Ron: hm")
+    assert result["reason"] == "reply read failed"
+    assert desk["posts"] == []
+
+
+# ---------------------------------------------------------------------------
+# ClickUp is the record of where the thread landed
+# ---------------------------------------------------------------------------
+
+def test_nothing_goes_on_the_task_while_an_item_is_open(desk):
+    items = {"1": {"n": "1", "title": "Bulk duplicate shifts",
+                   "verdict": "log", "analysis": "New endpoints."},
+             "2": {**WAITING, "n": "2", "state": ""}}
+    fd.act("1.1", {"task_id": "T1"}, {"summary": "s"}, items)
+    assert items["1"]["state"] == fd.LOGGED
+    assert desk["comments"] == []
+
+
+def test_the_outcome_goes_on_the_task_once_it_settles(monkeypatch, desk):
+    items = {"1": {"n": "1", "title": "Bulk", "verdict": "log",
+                   "state": fd.LOGGED},
+             "2": {**WAITING, "n": "2"}}
+    monkeypatch.setattr(fd, "_row", lambda ts: _row(items, task_id="T1"))
+    fd._on_reply("1.1", {"ts": "2", "user": SAM, "text": "no 2"})
+    assert len(desk["comments"]) == 1
+    task, text = desk["comments"][0]
+    assert task == "T1" and "Bulk" in text and "Trial" in text
+    saved = json.loads(desk["saves"][-1]["items"])
+    assert all(item["recorded"] for item in saved.values())
+    fd._record("1.1", {"task_id": "T1"}, saved)
+    assert len(desk["comments"]) == 1
+
+
+def test_sams_log_goes_on_the_task_straight_away(monkeypatch, desk):
+    items = {"1": {"n": "1", "title": "Bulk", "verdict": "log",
+                   "state": fd.WAITING_SAM},
+             "2": {**WAITING, "n": "2"}}
+    monkeypatch.setattr(fd, "_row", lambda ts: _row(items, task_id="T1"))
+    fd._on_reply("1.1", {"ts": "2", "user": SAM, "text": "log 1"})
+    assert [task for task, _ in desk["comments"]] == ["T1"]
+    saved = json.loads(desk["saves"][-1]["items"])
+    assert saved["1"]["recorded"] is True
+    assert not saved["2"].get("recorded")
 
 
 # ---------------------------------------------------------------------------

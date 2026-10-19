@@ -201,6 +201,20 @@ def _ticket_linked(task: dict, ticket_number: str, zoho_ticket_id: str) -> bool:
     )
 
 
+def linked_tasks(ticket_number: str, zoho_ticket_id: str) -> list[dict]:
+    """Tasks already tied to this ticket in any list, by Zoho link or by
+    "#<number>" in the name. Raises when a list cannot be read, so a caller
+    about to file new work never mistakes "could not look" for "none"."""
+    if not CLICKUP_API_TOKEN:
+        raise RuntimeError("no ClickUp token")
+    return [
+        task
+        for name, list_id in LISTS.items()
+        for task in _fetch_list(list_id, name)
+        if _ticket_linked(task, ticket_number, zoho_ticket_id)
+    ]
+
+
 def _account_tokens(account: str) -> set[str]:
     return {t for t in _tokens(account) if t not in _ACCOUNT_NOISE}
 

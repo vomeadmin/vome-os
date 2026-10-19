@@ -30,6 +30,7 @@ requires_context = [
     "existing_tasks",
     "previous_items",
     "sam_direction",
+    "new_reply",
 ]
 output = "json"
 

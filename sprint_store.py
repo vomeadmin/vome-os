@@ -97,6 +97,9 @@ store.register_table(
         sent_unedited   BOOLEAN,
         sent_at         TIMESTAMP,
         fix_pr          TEXT,
+        -- The engineer's Priority Queue task when triage routed the ticket
+        -- on its own (ticket_routing): id, url, owner, urgent, how, reason.
+        eng_task        JSONB,
         draft_status    VARCHAR,
         draft_why       TEXT,
         recipients      JSONB,
@@ -163,7 +166,7 @@ def mark_update(day: date) -> None:
 # ---------------------------------------------------------------------------
 
 def _decode(row: dict) -> dict:
-    for key in ("card", "recipients"):
+    for key in ("card", "recipients", "eng_task"):
         value = row.get(key)
         if isinstance(value, str):
             try:
@@ -400,6 +403,34 @@ def set_draft(item_id: int, draft: str, status: str, why: str = "",
              "c": before.get("category"), "k": kind,
              "b": before.get("draft") or "", "a": draft},
         )
+
+
+def set_eng_task(item_id: int, task: dict) -> None:
+    """Triage put the ticket with an engineer. The item stays open: the
+    client has not been told yet, and that is still Sam's to send."""
+    store.execute(
+        f"UPDATE {ITEMS} SET eng_task = CAST(:t AS JSONB), updated_at = :now"
+        " WHERE id = :i",
+        {"t": json.dumps(task), "i": item_id, "now": _now()},
+    )
+
+
+def by_ticket_numbers(numbers: list[str]) -> list[dict]:
+    if not numbers:
+        return []
+    rows = store.query(
+        f"SELECT * FROM {ITEMS} WHERE ticket_number = ANY(:n)",
+        {"n": [str(n) for n in numbers]},
+    )
+    return [_decode(r) for r in rows]
+
+
+def by_incident(key: str) -> list[dict]:
+    if not key:
+        return []
+    rows = store.query(
+        f"SELECT * FROM {ITEMS} WHERE incident_key = :k", {"k": key})
+    return [_decode(r) for r in rows]
 
 
 def set_fix_pr(item_id: int, url: str) -> None:

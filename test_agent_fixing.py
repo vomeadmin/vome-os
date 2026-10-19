@@ -168,9 +168,9 @@ def test_zoho_shows_the_agent_has_it_without_emailing(monkeypatch):
                         lambda m, p, b: calls.append((m, p, b)) or {})
     problems = zoho_actions.mark_agent_fix("T1", PR, "https://cu/t/P1")
     assert problems == ""
-    assert ("PATCH", "/tickets/T1",
-            {"status": "In Progress",
-             "assigneeId": zoho_actions.SAM_AGENT}) in calls
+    # The status stays New/Processing until Sam's acknowledgment goes out
+    # (Sam, 2026-10-19: that status means "this client is owed a reply").
+    assert not any(m == "PATCH" for m, _, _ in calls)
     assert ("POST", "/tickets/T1/associateTag",
             {"tags": ["agent-fix"]}) in calls
     note = next(b for m, p, b in calls if p.endswith("/comments"))

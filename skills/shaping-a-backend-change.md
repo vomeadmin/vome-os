@@ -14,6 +14,14 @@ any new field, model or table is a schema change nobody reviews, and never
 agent work. A new value in an existing `choices` list is state-only, but
 still a product change.
 
+**Plans and trials.** A trial is not a plan. An org on trial keeps the plan
+it is trialling (Enterprise 3 or Ultimate 4) with `is_trialing` true on
+`OrganizationSubscription`; plan type 1 "Trial" is the legacy flow
+(`subscription_app/organization/old_api.py`). So a gate on (3, 4) already
+covers orgs trialling those plans, and "add Trial (plan 1) to the gate" is
+`already_exists`, not an entitlement change. Say so; never offer options
+for widening it.
+
 ## Patterns, lightest first
 
 1. **Return or accept an existing field.** The model has it; a serializer

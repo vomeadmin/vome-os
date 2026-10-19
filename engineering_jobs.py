@@ -26,7 +26,12 @@ from __future__ import annotations
 
 import os
 
-from vomeos.worker import CLAIM_DAILY, register_event_handler, register_job
+from vomeos.worker import (
+    CLAIM_DAILY,
+    CLAIM_NONE,
+    register_event_handler,
+    register_job,
+)
 
 QUEUE = "engineering"
 
@@ -145,7 +150,7 @@ def _register_code_access() -> None:
 def _register_bug_reports() -> None:
     """#bug-reports: one report, or one reply in its thread. Idempotent on
     the report's Slack ts and the last reply handled."""
-    from bug_reports import HANDLER_KEY, handle
+    from bug_reports import HANDLER_KEY, handle, run_rollup
 
     register_event_handler(
         HANDLER_KEY,
@@ -153,6 +158,20 @@ def _register_bug_reports() -> None:
         queue=QUEUE,
         time_limit=600,
         description="Check a #bug-reports report and act on it",
+    )
+
+    # A greenlit fix that spans repos has one PR per repo. Once every one
+    # has merged, its Agent Fixes task gets all the commits in Fix Commit and
+    # moves to on dev, the same 15 minutes as the release watcher. Safe to
+    # rerun: a task with Fix Commit already set is skipped.
+    register_job(
+        "engineering.bug_report_rollup",
+        run_rollup,
+        cron="*/15 * * * *",
+        queue=QUEUE,
+        claim=CLAIM_NONE,
+        time_limit=300,
+        description="Move multi-repo bug report fixes to on dev once merged",
     )
 
 

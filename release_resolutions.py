@@ -19,10 +19,10 @@ WHAT HAPPENS, PER CLIENT TICKET OF A LIVE FIX
    from the customer's thread, through every outbound guard.
 2. It lands as a numbered card in the day's #support-sprints thread, with
    its recipients. Sam says "send 3" (or talks it through first).
-3. If RELEASE_AUTO_SEND is on, a draft that passed every guard on a ticket
-   that does not need a person is sent at once, and the ticket and tasks
-   close. Off by default: Sam turns it on when the autonomy report gives him
-   the confidence.
+3. A draft that passed every guard on a ticket that does not need a person
+   is sent at once, and the ticket and tasks close. On by default since
+   2026-10-19 (Sam); RELEASE_AUTO_SEND=false puts every resolution back in
+   front of him.
 
 Each client ticket is prepared once per fix (`vomeos_release_resolutions`),
 so a restart or the next 15-minute pass never drafts or sends twice. A
@@ -61,8 +61,12 @@ NEVER_AUTO = {"needs_human", "escalated", "feature_request"}
 
 
 def auto_send_enabled() -> bool:
-    value = os.environ.get("RELEASE_AUTO_SEND", "").strip().lower()
-    return value in ("true", "1", "on", "yes")
+    """On unless switched off. Sam, 2026-10-19: "the early fixed emails can
+    be automated ... sent automatically and closed automatically", as the
+    on-prod handler already does for engineers' fixes. Every other reply
+    still waits for him."""
+    value = os.environ.get("RELEASE_AUTO_SEND", "true").strip().lower()
+    return value not in ("false", "0", "off", "no")
 
 
 MAX_ATTEMPTS = 3

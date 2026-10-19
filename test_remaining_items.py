@@ -186,6 +186,8 @@ def test_an_untold_fix_is_drafted_once_as_a_resolution(monkeypatch):
     import shipped_untold
     from zoho_links import FIELD_ZOHO_TICKET_LINK
 
+    monkeypatch.setenv("RELEASE_AUTO_SEND", "false")
+
     task = {"id": "868pq1", "name": "[#9600] Export drops a column",
             "date_updated": str(int((NOW - timedelta(days=1)).timestamp()
                                     * 1000)),
@@ -218,6 +220,56 @@ def test_an_untold_fix_is_drafted_once_as_a_resolution(monkeypatch):
     # A second pass drafts nothing: the task is claimed.
     handled.clear()
     assert shipped_untold.run_shipped_untold()["drafted"] == []
+
+
+def _untold(monkeypatch, kind, item):
+    import release_resolutions as rr
+    import shadow_triage
+    import shipped_untold
+    import sprint_thread
+    from zoho_links import FIELD_ZOHO_TICKET_LINK
+
+    task = {"id": "868pq3", "name": "[#9601] Reminders send late",
+            "date_updated": str(int((NOW - timedelta(days=1)).timestamp()
+                                    * 1000)),
+            "custom_fields": [{"id": FIELD_ZOHO_TICKET_LINK,
+                               "value": "#Cases/dv/569440000047777777"}]}
+    sent, finished = [], []
+    monkeypatch.delenv("RELEASE_AUTO_SEND", raising=False)
+    monkeypatch.setattr(sprint_store, "ready", lambda: True)
+    monkeypatch.setattr(shipped_untold, "shipped_tasks",
+                        lambda: [{"task": task, "kind": kind}])
+    monkeypatch.setattr(shipped_untold, "already_told", lambda t, s: False)
+    monkeypatch.setattr(rr, "_claim", lambda c, p, t, n: True)
+    monkeypatch.setattr(rr, "_finish",
+                        lambda c, i, o, d: finished.append(o))
+    monkeypatch.setattr(shadow_triage, "_handle",
+                        lambda tid, reason, **k: {"status": "ok"})
+    monkeypatch.setattr(sprint_store, "by_ticket", lambda t: dict(item))
+    monkeypatch.setattr(sprint_thread, "_send",
+                        lambda i: sent.append(i["number"])
+                        or "*32.* sent to a@b.org.")
+    shipped_untold.run_shipped_untold()
+    return sent, finished
+
+
+def test_an_untold_fix_is_sent_on_its_own(monkeypatch):
+    """Sam, 2026-10-19: fixed emails go out and close automatically."""
+    sent, finished = _untold(monkeypatch, "fix", {
+        "number": 32, "draft_status": "ok", "category": "clear_bug"})
+    assert sent == [32] and finished == ["sent"]
+
+
+def test_a_shipped_feature_still_waits_for_sam(monkeypatch):
+    sent, finished = _untold(monkeypatch, "feature", {
+        "number": 32, "draft_status": "ok", "category": "feature_request"})
+    assert sent == [] and finished == ["drafted"]
+
+
+def test_an_untold_fix_needing_a_person_waits(monkeypatch):
+    sent, _ = _untold(monkeypatch, "fix", {
+        "number": 32, "draft_status": "ok", "category": "needs_human"})
+    assert sent == []
 
 
 def test_feature_release_text_says_shipped():
@@ -377,7 +429,7 @@ def test_refresh_respects_a_closed_ticket():
     src = open(shadow_triage.__file__, encoding="utf-8").read()
     # refresh skips only the "already triaged" check, never the status one.
     assert "if (not force and not refresh and existing" in src
-    assert "if status and status not in OPEN_STATUSES and not force" in src
+    assert "if (status and status not in OPEN_STATUSES and not force" in src
 
 
 @pytest.fixture

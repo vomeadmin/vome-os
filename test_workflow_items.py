@@ -471,3 +471,38 @@ def test_eligibility_needs_volume_and_rate(monkeypatch):
           "edited": 0, "redrafts": 0, "unedited_rate": 1.0,
           "eligible": True}], [])
     assert "qualifies" in text and chr(0x2014) not in text
+
+
+def test_the_tool_loop_caches_and_counts_cache_tokens(monkeypatch):
+    """Caching (2026-10-19): the system prompt and the growing conversation
+    are cache breakpoints, and cache reads count as input the model read,
+    reported separately so a cost report can price them."""
+    from vomeos import runner, tools
+    from vomeos.registry import get_agent
+
+    def resp(blocks, stop, read, write):
+        return types.SimpleNamespace(
+            content=blocks, stop_reason=stop,
+            usage=types.SimpleNamespace(
+                input_tokens=100, output_tokens=5,
+                cache_read_input_tokens=read,
+                cache_creation_input_tokens=write))
+
+    manifest = get_agent("customer_success.triage_director")
+    script = [
+        resp([_block("tool_use", id="u1", name="search_code",
+                     input={"repo": "core", "query": "x"})], "tool_use",
+             0, 3000),
+        resp([_block("text", text='{"category": "clear_bug"}')], "end_turn",
+             3000, 400),
+    ]
+    sent = []
+    monkeypatch.setattr(runner, "_request",
+                        lambda m, kw: (sent.append(kw) or script.pop(0), 1))
+    monkeypatch.setattr(tools, "execute", lambda n, a: "found it")
+    text, total_in, out, _, read, write = runner._call_with_tools(
+        manifest, "the charter", "user", "model")
+    assert all(kw["cache_control"] == {"type": "ephemeral"} for kw in sent)
+    assert sent[0]["system"] == [{"type": "text", "text": "the charter",
+                                  "cache_control": {"type": "ephemeral"}}]
+    assert (total_in, out, read, write) == (6600, 10, 3000, 3400)

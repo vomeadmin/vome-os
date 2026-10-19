@@ -2,7 +2,7 @@
 autonomy_report.py
 
 How often each kind of reply goes out exactly as the agent wrote it, and
-what Sam changes when it does not. Weekly, in #support-sprints.
+what Sam changes when it does not. Weekly, in #vome-agent-log.
 
 WHY THIS EXISTS
 ---------------
@@ -143,8 +143,11 @@ def run_autonomy_report() -> dict:
 
     import sprint_thread
 
+    # #vome-agent-log, not #support-sprints: Sam keeps the sprint channel
+    # for urgent work only (2026-10-19).
     ts = sprint_thread._post(render(rows, edits, lesson_store.all_active(),
-                                    sprint_store.week_counts()))
+                                    sprint_store.week_counts()),
+                             channel=sprint_thread.AGENT_LOG)
     return {"status": "ok" if ts else "post failed",
             "categories": len(rows), "edits": len(edits)}
 

@@ -30,16 +30,23 @@ FLOW
                            safety, PR into the dev branch, Agent Fixes task
                            (a build that falls through is logged for Sam)
          decision       -> options + a recommendation, Sam is asked
-         log            -> the linked task gets the analysis (it is already
-                           in Sam's queue); with no task, Sam says `log N`
+         log            -> logged on the linked task (it is already in
+                           Sam's queue); with no task, Sam says `log N`
          already_exists, frontend_only -> the finding, nothing built
          needs_info     -> the requester is asked one question
 
 Replies in the thread, from Sam: `go N` / `go NB` (build item N, or option
-B of it), `log N`, `no N`, `close`. Any other reply from Sam is direction:
-the architect runs again with it and the items still open are re-decided.
-A reply from anyone else re-runs the analysis only while an item is waiting
-on information.
+B of it), `log N`, `no N`, `close`. Every other reply, from anyone, is read
+against the whole thread (Sam's is also direction on shape), and the agent
+chimes in only when it is asked something, a verdict changes, or a reply
+contradicts the code. Then it posts a line or two and the items that
+changed, never the whole card again. Ron and Sam talking stays theirs.
+
+ClickUp is the record of where a thread landed (Sam, 2026-10-19), so
+nothing is written to the linked task while any item is still open. Once
+every item is settled (built, logged, declined, already there, frontend
+only) the outcome goes on the task once. Sam's `log N` and an opened pull
+request are written straight away: both are a settled outcome already.
 
 SWITCHES
 --------
@@ -223,8 +230,11 @@ def _on_reply(ts: str, reply: dict) -> dict:
     _save(ts, last_reply_ts=reply.get("ts"))
     text = str(reply.get("text") or "").strip()
     items = _items(row)
+    if row.get("status") == CLOSED:
+        return {"status": "skipped", "reason": "thread closed"}
 
-    if reply.get("user") == SAM_SLACK:
+    sam = reply.get("user") == SAM_SLACK
+    if sam:
         if text.lower().rstrip(".! ") == "close":
             _save(ts, status=CLOSED)
             _post("Closed. Nothing more will be built or filed from this "
@@ -233,14 +243,14 @@ def _on_reply(ts: str, reply: dict) -> dict:
         command = parse_command(text, items)
         if command:
             return _command(ts, row, items, command)
-        if _CHAT.match(text):
-            return {"status": "skipped", "reason": "acknowledgement"}
-        # Free text from Sam is direction on how to shape it.
-        return analyse(ts, direction=text)
-
-    if any(i.get("state") == NEEDS_INFO for i in items.values()):
-        return analyse(ts)
-    return {"status": "skipped", "reason": "chat, nothing waiting on it"}
+    if _CHAT.match(text):
+        return {"status": "skipped", "reason": "acknowledgement"}
+    # Anything else is read against the whole thread, and the architect
+    # decides whether it has anything to add. Sam's words are also
+    # direction on shape.
+    who = "Sam" if sam else _name(reply.get("user"))
+    return analyse(ts, direction=text if sam else "",
+                   reply=f"{who}: {text}")
 
 
 def parse_command(text: str, items: dict) -> dict | None:
@@ -280,6 +290,7 @@ def _command(ts: str, row: dict, items: dict, command: dict) -> dict:
         _save(ts, items=json.dumps(items))
         _post(f"Not building {_list(command['targets'])}. Nothing filed.",
               thread_ts=ts)
+        _record(ts, row, items)
         return {"status": "ok", "action": "declined"}
 
     if verb == "log":
@@ -287,6 +298,7 @@ def _command(ts: str, row: dict, items: dict, command: dict) -> dict:
                  for n, _ in command["targets"]]
         _save(ts, items=json.dumps(items))
         _post("\n".join(lines), thread_ts=ts)
+        _record(ts, row, items)
         return {"status": "ok", "action": "logged"}
 
     # go: an item already planned for an agent builds now; anything else
@@ -297,6 +309,7 @@ def _command(ts: str, row: dict, items: dict, command: dict) -> dict:
              and items[n].get("state") in (HELD, WAITING_SAM)]
     rest = [(n, opt) for n, opt in command["targets"] if n not in ready]
     results = [_build(ts, row, items, n, sam_approved=True) for n in ready]
+    _record(ts, row, items)
     if rest:
         direction = "; ".join(
             f"Sam: build item {n}" + (f" using option {opt}" if opt else
@@ -308,10 +321,13 @@ def _command(ts: str, row: dict, items: dict, command: dict) -> dict:
 
 
 def analyse(ts: str, direction: str = "", approved: list | None = None,
-            dry_run: bool = False, post: dict | None = None) -> dict:
+            dry_run: bool = False, post: dict | None = None,
+            reply: str = "") -> dict:
     """Run the architect on the post and act on each item's verdict.
     `post` stands in for the Slack message when a ClickUp task is
-    analysed without one (a dry run of the Priority Queue)."""
+    analysed without one (a dry run of the Priority Queue). `reply` is the
+    thread message that woke it: only the items whose verdict it changed
+    are acted on and reposted, the rest keep exactly what they had."""
     from vomeos import run_agent
 
     post = post or _read_post(ts)
@@ -329,9 +345,15 @@ def analyse(ts: str, direction: str = "", approved: list | None = None,
         "existing_tasks": _existing(post["text"]),
         "previous_items": _previous_text(previous),
         "sam_direction": direction or "(none)",
+        "new_reply": reply or "(none: first analysis)",
     }
     result = run_agent(AGENT, context=context,
                        subject_type="slack_feature_request", subject_id=ts)
+    if not result.ok and reply:
+        # Nobody asked for this read, so a failed one stays out of the
+        # thread rather than turning into a question for Sam.
+        print(f"[FEATURE DESK] reply read failed on {ts}: {result.why()}")
+        return {"status": "skipped", "reason": "reply read failed"}
     if not result.ok:
         card = {"summary": "The analysis did not finish", "items": [{
             "n": 1, "title": "Request", "verdict": "decision",
@@ -342,6 +364,15 @@ def analyse(ts: str, direction: str = "", approved: list | None = None,
         card = result.data or {}
 
     items = _merge(previous, card.get("items") or [], set(approved or []))
+    changed = None
+    if reply:
+        changed = [n for n, item in items.items()
+                   if item.get("state") not in FINAL
+                   and (n not in previous or previous[n].get("verdict")
+                        != item.get("verdict"))]
+        for n in items:
+            if n in previous and n not in changed:
+                items[n] = previous[n]
     if not dry_run:
         _save(ts, requester=post["requester"], task_id=task_id,
               card=json.dumps(card), items=json.dumps(items),
@@ -349,7 +380,7 @@ def analyse(ts: str, direction: str = "", approved: list | None = None,
     row = {**row, "ts": ts, "task_id": task_id,
            "requester": post["requester"],
            "requester_id": post["requester_id"], "rounds": rounds}
-    return act(ts, row, card, items, dry_run=dry_run)
+    return act(ts, row, card, items, dry_run=dry_run, only=changed)
 
 
 def _merge(previous: dict, fresh: list, approved: set) -> dict:
@@ -371,10 +402,12 @@ def _merge(previous: dict, fresh: list, approved: set) -> dict:
 
 
 def act(ts: str, row: dict, card: dict, items: dict,
-        dry_run: bool = False) -> dict:
+        dry_run: bool = False, only: list | None = None) -> dict:
     """One thread reply with every item, then the builds, each reporting
-    back in the thread when its pull request opens or falls through."""
-    if card.get("not_a_request") and not any(
+    back in the thread when its pull request opens or falls through.
+    `only` is a reply round: just those items, led by the architect's own
+    line, and nothing posted at all when it has nothing to add."""
+    if only is None and card.get("not_a_request") and not any(
             i.get("state") in FINAL for i in items.values()):
         text = f"No backend request here, so nothing to do. " \
                f"{card.get('summary') or ''}".strip()
@@ -387,7 +420,7 @@ def act(ts: str, row: dict, card: dict, items: dict,
     over_rounds = int(row.get("rounds") or 0) >= MAX_ROUNDS
     to_build, lines, asks_sam = [], [], False
     for n, item in sorted(items.items(), key=lambda kv: int(kv[0])):
-        if item.get("state") in FINAL:
+        if item.get("state") in FINAL or (only is not None and n not in only):
             continue
         verdict = str(item.get("verdict") or "decision")
         if verdict == "needs_info" and over_rounds:
@@ -421,34 +454,43 @@ def act(ts: str, row: dict, card: dict, items: dict,
                 asks_sam = True
         lines.append(_item_text(item, row))
 
-    if not lines:
+    said = str(card.get("reply") or "").strip()
+    if only is not None and not lines and not (card.get("chime_in")
+                                                and said):
+        if not dry_run:
+            _save(ts, items=json.dumps(items))
+            _record(ts, row, items)
+        else:
+            _dry(ts, card, items, ["nothing (read the reply, stayed quiet)"])
+        return {"status": "ok", "action": "read, stayed quiet"}
+    if not lines and only is None:
         if not dry_run:
             _post("Nothing is still open on this request.", thread_ts=ts)
         return {"status": "skipped", "reason": "nothing open"}
 
-    header = f"*{card.get('summary') or 'Request'}*"
+    header = said if only is not None else \
+        f"*{card.get('summary') or 'Request'}*"
     footer = []
     if asks_sam:
         footer.append(f"<@{SAM_SLACK}> reply `go N` (or `go NB` for "
                       "option B), `log N`, `no N`, or tell me how you'd "
                       "shape it.")
-    if any(i.get("state") == NEEDS_INFO for i in items.values()):
+    if any(i.get("state") == NEEDS_INFO for n, i in items.items()
+           if only is None or n in only):
         who = row.get("requester_id") or ""
         footer.append(f"{f'<@{who}> ' if who else ''}an answer here and "
                       "I'll look again.")
-    text = "\n\n".join([header, *lines, *footer])
+    text = "\n\n".join(part for part in [header, *lines, *footer] if part)
 
     if dry_run:
         plans = [f"build {n}: {items[n].get('build')}" for n in to_build]
         return _dry(ts, card, items, [f"thread:\n{text}", *plans])
 
     _post(text, thread_ts=ts)
-    if row.get("task_id"):
-        _comment(row["task_id"], _comment_text(card, items, ts))
-        _set_source(row["task_id"])
     _save(ts, items=json.dumps(items))
 
     results = [_build(ts, row, items, n) for n in to_build]
+    _record(ts, row, items, card.get("summary") or "")
     return {"status": "ok", "items": {n: i.get("verdict")
                                       for n, i in items.items()},
             "builds": results}
@@ -476,7 +518,8 @@ def _item_text(item: dict, row: dict) -> str:
     if item.get("state") == BUILDING:
         lines.append("Building it now. The pull request link follows here.")
     if verdict == "log" and item.get("state") == LOGGED:
-        lines.append("Added to the linked ClickUp task for Sam.")
+        lines.append("Logged for Sam. It goes on the linked ClickUp task "
+                     "once nothing in this thread is open.")
     elif verdict == "log":
         lines.append(f"`log {item['n']}` adds it to Raw Intake.")
     return "\n".join(line for line in lines if line)
@@ -541,11 +584,12 @@ def _build(ts: str, row: dict, items: dict, n: str,
     task_url = f"https://app.clickup.com/t/{fix_task}" if fix_task else ""
     item.update(state=PR_OPEN, pr_url=pr["url"], fix_task=fix_task,
                 pr_day=_today(), sam_approved=sam_approved)
-    _save(ts, items=json.dumps(items))
     if row.get("task_id"):
         _comment(row["task_id"], f"Item {n} built by an agent: {pr['url']}\n"
                                  f"Agent Fixes task: {task_url}")
         _link(row["task_id"], fix_task)
+        item["recorded"] = True
+    _save(ts, items=json.dumps(items))
     build = item.get("build") or {}
     _post("\n".join(line for line in (
         f"*{n}. Pull request open:* <{pr['url']}|into "
@@ -756,14 +800,20 @@ def _today() -> str:
 # ---------------------------------------------------------------------------
 
 def _log(ts: str, row: dict, items: dict, n: str, sam_said: bool) -> str:
-    """The linked task gets the analysis (it is already in Sam's queue).
-    With no linked task, a Raw Intake task, but only on Sam's word: a
-    client ask is his to prioritise, and an unasked task is noise."""
+    """The linked task gets the analysis (it is already in Sam's queue):
+    now on Sam's word, otherwise with the rest of the outcome once the
+    thread settles (_record). With no linked task, a Raw Intake task, but
+    only on Sam's word: a client ask is his to prioritise, and an unasked
+    task is noise."""
     item = items[n]
     task_id = row.get("task_id") or ""
     if task_id:
-        _comment(task_id, _item_comment(item, ts))
         item["state"] = LOGGED
+        if not sam_said:
+            return (f"*{n}* is logged for Sam. It goes on the linked ClickUp "
+                    "task once nothing in this thread is open.")
+        _comment(task_id, _item_comment(item, ts))
+        item["recorded"] = True
         return f"*{n}* logged on the linked ClickUp task."
     if not sam_said:
         item["state"] = WAITING_SAM
@@ -776,6 +826,24 @@ def _log(ts: str, row: dict, items: dict, n: str, sam_said: bool) -> str:
                "Logged here only."
     return (f"*{n}* logged in Raw Intake: "
             f"<https://app.clickup.com/t/{created}|task>.")
+
+
+def _record(ts: str, row: dict, items: dict, summary: str = "") -> None:
+    """Where the thread landed, on the linked task, once. Nothing is
+    written while any item is still open: until then Slack is the
+    conversation and the outcome can still change (Sam, 2026-10-19)."""
+    task_id = row.get("task_id") or ""
+    if not task_id or not items or any(
+            i.get("state") not in FINAL for i in items.values()):
+        return
+    fresh = {n: i for n, i in items.items() if not i.get("recorded")}
+    if not fresh:
+        return
+    _comment(task_id, _comment_text(summary, fresh, ts))
+    _set_source(task_id)
+    for item in fresh.values():
+        item["recorded"] = True
+    _save(ts, items=json.dumps(items))
 
 
 def _create_task(item: dict, ts: str, row: dict) -> str:
@@ -817,8 +885,8 @@ def _item_comment(item: dict, ts: str) -> str:
     return "\n".join(line for line in lines if line)
 
 
-def _comment_text(card: dict, items: dict, ts: str) -> str:
-    parts = [f"**Feature desk analysis:** {card.get('summary') or ''}"]
+def _comment_text(summary: str, items: dict, ts: str) -> str:
+    parts = [f"**Feature desk outcome:** {summary}".strip()]
     for n, item in sorted(items.items(), key=lambda kv: int(kv[0])):
         parts.append(_item_comment(item, "").strip())
     link = _permalink(ts)

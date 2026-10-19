@@ -24,12 +24,16 @@ symptom. Two accounts, one symptom is the strongest signal there is, because
 an account-specific setting cannot explain it.
 
 A ticket matches a Sentry issue when the error plausibly IS the customer's
-symptom: the action they describe would run the code that is failing, and the
-error started before or around when they first noticed. An error that began
-after the ticket was written cannot be its cause.
+symptom: the action they describe would run the code that is failing. The
+time shown on an error is when our monitor logged it, not when it started,
+so never use it as evidence that the error came first. An error with a huge
+event count has been firing for a long time and is weak evidence of a new
+problem.
 
 Compare what each customer is waiting on **now**. A ticket's history can
 mention a problem that was already fixed; that old symptom is not a match.
+If the new ticket's customer says it works again, the answer is no match,
+whatever the other tickets say: an incident is something broken now.
 
 Do not match on surface words. "Email" appearing in two tickets about
 different emails is not a match. "Not working" is not a symptom.

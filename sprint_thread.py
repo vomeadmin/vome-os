@@ -290,40 +290,27 @@ def post_card(item: dict, release: dict | None = None) -> str:
     return ts
 
 
-def announce_incident(item: dict, incident: dict) -> bool:
-    """Immediate mention, once per incident per day."""
+def alert_sam(key: str, text: str) -> bool:
+    """Interrupt Sam in #support-sprints, once a day per key.
+
+    Sam, 2026-10-19: the channel is for urgent work only. Everything else
+    is already with someone (the agent, an engineer) and waits for his
+    sprint in Claude.ai, so a message here means "act now": an important
+    client is blocked and an engineer has it, or an agent fix needs his
+    merge. The "possible incident" posts it replaces paged on resolved
+    tickets and single customers and never said what to do.
+    """
     day = sprint_store.today()
     _tables()
     rows = store.query(
         f"INSERT INTO {INCIDENTS_TABLE} (incident_key, day) VALUES (:k, :d)"
         " ON CONFLICT DO NOTHING RETURNING incident_key",
-        {"k": incident.get("key"), "d": day}, write=True,
+        {"k": key, "d": day}, write=True,
     )
     if not rows and store.usable():
         return False
-    import sprint_batch
-
-    # With batches there is no day thread: the incident is its own message,
-    # the one thing allowed to interrupt.
-    thread = ensure_thread() if sprint_batch.cards_enabled() else ""
     mention = " ".join(f"<@{r}>" for r in reviewers())
-    tickets = ", ".join(f"#{n}" for n in incident.get("same_as") or [])
-    sentry = incident.get("sentry_issue")
-    lines = [
-        f":rotating_light: {mention} *Possible incident:* "
-        f"{incident.get('symptom') or 'same symptom on several tickets'}",
-        f"Newest: item {item.get('number')} {_zoho_link(item)} "
-        f"{item.get('account') or ''}",
-    ]
-    if tickets:
-        lines.append(f"Same symptom: {tickets}")
-    if sentry:
-        lines.append(f"Matches Sentry issue "
-                     f"<https://sentry.io/issues/{sentry}/|{sentry}>")
-    lines.append(f"_{incident.get('reason') or ''} "
-                 f"(confidence {incident.get('confidence') or '?'})_")
-    lines.append("Group these before replying: one fix, one reply each.")
-    return bool(_post("\n".join(lines), thread_ts=thread, broadcast=True))
+    return bool(_post(f":rotating_light: {mention} {text}"))
 
 
 # ---------------------------------------------------------------------------
@@ -1311,6 +1298,9 @@ def _send(item: dict) -> str:
     if not draft or item.get("draft_status") != "ok":
         return (f"*{n}.* has no ready draft ({item.get('draft_status')}). "
                 f"Use `edit {n}: ...` or `redraft {n}: ...` first.")
+    shipped = _engineer_shipped(item)
+    if shipped:
+        return shipped
 
     # A newer customer message means this draft answers an old question.
     latest = zoho_actions.latest_inbound(item["ticket_id"])
@@ -1339,6 +1329,32 @@ def _send(item: dict) -> str:
           "approval in the sprint.", channel=AGENT_LOG)
     after = _after_send(item)
     return f"*{n}.* sent to {to}{copied}." + (f" {after}" if after else "")
+
+
+def _engineer_shipped(item: dict) -> str:
+    """Why an acknowledgment must not go: the engineer triage routed it to
+    has already shipped, and the on-prod handler emailed the client "it is
+    fixed". A "we are on it" after that reads as if nobody is reading. A
+    resolution draft for the same ticket is the reply that is owed, so it
+    passes. '' when the send may go ahead (ClickUp unreadable included)."""
+    filed = item.get("eng_task") or {}
+    if not filed.get("id"):
+        return ""
+    import sprint_batch
+    import ticket_routing
+
+    if str(item.get("ticket_id")) in sprint_batch._resolution_tickets():
+        return ""
+    state = ticket_routing.task_state(filed)
+    if not state.get("shipped"):
+        return ""
+    sprint_store.decide(item["id"], sprint_store.DONE,
+                        f"{filed.get('owner')} shipped it "
+                        f"({state.get('status')}) before Sam replied")
+    return (f"*{item.get('number')}.* nothing sent: {filed.get('owner')} "
+            f"already shipped this ({state.get('status')}, "
+            f"{filed.get('url')}), and the client is emailed when a fix "
+            "reaches production. Finished.")
 
 
 def _still_fixing(item: dict) -> bool:
@@ -1373,6 +1389,31 @@ def _after_send(item: dict) -> str:
     category = item.get("category") or ""
     release = shadow_triage.release_state(item.get("ticket_number") or "",
                                           item.get("ticket_id") or "")
+    # Triage routed it and the client has now been told: the engineer owns
+    # it from here, and the on-prod handler closes the loop when it ships.
+    # Zoho moves out of New/Processing only now that the client has been
+    # told (ticket_routing): until then that status means "owed a reply".
+    filed = item.get("eng_task") or {}
+    if filed.get("url") and not release.get("live"):
+        reason = re.sub(r"\W+", "_", str(filed.get("reason") or "auto"))
+        sprint_store.decide(item["id"], sprint_store.ROUTED,
+                            f"routed to {filed.get('owner')} "
+                            f"({reason.strip('_') or 'auto'})")
+        team = ENGINEERS.get(filed.get("owner"), ("", "", "backend", ""))[2]
+        try:
+            zoho_actions.set_in_progress(item["ticket_id"], team)
+            moved = "Zoho set to In Progress"
+        except Exception as exc:
+            moved = f":warning: Zoho status NOT set to In Progress ({exc})"
+        return (f"{moved} with {filed.get('owner')} ({filed['url']}). The "
+                "client is emailed when it ships.")
+    if item.get("fix_pr") and not release.get("live"):
+        try:
+            zoho_actions.set_agent_fixing(item["ticket_id"])
+            return ("Zoho set to In Progress (the agent's fix is in flight, "
+                    "waiting on your merge).")
+        except Exception as exc:
+            return f":warning: Zoho status NOT set to In Progress ({exc})."
     if release.get("live") or category in CLOSE_AFTER:
         status = "Closed"
     elif category in AWAIT_AFTER:
@@ -1449,7 +1490,10 @@ def _clickup_create(list_id: str, body: dict) -> dict:
     return resp.json()
 
 
-def _task_description(item: dict) -> str:
+SAM_FOOTER = "_Filed from the support sprint on Sam's instruction._"
+
+
+def _task_description(item: dict, footer: str = SAM_FOOTER) -> str:
     card = item.get("card") or {}
     import zoho_actions
 
@@ -1480,7 +1524,7 @@ def _task_description(item: dict) -> str:
                                 if reason else "anything beyond the code "
                                 "read on the live branch"),
         ]
-    lines += ["", "_Filed from the support sprint on Sam's instruction._"]
+    lines += ["", footer]
     return "\n".join(lines)
 
 
@@ -1491,6 +1535,11 @@ def _route(item: dict, who: str) -> str:
     key = ENGINEER_ALIASES.get(who, who)
     if key not in ENGINEERS:
         return f"*{n}.* route to OnlyG or Sanjay."
+    # Triage may have routed it already (ticket_routing): one bug, one task.
+    filed = item.get("eng_task") or {}
+    if filed.get("url"):
+        return (f"*{n}.* already with {filed.get('owner')}: {filed['url']}. "
+                "Nothing new was filed.")
     clickup_id, slack_id, team, channel = ENGINEERS[key]
     card = item.get("card") or {}
     summary = (card.get("live_question") or item.get("summary") or "")[:90]
@@ -1508,6 +1557,9 @@ def _route(item: dict, who: str) -> str:
         ],
     })
     url = task.get("url") or f"https://app.clickup.com/t/{task.get('id')}"
+    sprint_store.set_eng_task(item["id"], {
+        "id": task.get("id"), "url": url, "owner": key, "urgent": False,
+        "how": "sam"})
     _post(f"<@{slack_id}> new {team} ticket: {summary}\n"
           f"ClickUp: {url} · Zoho: "
           f"{zoho_actions.ticket_url(item.get('ticket_id'))}",

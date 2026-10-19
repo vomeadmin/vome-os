@@ -662,7 +662,8 @@ async def slack_events_webhook(request: Request):
 
         elif channel == feature_desk.CHANNEL:
             # #feature-requests. A top-level message is a new request; a
-            # reply is Sam's command or direction, or the requester's answer.
+            # reply is Sam's command, or read by the desk, which chimes in
+            # only when it has something to add.
             feature_desk.handle_message({
                 "user": user,
                 "text": text,

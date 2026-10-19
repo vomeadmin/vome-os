@@ -2,10 +2,11 @@
 test_release_resolutions.py
 
 G1 on the workflow map: when a fix is proven live, each waiting client gets a
-resolution draft in the sprint thread, and with RELEASE_AUTO_SEND on, a clean
-one is sent. What matters: one draft per client per fix (never twice), no
-automatic send unless Sam switched it on, and never an automatic send on a
-ticket the card says needs a person.
+resolution draft, and a clean one is sent (on by default since 2026-10-19,
+Sam: fixed emails go out on their own). What matters: one draft per client
+per fix (never twice), RELEASE_AUTO_SEND=false puts every resolution back in
+front of Sam, and never an automatic send on a ticket the card says needs a
+person.
 """
 
 import os
@@ -56,7 +57,7 @@ def world(monkeypatch):
     monkeypatch.setattr(sprint_thread, "_send",
                         lambda item: W.sent.append(item["number"])
                         or "*3.* sent to d@x.org.")
-    monkeypatch.delenv("RELEASE_AUTO_SEND", raising=False)
+    monkeypatch.setenv("RELEASE_AUTO_SEND", "false")
     return W
 
 
@@ -74,7 +75,13 @@ def test_each_client_is_prepared_once(world):
     assert len(world.triaged) == 1
 
 
-def test_auto_send_is_off_by_default(world):
+def test_auto_send_is_on_by_default(monkeypatch, world):
+    monkeypatch.delenv("RELEASE_AUTO_SEND", raising=False)
+    entries = rr.prepare({"id": "p1"}, [_child()])
+    assert world.sent == [3] and entries[0]["outcome"] == "sent"
+
+
+def test_auto_send_can_be_switched_off(world):
     rr.prepare({"id": "p1"}, [_child()])
     assert world.sent == []
 

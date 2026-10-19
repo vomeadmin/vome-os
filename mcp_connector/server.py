@@ -82,10 +82,12 @@ described only as "logged with the product team".
 sends: send_ticket_reply runs only on Sam's explicit word, passed verbatim.
 
 Support sprint (Sam): sprint_queue lists every open ticket with the agents' \
-first pass; ticket_first_pass runs the triage agent on one; fix_status and \
-sprint_followups show agent fixes and what is owed after a release; \
-propose_fix, send_ticket_reply, route_ticket, close_ticket_quietly and \
-log_ticket_request act, Sam only. Show every reply in full before sending.
+first pass; walk_queue shows every New or Processing ticket and who has \
+it, with no agent run; ticket_first_pass runs the triage agent on one; \
+fix_status and sprint_followups show agent fixes and what is owed after a \
+release; propose_fix, send_ticket_reply, route_queue, route_ticket, \
+close_ticket_quietly and log_ticket_request act, Sam only. Show every reply \
+in full before sending.
 """
 
 READ = ToolAnnotations(read_only_hint=True, open_world_hint=True)
@@ -509,6 +511,27 @@ def build() -> MCPServer:
         live, resolution drafted) and whose move it is."""
         return await _run("fix_status", sprint_tools.fix_status,
                           ticket=ticket)
+
+    @server.tool(annotations=READ)
+    async def walk_queue() -> dict:
+        """Every Zoho ticket at New or Processing (each one owes the client
+        a reply) and what happens to it now: routed to an engineer, with
+        the agent's fix, or Sam's call. Read-only and runs no agent: it
+        uses the cards triage already wrote."""
+        return await _run("walk_queue", sprint_tools.walk_queue)
+
+    @server.tool(annotations=WRITE)
+    async def route_queue(
+        tickets: Annotated[str, Field(
+            description="Only these ticket numbers, e.g. '9500 9501'. Empty "
+            "routes everything walk_queue lists under urgent and route")
+        ] = "",
+    ) -> dict:
+        """File or join the engineer task for the tickets walk_queue says
+        to route (Sam only). Urgent ones ping the engineer's channel. Sends
+        nothing to any client and leaves Zoho statuses alone."""
+        return await _run("route_queue", sprint_tools.route_queue,
+                          caller=caller(), tickets=tickets)
 
     @server.tool(annotations=READ)
     async def sprint_followups() -> dict:

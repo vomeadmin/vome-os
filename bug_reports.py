@@ -20,17 +20,42 @@ FLOW
       1. the report, its thread, and the ClickUp task the reporter linked
       2. engineering.bug_report_analyst reads the code (production, the dev
          branches, and RON_DEVELOP) and returns a verdict
-      3. agent_fix   -> PR into the dev branch, Agent Fixes task, thread update
-                        (a PR that cannot be written falls back to engineer)
-         engineer    -> the reporter's task (or a new Priority Queue task)
-                        assigned to OnlyG / Sanjay, a post in their channel
+      3. a bug with a fix (agent_fix, greenlight, or engineer with one):
+           low risk, under the daily cap -> PR into the dev branch on its
+                                            own, Agent Fixes task
+           otherwise, or the small PR did not work out -> GREENLIGHT: Sam is
+                        @-mentioned with the problem, the fix and its repos,
+                        and the risk in plain words. Nothing routes.
+         engineer    -> only with no workable fix (none described, no exact
+                        location) or a hard limit (migration, infrastructure
+                        or settings, data). The reporter's task (or a new
+                        Priority Queue task) to OnlyG / Sanjay, a post in
+                        their channel.
          decision    -> Sam is asked in the thread
          needs_info  -> the reporter is asked in the thread
-         not_a_bug, already_fixed, reporter_fix -> the finding, nothing filed
+         not_a_bug, already_fixed, reporter_fix -> see below
+
+GREENLIGHT (Sam, 2026-10-19)
+----------------------------
+The guest shift report had a confirmed bug and a concrete fix, and went
+straight to OnlyG and Sanjay because the fix was high risk. Sam wants to say
+yes once instead. His yes ("yes", "go", "do it", "execute", "ship it",
+`fix`; only his, only whole answers) lifts the risk bar and widens the
+work to every file the fix names, one PR per repo, each repo's PR its own
+child task under one Agent Fixes parent. It never lifts the hard limits or
+the patch safety guard (3 files, 60 lines per repo). A part that cannot be
+built is named, with `route` offered for it. Any other reply from him is a
+conversation: the analysis runs again with his note and asks again. Once he
+has said yes, nothing routes without his word (status GREENLIT).
+
+A fix spanning repos lists its PRs as "Bug report PR:" lines, which
+ticket_fix.promote_merged does not read; `run_rollup` (every 15 minutes)
+writes every commit into Fix Commit once all of them merge, so the release
+watcher waits for all of them.
 
 Replies in the thread: from Sam, `fix`, `route backend|frontend|both` and
-`close` act; any other reply to a report waiting on an answer runs the
-analysis again with the thread.
+`close` act anywhere; any other reply to a report waiting on an answer runs
+the analysis again with the thread.
 
 THE REPORTER'S OWN TASK
 -----------------------
@@ -96,9 +121,34 @@ MAX_ROUNDS = 4
 
 _TASK_LINK = re.compile(r"app\.clickup\.com/t/(?:\d+/)?([a-z0-9]+)")
 _ROUTE = re.compile(r"^route\s+(backend|frontend|both)\b", re.I)
+# "core:form_app/s.py:120", as ticket_fix requires of a fix location.
+_EXACT_WHERE = re.compile(r"^[\w-]+:[^\s:()]+(:\d+(-\d+)?)?$")
+# A fix spanning repos lists its PRs this way, so ticket_fix.promote_merged
+# (which reads "Fix PR:") leaves it to run_rollup.
+MULTI_PR_LABEL = "Bug report PR:"
+_MULTI_PR = re.compile(r"Bug report PR:\s*(\S+)")
+
+# Sam's greenlight. Only his replies count, and only whole answers: "yes but
+# use option 2" is a conversation, not a yes.
+YES = {"yes", "y", "yep", "yeah", "go", "go ahead", "do it", "execute",
+       "ship it", "fix", "build it", "please", "yes please", "approved"}
+
+# What a greenlight never lifts (Sam, 2026-10-19). The analyst names one in
+# `hard_limit`; these are the words the thread shows.
+HARD_LIMITS = {
+    "migration": "it needs a migration (a model or schema change), and "
+                 "migrations are generated on deploy, never written by hand",
+    "infrastructure": "it is hosting, DNS, deployment or settings work, "
+                      "which agents never change",
+    "data": "it is a data, billing or account operation, which agents "
+            "never do",
+}
 
 CHECKING, NEEDS_INFO, DECISION = "checking", "needs_info", "decision"
 ROUTED, FIXING, CLOSED, ERROR = "routed", "fixing", "closed", "error"
+# GREENLIGHT: waiting for Sam's yes. GREENLIT: he said yes and the build
+# could not finish; from here only Sam routes it.
+GREENLIGHT, GREENLIT = "greenlight", "greenlit"
 WAITING = (NEEDS_INFO, DECISION)
 
 LEDGER = "vomeos_bug_reports"
@@ -200,11 +250,12 @@ def _on_reply(ts: str, reply: dict) -> dict:
     text = str(reply.get("text") or "").strip()
     card = _card(row)
 
+    status = row.get("status")
+    asking = status in (GREENLIGHT, GREENLIT)
+
     if reply.get("user") == SAM_SLACK:
         word = text.lower().rstrip(".! ")
         route = _ROUTE.match(text)
-        if word == "fix":
-            return _fix(ts, row, card, sam_approved=True)
         if route:
             return _route(ts, row, card, route.group(1).lower(),
                           reason="Sam's call")
@@ -212,14 +263,25 @@ def _on_reply(ts: str, reply: dict) -> dict:
             _save(ts, status=CLOSED)
             _post("Closed. Nothing filed.", thread_ts=ts)
             return {"status": "ok", "action": "closed"}
+        # `fix` works anywhere; the other yeses only answer a greenlight.
+        if word == "fix" or (asking and _is_yes(text)):
+            _save(ts, status=GREENLIT)
+            return _build(ts, {**row, "greenlit": True}, card, greenlit=True)
+        if asking:
+            # A question or a change to the fix: think again with his note
+            # in the thread, then ask again.
+            return analyse(ts, greenlit=status == GREENLIT)
+    elif asking:
+        return {"status": "skipped", "reason": "only Sam can greenlight"}
 
-    if row.get("status") in WAITING:
+    if status in WAITING:
         return analyse(ts)
     return {"status": "skipped", "reason": "chat on a finished report"}
 
 
-def analyse(ts: str, dry_run: bool = False) -> dict:
-    """Run the analyst on the report and act on its verdict."""
+def analyse(ts: str, dry_run: bool = False, greenlit: bool = False) -> dict:
+    """Run the analyst on the report and act on its verdict. `greenlit`:
+    Sam already said yes once, so nothing routes without his word."""
     from vomeos import run_agent
 
     report = _read_report(ts)
@@ -249,9 +311,9 @@ def analyse(ts: str, dry_run: bool = False) -> dict:
         _save(ts, reporter=report["reporter"], task_id=task_id,
               verdict=str(card.get("verdict") or ""),
               team=str(card.get("team") or ""), card=json.dumps(card),
-              rounds=rounds, status=CHECKING)
+              rounds=rounds, status=GREENLIT if greenlit else CHECKING)
     row = {**row, "ts": ts, "task_id": task_id, "text": report["text"],
-           "reporter": report["reporter"],
+           "reporter": report["reporter"], "greenlit": greenlit,
            "reporter_id": report["reporter_id"], "rounds": rounds}
     return act(ts, row, card, dry_run=dry_run)
 
@@ -266,15 +328,13 @@ def act(ts: str, row: dict, card: dict, dry_run: bool = False) -> dict:
     # read any (a token lapsed, a repo down), routing would only pass the
     # reporter's theory on unverified: Sam decides instead.
     blind = (card.get("code_check") or {}).get("verdict") == "not_checked"
-    if blind and verdict in ("agent_fix", "engineer"):
+    if blind and verdict in ("agent_fix", GREENLIGHT, "engineer"):
         verdict = DECISION
         card = {**card, "question": "I couldn't read the code, so this is "
                                     "unverified. Route it as is "
                                     f"(`route {_team(card)}`) or `close`?"}
-    if verdict == "agent_fix":
-        return _fix(ts, row, card, dry_run=dry_run)
-    if verdict == "engineer":
-        return _route(ts, row, card, _team(card), dry_run=dry_run)
+    if verdict in ("agent_fix", GREENLIGHT, "engineer"):
+        return _fix_or_route(ts, row, card, dry_run=dry_run)
 
     # ClickUp holds the record; Slack carries a short message and the link
     # (Sam, 2026-10-19). The analysis only goes in the thread when there is
@@ -335,111 +395,287 @@ def act(ts: str, row: dict, card: dict, dry_run: bool = False) -> dict:
 # Agent fix
 # ---------------------------------------------------------------------------
 
-def _fix(ts: str, row: dict, card: dict, sam_approved: bool = False,
-         dry_run: bool = False) -> dict:
-    """A pull request into the dev branch, and its Agent Fixes task.
-    Anything that stops the PR hands the report to an engineer instead."""
+def _fix_or_route(ts: str, row: dict, card: dict,
+                  dry_run: bool = False) -> dict:
+    """A bug with a fix: build it, or ask Sam to greenlight it. Engineers
+    get it on the agent's own call only when there is no workable fix
+    (Sam, 2026-10-19: the guest shift report had a concrete fix and went
+    straight to OnlyG and Sanjay because its risk was high)."""
     import ticket_fix
 
-    ok, why = ticket_fix.should_attempt(card, sam_approved=sam_approved)
-    if ok and not sam_approved and not dry_run and \
-            _opened_today() >= daily_cap():
+    limit = _hard_limit(card)
+    if limit:
+        return _auto_route(ts, row, card, limit, dry_run)
+    if not _workable(card):
+        return _auto_route(ts, row, card, "there is no workable fix: "
+                           + _why_unworkable(card), dry_run)
+    ok, why = ticket_fix.should_attempt(card)
+    if ok and not dry_run and _opened_today() >= daily_cap():
         ok, why = False, "the daily pull request cap is reached"
-    if not ok and sam_approved:
-        # Sam's word lifts the verdict bar, never the risk bar.
-        _post(f"I can't open a fix for this: {why}. Say `route backend` "
-              "(or frontend, both) to send it to an engineer.", thread_ts=ts)
-        return {"status": "ok", "action": "fix refused", "reason": why}
     if not ok:
-        return _route(ts, row, card, _team(card),
-                      reason=f"no agent fix: {why}", dry_run=dry_run)
-
-    proposal, repo = _propose(ts, card)
-    if not proposal.get("diff"):
-        return _route(ts, row, card, _team(card),
-                      reason="the fix author declined: "
-                             f"{proposal.get('reason') or 'no diff'}",
-                      dry_run=dry_run)
-    if dry_run:
-        return _dry(ts, card, [f"PR into {repo.alias} dev branch:\n"
-                               f"{proposal['diff'][:3000]}"])
-
-    import sentry_fix
-
-    headline = str(card.get("headline") or "")[:60]
-    pr = sentry_fix.open_pull_request(
-        {"issue_id": _issue_key(ts), "triage_summary": headline,
-         "source_label": f"#bug-reports, reported by "
-                         f"{row.get('reporter') or 'a teammate'}",
-         "severity": "internal report"},
-        proposal,
-        {"repo": repo.slug, "host": repo.host, "owner": repo.owner,
-         "root_cause": (card.get("code_check") or {}).get("finding") or ""},
-    )
-    if not pr.get("opened"):
-        return _route(ts, row, card, _team(card),
-                      reason=f"the PR did not open: {pr.get('reason')}")
-
-    fix_task = _file_fix_task(card, repo, pr["url"], ts)
-    task_url = f"https://app.clickup.com/t/{fix_task}" if fix_task else ""
-    if row.get("task_id"):
-        _comment(row["task_id"],
-                 f"Agent fix proposed: {pr['url']}\n"
-                 f"Agent Fixes task: {task_url}\n\n"
-                 + _comment_text(card, ts))
-        _set_source(row["task_id"])
-        _link(row["task_id"], fix_task)
-    _save(ts, status=FIXING, pr_url=pr["url"], fix_task=fix_task)
-    where = (f"Logged on ClickUp: <{task_url}|Agent Fixes task>" if task_url
-             else f"<@{SAM_SLACK}> the ClickUp task could not be saved.")
-    _post(f":white_check_mark: Fixed by the agent. "
-          f"<{pr['url']}|Pull request> into the dev branch, waiting for "
-          f"Sam to review and merge.\n{where}", thread_ts=ts)
-    return {"status": "ok", "verdict": "agent_fix", "pr_url": pr["url"]}
+        return _ask_greenlight(ts, row, card, why, dry_run)
+    return _build(ts, row, card, greenlit=False, dry_run=dry_run)
 
 
-def _propose(ts: str, card: dict):
-    """The fix author's diff, written against the branch it will merge into.
-    Same ladder as ticket_fix._propose, minus the Zoho ticket."""
-    import sentry_code
-    import sentry_fix
-    import sentry_projects
+def _hard_limit(card: dict) -> str:
+    """Why no one's yes can make this an agent fix, or ""."""
+    return HARD_LIMITS.get(str(card.get("hard_limit") or "").lower(), "")
+
+
+def _workable(card: dict) -> bool:
+    return not _why_unworkable(card)
+
+
+def _why_unworkable(card: dict) -> str:
+    code = card.get("code_check") or {}
+    if code.get("verdict") != "bug":
+        return f"the code check says {code.get('verdict') or 'nothing'}"
+    if not str(code.get("fix") or "").strip():
+        return "no fix is described"
+    if not _spots(card, greenlit=True):
+        return "no exact location in the code"
+    return ""
+
+
+def _spots(card: dict, greenlit: bool) -> dict[str, list[tuple[str, int]]]:
+    """repo alias -> [(path, line)] the fix changes. On its own the agent
+    works on `where` only; after Sam's yes, on every file the fix needs."""
     import ticket_fix
     from vomeos.tools import repo_map
 
     code = card.get("code_check") or {}
-    alias, path, line = ticket_fix.parse_where(code.get("where"))
+    places = [code.get("where")]
+    if greenlit:
+        places += list(code.get("files") or [])
+    repos = repo_map()
+    out: dict[str, list[tuple[str, int]]] = {}
+    for place in places:
+        place = str(place or "").strip()
+        if not _EXACT_WHERE.match(place):
+            continue
+        alias, path, line = ticket_fix.parse_where(place)
+        if alias in repos and path and (path, line) not in out.get(alias,
+                                                                   []):
+            out.setdefault(alias, []).append((path, line))
+    return out
+
+
+def _is_yes(text: str) -> bool:
+    """"yes", "go", "ship it", "yes, do it". Anything with more in it ("yes
+    but use option 2") is a conversation, not a greenlight."""
+    parts = re.split(r"[,.!]+|\s+and\s+", text.lower())
+    parts = [p.strip() for p in parts if p.strip()]
+    return bool(parts) and all(p in YES for p in parts)
+
+
+def _ask_greenlight(ts: str, row: dict, card: dict, why: str,
+                    dry_run: bool = False) -> dict:
+    """@-mention Sam: the problem, the fix, the risk, and how to answer.
+    The reporter's task stays with Sam until he decides."""
+    code = card.get("code_check") or {}
+    repos = ", ".join(sorted(_spots(card, greenlit=True))) or "unknown"
+    risk = str(card.get("risk_plain") or "").strip() or \
+        f"fix risk {code.get('fix_risk') or 'unknown'}"
+    task_id = row.get("task_id") or ""
+    url = f"https://app.clickup.com/t/{task_id}" if task_id else ""
+    lines = [f"<@{SAM_SLACK}> Greenlight? I can build this fix but won't "
+             f"without your yes ({why})."]
+    if card.get("answer"):
+        lines.append(f"*Your question:* {card['answer']}")
+    lines += [
+        f"*Problem:* {card.get('headline') or ''}",
+        f"*Fix:* {code.get('fix') or ''} (in {repos})",
+        f"*Risk:* {risk}",
+        "Reply `yes` to build the pull request, "
+        "`route backend|frontend|both` to send it to an engineer, "
+        "or `close`.",
+    ]
+    if url:
+        lines.append(f"Details on ClickUp: <{url}|task>")
+    text = "\n".join(lines)
+    if dry_run:
+        return _dry(ts, card, [
+            f"ask Sam to greenlight (risk: {code.get('fix_risk')}), then PR "
+            f"into {repos} dev branch",
+            f"thread: {text}",
+        ])
+    if task_id:
+        _comment(task_id, _comment_text(card, ts))
+        _set_source(task_id)
+        try:
+            _clickup("PUT", f"/task/{task_id}",
+                     {"assignees": {"add": [SAM_CLICKUP], "rem": []}})
+        except Exception as exc:
+            print(f"[BUG REPORTS] could not keep {task_id} with Sam: {exc}")
+    _post(text, thread_ts=ts)
+    _save(ts, status=GREENLIGHT)
+    return {"status": "ok", "verdict": GREENLIGHT}
+
+
+def _auto_route(ts: str, row: dict, card: dict, reason: str,
+                dry_run: bool = False) -> dict:
+    """Route on the agent's own call, unless Sam has already greenlit this
+    report: then only Sam routes it."""
+    if not row.get("greenlit"):
+        return _route(ts, row, card, _team(card), reason=reason,
+                      dry_run=dry_run)
+    return _offer_route(ts, card, reason, dry_run)
+
+
+def _offer_route(ts: str, card: dict, reason: str,
+                 dry_run: bool = False) -> dict:
+    text = (f"<@{SAM_SLACK}> I can't build this: {reason}. Say "
+            f"`route {_team(card)}` to send it to an engineer, or `close`.")
+    if dry_run:
+        return _dry(ts, card, [f"thread: {text}"])
+    _post(text, thread_ts=ts)
+    _save(ts, status=GREENLIT)
+    return {"status": "ok", "action": "route offered", "reason": reason}
+
+
+def _build(ts: str, row: dict, card: dict, greenlit: bool,
+           dry_run: bool = False) -> dict:
+    """One pull request per repo into its dev branch, and the Agent Fixes
+    task(s). Sam's yes (`greenlit`) lifts the risk bar and widens the work
+    to every file the fix names; it never lifts the hard limits or the
+    patch safety guard."""
+    row = {**row, "greenlit": row.get("greenlit") or greenlit}
+    limit = _hard_limit(card)
+    if limit:
+        return _offer_route(ts, card, limit, dry_run)
+    spots = _spots(card, greenlit)
+    if not spots:
+        return _offer_route(ts, card, "there is no exact location in the "
+                            "code to change", dry_run)
+
+    import sentry_fix
+
+    headline = str(card.get("headline") or "")[:60]
+    opened, failed, previews = [], [], []
+    for alias, places in spots.items():
+        proposal, repo = _propose(ts, card, alias, places, len(spots) > 1)
+        if not proposal.get("diff"):
+            failed.append((alias, proposal.get("reason") or "no diff"))
+            continue
+        if dry_run:
+            previews.append(f"PR into {alias} dev branch:\n"
+                            f"{proposal['diff'][:3000]}")
+            continue
+        pr = sentry_fix.open_pull_request(
+            {"issue_id": _issue_key(ts, alias if len(spots) > 1 else ""),
+             "triage_summary": headline,
+             "source_label": f"#bug-reports, reported by "
+                             f"{row.get('reporter') or 'a teammate'}",
+             "severity": "internal report"},
+            proposal,
+            {"repo": repo.slug, "host": repo.host, "owner": repo.owner,
+             "root_cause": (card.get("code_check") or {}).get("finding")
+             or ""},
+        )
+        if pr.get("opened"):
+            opened.append((repo, pr["url"]))
+        else:
+            failed.append((alias, pr.get("reason") or "the PR did not open"))
+
+    if dry_run:
+        notes = [f"not built in {a}: {r}" for a, r in failed]
+        return _dry(ts, card, previews + notes)
+    if not opened:
+        reason = "; ".join(f"{a}: {r}" for a, r in failed)
+        if not greenlit:
+            # The small fix the agent tried alone did not work out. Sam can
+            # still say yes to the whole fix, across every file it names.
+            return _ask_greenlight(ts, row, card, f"I tried the small "
+                                   f"version and it did not work ({reason})")
+        return _offer_route(ts, card, reason)
+
+    fix_task = _file_fix_task(card, opened, ts)
+    task_url = f"https://app.clickup.com/t/{fix_task}" if fix_task else ""
+    urls = [url for _repo, url in opened]
+    if row.get("task_id"):
+        _comment(row["task_id"],
+                 "Agent fix proposed: " + " ".join(urls) + "\n"
+                 f"Agent Fixes task: {task_url}\n\n"
+                 + _comment_text(card, ts))
+        _set_source(row["task_id"])
+        _link(row["task_id"], fix_task)
+    _save(ts, status=FIXING, pr_url=" ".join(urls), fix_task=fix_task)
+    links = " · ".join(f"<{url}|{repo.alias} pull request>"
+                       for repo, url in opened)
+    lines = [":white_check_mark: Fixed by the agent. Pull request into the "
+             "dev branch, waiting for Sam to review and merge.", links]
+    lines.append(f"Logged on ClickUp: <{task_url}|Agent Fixes task>"
+                 if task_url else
+                 f"<@{SAM_SLACK}> the ClickUp task could not be saved.")
+    if failed:
+        rest = "; ".join(f"{a}: {r}" for a, r in failed)
+        lines.append(f"Not built: {rest}. Say `route {_team(card)}` to send "
+                     "the rest to an engineer.")
+    _post("\n".join(lines), thread_ts=ts)
+    return {"status": "ok", "verdict": "agent_fix", "pr_urls": urls,
+            "not_built": [a for a, _r in failed]}
+
+
+def _propose(ts: str, card: dict, alias: str, places: list,
+             several: bool = False):
+    """The fix author's diff for one repo, written against the branch it
+    will merge into. Same ladder as ticket_fix._propose, minus the Zoho
+    ticket, across every place in this repo."""
+    import sentry_code
+    import sentry_fix
+    import sentry_projects
+    from vomeos.tools import repo_map
+
+    code = card.get("code_check") or {}
     repo = repo_map().get(alias)
-    if not repo or not path:
-        return {"reason": f"unknown location {code.get('where')!r}"}, repo
+    if not repo:
+        return {"reason": f"unknown repo {alias!r}"}, repo
     ref = sentry_projects.fix_target(repo.slug) or repo.branch
-    trace = f'File "{path}", line {line or 1}, in bug_report'
+    trace = "\n".join(f'File "{path}", line {line or 1}, in bug_report'
+                      for path, line in places)
     gathered = sentry_code.gather(trace, repo.slug, ref, host=repo.host,
                                   owner=repo.owner)
+    fix = str(code.get("fix") or "")
+    if several:
+        fix += f" (this pull request covers the {alias} part only)"
     proposal = sentry_fix.propose({
         "root_cause": code.get("finding") or "",
-        "proposed_fix": code.get("fix") or "",
+        "proposed_fix": fix,
+        # sentry_fix's gate refuses anything not low risk. Reaching here
+        # means the code check called it low, or Sam greenlit it: his yes is
+        # exactly the bar this lifts. Migrations stay refused (hard limit
+        # above, and the patch guard after).
         "risk": "low",
         "confidence": code.get("confidence") or "medium",
         "needs_migration": False,
-        "files": [path],
+        "files": list(dict.fromkeys(path for path, _line in places)),
     }, {"source": gathered.get("files", ""), "repo": repo.slug,
-        "branch": ref, "issue_id": _issue_key(ts)})
+        "branch": ref, "issue_id": _issue_key(ts, alias if several else "")})
     return proposal, repo
 
 
-def _file_fix_task(card: dict, repo, pr_url: str, ts: str) -> str:
-    """The Agent Fixes parent. Its "Fix PR:" line is what
-    ticket_fix.promote_merged follows to `on dev` once the PR merges."""
+def _file_fix_task(card: dict, prs: list, ts: str) -> str:
+    """The Agent Fixes parent, plus one child per pull request when the fix
+    spans repos.
+
+    One PR: its "Fix PR:" line is what ticket_fix.promote_merged follows to
+    `on dev`. Several: the parent lists them as "Bug report PR:" lines
+    instead, which promote_merged does not read, and `run_rollup` moves it
+    to `on dev` with every commit in Fix Commit once ALL of them merge, so
+    the release watcher waits for all of them.
+    """
     import ticket_fix as tf
 
     code = card.get("code_check") or {}
+    several = len(prs) > 1
+    label = MULTI_PR_LABEL if several else "Fix PR:"
     description = "\n".join([
         "**Agent fix proposed from #bug-reports.** Not reviewed by a person. "
         "Merge into the dev branch only after review.",
         "",
-        f"Fix PR: {pr_url}",
-        f"**Repo:** {repo.alias} ({repo.slug}), into the dev branch",
+        *[f"{label} {url}" for _repo, url in prs],
+        "**Repos:** " + ", ".join(f"{r.alias} ({r.slug})" for r, _u in prs)
+        + ", into the dev branch",
         f"**Report:** {_permalink(ts)}",
         "",
         "## Engineer summary",
@@ -450,7 +686,9 @@ def _file_fix_task(card: dict, repo, pr_url: str, ts: str) -> str:
         f"**Risk:** {code.get('fix_risk')}",
         "",
         "_When the PR merges, Fix Commit is filled in automatically and the "
-        "release watcher takes it from there._",
+        "release watcher takes it from there._" if not several else
+        "_When every PR has merged, Fix Commit lists all of them and the "
+        "release watcher waits for each one to be live._",
     ])
     try:
         task = _clickup("POST", f"/list/{tf.AGENT_FIXES_LIST}/task", {
@@ -465,10 +703,83 @@ def _file_fix_task(card: dict, repo, pr_url: str, ts: str) -> str:
                 {"id": FIELD_SOURCE, "value": SOURCE_SLACK},
             ],
         })
-        return str(task.get("id") or "")
     except Exception as exc:
         print(f"[BUG REPORTS] Agent Fixes task not filed for {ts}: {exc}")
         return ""
+    parent = str(task.get("id") or "")
+    if several and parent:
+        for repo, url in prs:
+            try:
+                _clickup("POST", f"/list/{tf.AGENT_FIXES_LIST}/task", {
+                    "name": f"[Bug report] {repo.alias}: "
+                            f"{card.get('headline') or ''}"[:180],
+                    "markdown_description": f"Pull request: {url}",
+                    "parent": parent,
+                    "status": "in progress",
+                })
+            except Exception as exc:
+                print(f"[BUG REPORTS] child for {url} not filed: {exc}")
+    return parent
+
+
+def run_rollup() -> dict:
+    """Fixes that span repos: once every PR on the parent has merged, write
+    them all into Fix Commit (`repo@sha; repo@sha`) and move the parent and
+    its children to `on dev`, where the release watcher waits for each
+    commit to be live. A PR closed unmerged closes the fix and hands the
+    report back to Sam. Every 15 minutes; never sets `on prod`."""
+    import ticket_fix as tf
+
+    changed = []
+    try:
+        tasks = tf.list_in_progress()
+    except Exception as exc:
+        return {"error": str(exc)}
+    for task in tasks:
+        if task.get("parent"):
+            continue
+        urls = _MULTI_PR.findall(task.get("description")
+                                 or task.get("text_content") or "")
+        if not urls or _field_value(task, tf.FIELD_FIX_COMMIT):
+            continue
+        states = [(url, *tf._pr_state(url)) for url in urls]
+        children = [t for t in tasks if t.get("parent") == task["id"]]
+        closed = [url for url, state, _a, _s in states if state == "closed"]
+        try:
+            if closed:
+                for target in [task] + children:
+                    _clickup("PUT", f"/task/{target['id']}",
+                             {"status": "Closed"})
+                _hand_back(task["id"], closed)
+                changed.append(f"{task['id']} closed: {closed[0]} unmerged")
+            elif all(state == "merged" and sha
+                     for _u, state, _a, sha in states):
+                value = "; ".join(f"{a}@{sha}" for _u, _st, a, sha in states)
+                _clickup("POST",
+                         f"/task/{task['id']}/field/{tf.FIELD_FIX_COMMIT}",
+                         {"value": value})
+                for target in [task] + children:
+                    _clickup("PUT", f"/task/{target['id']}",
+                             {"status": "on dev"})
+                changed.append(f"{task['id']} merged as {value}")
+        except Exception as exc:
+            changed.append(f"{task['id']} roll-up failed: {exc}")
+    return {"changed": changed}
+
+
+def _hand_back(fix_task: str, closed: list) -> None:
+    """A PR of a multi-repo fix closed unmerged: tell Sam in the report's
+    thread, and offer the engineers."""
+    if not store.ensure_table(LEDGER):
+        return
+    rows = store.query(f"SELECT * FROM {LEDGER} WHERE fix_task = :f",
+                       {"f": fix_task})
+    if not rows:
+        return
+    row = dict(rows[0])
+    _offer_route(row["ts"], _card(row),
+                 f"a pull request was closed without merging ({closed[0]}), "
+                 "so the fix will not ship")
 
 
 def _opened_today() -> int:
@@ -716,8 +1027,10 @@ def _existing(text: str) -> str:
 # Plumbing
 # ---------------------------------------------------------------------------
 
-def _issue_key(ts: str) -> str:
-    return "slack-" + ts.replace(".", "-")
+def _issue_key(ts: str, alias: str = "") -> str:
+    """Names the PR branch; one per repo when a fix spans repos."""
+    key = "slack-" + ts.replace(".", "-")
+    return f"{key}-{alias}" if alias else key
 
 
 def _row(ts: str) -> dict:

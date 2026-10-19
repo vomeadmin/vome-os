@@ -44,6 +44,11 @@ store.register_table(
         subject_id      VARCHAR,
         input_tokens    INTEGER DEFAULT 0,
         output_tokens   INTEGER DEFAULT 0,
+        -- Parts of input_tokens served from, or written to, the prompt
+        -- cache (read ~0.1x, write 1.25x the input price), so cost reports
+        -- stay honest once caching is on (2026-10-19).
+        cache_read_tokens   INTEGER DEFAULT 0,
+        cache_write_tokens  INTEGER DEFAULT 0,
         duration_ms     INTEGER DEFAULT 0,
         attempts        INTEGER DEFAULT 1,
         guards          JSONB DEFAULT '[]'::jsonb,
@@ -79,6 +84,8 @@ def record(
     subject_id: str = "",
     input_tokens: int = 0,
     output_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
     duration_ms: int = 0,
     attempts: int = 1,
     guards: list | None = None,
@@ -92,10 +99,12 @@ def record(
         f"INSERT INTO {TABLE} ("
         " run_id, agent, division, tier, model, status,"
         " subject_type, subject_id, input_tokens, output_tokens,"
+        " cache_read_tokens, cache_write_tokens,"
         " duration_ms, attempts, guards, output, error, created_at"
         ") VALUES ("
         " :run_id, :agent, :division, :tier, :model, :status,"
         " :subject_type, :subject_id, :input_tokens, :output_tokens,"
+        " :cache_read_tokens, :cache_write_tokens,"
         " :duration_ms, :attempts, CAST(:guards AS JSONB),"
         " CAST(:output AS JSONB), :error, :created_at"
         ") ON CONFLICT (run_id) DO NOTHING",
@@ -110,6 +119,8 @@ def record(
             "subject_id": subject_id or None,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
             "duration_ms": duration_ms,
             "attempts": attempts,
             "guards": json.dumps(guards or []),

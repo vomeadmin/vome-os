@@ -26,8 +26,11 @@ For tasks updated in the last LOOKBACK_DAYS: read the Zoho ticket linked to
 it; if we have written to the client since the task shipped, it is told and
 nothing happens. Otherwise the ticket is triaged again with the shipped
 state in front of the agents, so the draft is a resolution, through every
-outbound guard, and it lands in the next batch under READY TO SEND. Nothing
-is sent: Sam says send.
+outbound guard. A shipped FIX whose draft passed every guard is sent and
+the ticket closes, as the on-prod handler would have done (Sam, 2026-10-19:
+fixed emails go out on their own; RELEASE_AUTO_SEND switches it off). A
+shipped FEATURE, and any draft a guard held, waits under READY TO SEND for
+Sam.
 
 `on prod` only, never just "closed": a closed task is not proof of a fix
 (the Oct 9 lesson). Each task is claimed in vomeos_release_resolutions (the
@@ -195,8 +198,15 @@ def run_shipped_untold() -> dict:
             continue
         result = {"ok": "drafted", "blocked": "held"}.get(
             item.get("draft_status") or "", "no_draft")
-        rr._finish(task["id"], item.get("number"), result,
-                   item.get("draft_why") or "")
+        detail = item.get("draft_why") or ""
+        if (result == "drafted" and kind == "fix"
+                and rr.auto_send_enabled()
+                and item.get("category") not in rr.NEVER_AUTO):
+            import sprint_thread
+
+            detail = sprint_thread._send(item)
+            result = "sent" if "sent to" in detail else "drafted"
+        rr._finish(task["id"], item.get("number"), result, detail)
         drafted.append(item.get("number"))
     print(f"[UNTOLD] {len(shipped)} shipped, {told} already told, "
           f"{len(drafted)} drafted, {skipped} without a ticket")

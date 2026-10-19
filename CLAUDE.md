@@ -262,13 +262,23 @@ needs go on `vome-os-worker`, not the web service.
   first promotes merged agent fix PRs to `on dev`. On Live it drafts a
   resolution per client (`release_resolutions`, once per ticket) and posts
   in the day's sprint thread with the item numbers to send.
-  `RELEASE_AUTO_SEND=true` sends clean drafts itself (never needs_human);
-  off by default, Sam's call. Nothing ever sets `on prod`
-  from these paths: the on-prod handler would email the customer again.
+  Clean resolution drafts send themselves (never needs_human); on by
+  default since 2026-10-19 (Sam: fixed emails go out on their own),
+  `RELEASE_AUTO_SEND=false` turns it off. Every other reply waits for Sam.
+  Nothing ever sets `on prod` from these paths: the on-prod handler would
+  email the customer again.
+- `ticket_routing` (2026-10-19): after triage, a bug the agent cannot fix
+  (lane engineer, or the agent declined) gets a Priority Queue task for
+  OnlyG (backend) or Sanjay (web, mobile) with no Slack, no client email
+  and no Zoho status change (New/Processing = owed a reply; Sam's
+  acknowledgment moves it to In Progress); the same problem joins the task already filed. Only urgent work
+  (very-high account, or a second account) posts, to the engineer's
+  channel and to Sam via `sprint_thread.alert_sam`. The item stays open for
+  Sam's acknowledgment. `AUTO_ROUTE_ENABLED=false` returns routing to Sam.
 - Removed 2026-10-18: legacy new-ticket intake (classifier, CRM tier, Zoho
   auto-assignment, ClickUp queue task, #vome-tickets brief) and the blind
   auto-ack. `process_ticket` now only runs the activation-code fix; engineers
-  get work through `route` in the sprint thread. Reply handling
+  get work through `ticket_routing` (or Sam's `route`). Reply handling
   (`process_ticket_update`) is unchanged.
 - Retired: email
   completeness gate (removed), "Vic" signatures (engineer-triggered replies

@@ -1,0 +1,364 @@
+"""
+ticket_routing.py
+
+After shadow triage, put every bug with whoever will fix it, without
+waiting for Sam's sprint.
+
+WHY
+---
+Sam, 2026-10-19: "things are happening automatically, and there's no
+roadblock, but the client is not necessarily informed right away." Until
+now a bug the agent could not fix sat in the sprint queue until Sam said
+`route N`, so engineering only started when Sam had time to run a sprint.
+The sprint is now for telling clients what is already happening: the agent
+or an engineer already has the work, and Sam's reply says so.
+
+WHAT HAPPENS, PER TRIAGED TICKET
+--------------------------------
+- agent_fix lane with a PR open: the agent owns it (ticket_fix). Nothing
+  here, unless the client is urgent (see below): then Sam is asked to merge.
+- engineer lane, or an agent_fix the agent declined to write: a Priority
+  Queue task for OnlyG (backend) or Sanjay (web and mobile), with the
+  agent's first pass as the engineer summary, and a private Zoho note.
+  The Zoho status is NOT changed. Sam's rule (2026-10-19): New or
+  Processing in Zoho means "this client is owed a reply", so nothing the
+  agents do on their own moves a ticket out of it. The status changes only
+  when the client has been told (`sprint_thread._after_send`).
+- a ticket already linked to a task (in any list), or whose incident
+  matches a ticket already routed, joins that task instead: one bug, one
+  task.
+- Never routed here: a product decision (design_question), feature
+  requests, Sam's own ops (data, billing, accounts), answers.
+
+The sprint item stays open with its draft, the acknowledgment, so the
+client hears from Sam in his next sprint. Sending it finishes the item and
+moves Zoho to In Progress with the engineer's team
+(sprint_thread._after_send). When the engineer marks the task on prod, the
+on-prod handler emails the client and closes the ticket on its own, which
+Sam approved for fixes (2026-10-19).
+
+URGENT
+------
+Only urgent work interrupts anyone, in Slack:
+    a very-high account (ARR 4000+, agent.get_client_tier), or
+    the same symptom from another account (the incident matcher, high
+    confidence, a second account; one customer writing twice is not an
+    incident).
+An urgent routed ticket is posted in the engineer's channel and to Sam in
+#support-sprints. An urgent agent fix asks Sam to merge now. Everything
+else is ClickUp only (the assignee is notified by ClickUp itself).
+
+SWITCH
+------
+    AUTO_ROUTE_ENABLED   default on. "false" leaves routing to Sam.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import time
+
+import sprint_store
+
+# agent.get_client_tier: very-high starts at 4000.
+VERY_HIGH_ARR = 4000.0
+
+# What the agent's fix attempt said when it did not open a PR, and whether
+# that means "an engineer should take it". A full daily cap is the agent's
+# limit, not the bug's: it waits for Sam rather than filling the Priority
+# Queue with work the agent would have done the next day.
+NOT_AN_ENGINEER_HANDOFF = {"daily cap reached"}
+
+# Repos whose code Sanjay owns; everything else is OnlyG's.
+FRONTEND_REPOS = {"web", "mobile"}
+
+SHIPPED = frozenset({"on prod", "closed", "done", "complete"})
+
+FOOTER = ("_Filed automatically by support triage. The client has not been "
+          "told yet; Sam replies from the support sprint._")
+
+
+def enabled() -> bool:
+    return os.environ.get("AUTO_ROUTE_ENABLED", "true").strip().lower() \
+        not in ("false", "0", "off", "no")
+
+
+def engineer_for(card: dict) -> str:
+    """OnlyG for the backend, Sanjay for web and mobile."""
+    code = card.get("code_check") if isinstance(
+        card.get("code_check"), dict) else {}
+    repo = str(code.get("where") or "").split(":")[0].strip().lower()
+    if repo in FRONTEND_REPOS:
+        return "sanjay"
+    if card.get("escalation_reason") == "mobile_unreadable":
+        return "sanjay"
+    return "onlyg"
+
+
+def should_route(card: dict, fix: dict) -> tuple[bool, str]:
+    """Whether this card goes to an engineer now, and the reason recorded
+    with it (it feeds "what still escalates, and why")."""
+    lane = card.get("lane") or ""
+    code = card.get("code_check") if isinstance(
+        card.get("code_check"), dict) else {}
+    if code.get("verdict") == "design_question":
+        return False, "design question: Sam decides"
+    if lane == "engineer":
+        reason = card.get("escalation_reason") or ""
+        if reason == "product_decision":
+            return False, "product decision: Sam decides"
+        return True, reason or "engineer_lane"
+    if lane == "agent_fix":
+        if fix.get("pr_url"):
+            return False, "the agent opened a fix"
+        if fix.get("reason") in NOT_AN_ENGINEER_HANDOFF:
+            return False, f"agent fix waiting ({fix.get('reason')})"
+        return True, "agent_declined"
+    return False, f"lane {lane or 'unset'}"
+
+
+def _other_accounts(incident: dict, account: str) -> list[dict]:
+    """Items for the incident's other tickets that belong to someone else."""
+    if not incident:
+        return []
+    mine = _account_name(account)
+    return [i for i in sprint_store.by_ticket_numbers(
+                incident.get("same_as") or [])
+            if _account_name(i.get("account") or "") != mine]
+
+
+def _account_name(account: str) -> str:
+    """"Sarasota County Government (Ultimate, 7000 CAD)" -> the name."""
+    return account.split("(")[0].strip().lower()
+
+
+def urgency(arr: float, account: str, incident: dict) -> str:
+    """Why this is urgent, in words, or '' when it is not."""
+    others = {_account_name(i.get("account") or "")
+              for i in _other_accounts(incident, account)}
+    if others:
+        return f"same problem reported by {len(others) + 1} accounts"
+    if arr >= VERY_HIGH_ARR:
+        return f"very-high account ({int(arr)} CAD ARR)"
+    return ""
+
+
+def arr_of(account: str) -> float:
+    """ARR from the account label sprint.build_context writes:
+    "Sarasota County (very-high, 7000 CAD combined ARR)"."""
+    found = re.search(r"([\d][\d,]*(?:\.\d+)?)\s*CAD", account or "")
+    return float(found.group(1).replace(",", "")) if found else 0.0
+
+
+def incident_of(item: dict) -> dict:
+    """The incident as urgency() needs it, rebuilt from the stored key: the
+    other tickets triage gave the same incident."""
+    key = item.get("incident_key") or ""
+    if not key:
+        return {}
+    others = [i.get("ticket_number") for i in sprint_store.by_incident(key)
+              if i.get("ticket_number") != item.get("ticket_number")]
+    return {"key": key, "same_as": others}
+
+
+def _existing_task(item: dict, incident: dict) -> tuple[dict, str]:
+    """A task this ticket should join, and how it was found.
+
+    Raises when ClickUp cannot be searched: filing blind is how duplicates
+    are made, and the ticket still reaches Sam's sprint either way.
+    """
+    for other in sprint_store.by_ticket_numbers(
+            (incident or {}).get("same_as") or []):
+        filed = other.get("eng_task") or {}
+        if filed.get("url"):
+            return (dict(filed),
+                    f"same problem as #{other.get('ticket_number')}")
+    import clickup_search
+
+    for task in clickup_search.linked_tasks(
+            str(item.get("ticket_number") or ""),
+            str(item.get("ticket_id") or "")):
+        if task.get("list") != "Priority Queue":
+            continue
+        if (task.get("status") or "").lower() in SHIPPED:
+            continue
+        return ({"id": task["id"],
+                 "url": task.get("url")
+                 or f"https://app.clickup.com/t/{task['id']}"},
+                "already linked to this ticket")
+    return {}, ""
+
+
+def _comment(task_id: str, text: str) -> None:
+    import httpx
+
+    resp = httpx.post(
+        f"https://api.clickup.com/api/v2/task/{task_id}/comment",
+        headers={"Authorization": os.environ.get("CLICKUP_API_TOKEN", ""),
+                 "Content-Type": "application/json"},
+        json={"comment_text": text, "notify_all": False}, timeout=30,
+    )
+    resp.raise_for_status()
+
+
+def route(item: dict, card: dict, fix: dict, incident: dict,
+          arr: float) -> dict:
+    """File or join the engineer's task for a triaged item. Never raises.
+
+    {"routed": bool, "why": str, "task": {...}, "urgent": str}
+    """
+    if not enabled():
+        return {"routed": False, "why": "auto-routing is off"}
+    if (item.get("eng_task") or {}).get("url"):
+        return {"routed": False, "why": "already with an engineer",
+                "task": item["eng_task"]}
+    go, reason = should_route(card, fix)
+    if not go:
+        return {"routed": False, "why": reason}
+    try:
+        return _route(item, card, incident, arr, reason)
+    except Exception as exc:
+        print(f"[ROUTE] #{item.get('ticket_number')} not routed: {exc}")
+        return {"routed": False, "why": f"routing failed ({exc})"}
+
+
+def _route(item: dict, card: dict, incident: dict, arr: float,
+           reason: str) -> dict:
+    import sprint_thread
+    import zoho_actions
+
+    number = item.get("ticket_number")
+    account = item.get("account") or ""
+    urgent = urgency(arr, account, incident)
+    zoho_url = zoho_actions.ticket_url(item.get("ticket_id"))
+    summary = (card.get("live_question") or item.get("summary") or "")[:90]
+
+    task, joined = _existing_task(item, incident)
+    owner = task.get("owner") or engineer_for(card)
+    clickup_id, slack_id, team, channel = sprint_thread.ENGINEERS[owner]
+    if task:
+        _comment(task["id"],
+                 f"Also reported on #{number} ({account}): {summary}\n"
+                 f"Zoho: {zoho_url}"
+                 + (f"\nURGENT: {urgent}" if urgent else ""))
+        how = f"joined ({joined})"
+    else:
+        body = {
+            "name": f"[#{number}] {account.split('(')[0].strip()} -- "
+                    f"{summary}",
+            "markdown_description": sprint_thread._task_description(
+                item, footer=FOOTER),
+            "assignees": [clickup_id],
+            "status": "queued",
+            "custom_fields": [
+                {"id": sprint_thread.FIELD_ZOHO_TICKET_LINK,
+                 "value": zoho_url},
+                {"id": sprint_thread.FIELD_SOURCE,
+                 "value": sprint_thread.SOURCE_ZOHO_TICKET},
+            ],
+        }
+        if urgent:
+            body["priority"] = 1  # ClickUp: urgent
+        created = sprint_thread._clickup_create(sprint_thread.PRIORITY_QUEUE,
+                                                body)
+        task = {"id": created.get("id"),
+                "url": created.get("url")
+                or f"https://app.clickup.com/t/{created.get('id')}"}
+        how = "created"
+
+    filed = {"id": task["id"], "url": task["url"], "owner": owner,
+             "urgent": bool(urgent), "how": how, "reason": reason}
+    sprint_store.set_eng_task(item["id"], filed)
+    item["eng_task"] = filed
+
+    # A private note only. The status stays New or Processing until Sam's
+    # acknowledgment goes out: that status is how anyone looking at Zoho
+    # knows the client is still owed a reply.
+    try:
+        from zoho_desk_api import add_ticket_comment
+
+        add_ticket_comment(item["ticket_id"],
+                           f"Routed to {owner} automatically: {task['url']}")
+    except Exception:
+        pass
+
+    if urgent:
+        sprint_thread._post(
+            f":rotating_light: <@{slack_id}> URGENT {team} ticket "
+            f"({urgent}): {summary}\nClickUp: {task['url']} · Zoho: "
+            f"{zoho_url}", channel=channel)
+        sprint_thread.alert_sam(
+            f"urgent:{task['id']}",
+            f"*Urgent, with {owner}:* #{number} {account}: {summary}\n"
+            f"Why urgent: {urgent}. ClickUp: {task['url']}\n"
+            "Nothing was sent to the client. The acknowledgment is ready "
+            "in your sprint.")
+    print(f"[ROUTE] #{number} {how} {task['url']} for {owner} ({reason})"
+          + (f" URGENT: {urgent}" if urgent else ""))
+    return {"routed": True, "why": reason, "task": filed, "urgent": urgent}
+
+
+def flag_urgent_fix(item: dict, card: dict, pr_url: str, incident: dict,
+                    arr: float) -> bool:
+    """An agent fix for an urgent client: the only wait is Sam's merge."""
+    urgent = urgency(arr, item.get("account") or "", incident)
+    if not urgent or not pr_url:
+        return False
+    code = card.get("code_check") if isinstance(
+        card.get("code_check"), dict) else {}
+    repo = str(code.get("where") or "").split(":")[0].strip().lower()
+    production = ("then you deploy it" if repo in FRONTEND_REPOS
+                  else "then OnlyG takes it to production")
+    summary = (card.get("live_question") or item.get("summary") or "")[:90]
+    import sprint_thread
+
+    return sprint_thread.alert_sam(
+        f"urgent-fix:{pr_url}",
+        f"*Urgent fix waiting on your merge:* #{item.get('ticket_number')} "
+        f"{item.get('account') or ''}: {summary}\nWhy urgent: {urgent}. "
+        f"PR: {pr_url}\nMerge into the dev branch, {production}. Nothing "
+        "was sent to the client; the acknowledgment is ready in your sprint.")
+
+
+_STATE_TTL = 60.0
+_states: dict[str, tuple[float, dict]] = {}
+
+
+def task_state(filed: dict) -> dict:
+    """The engineer task's live status: {"status", "shipped", "assignee"}.
+    {"status": "unreadable"} when ClickUp cannot be read. Cached a minute,
+    because one sprint_queue call asks twice per routed item (finish the
+    shipped ones, then show the rest)."""
+    if not (filed or {}).get("id"):
+        return {}
+    now = time.monotonic()
+    hit = _states.get(filed["id"])
+    if hit and now - hit[0] < _STATE_TTL:
+        return hit[1]
+    state = _read_state(filed["id"])
+    if state.get("status") != "unreadable":
+        _states[filed["id"]] = (now, state)
+    return state
+
+
+def _read_state(task_id: str) -> dict:
+    import httpx
+
+    filed = {"id": task_id}
+    try:
+        resp = httpx.get(
+            f"https://api.clickup.com/api/v2/task/{filed['id']}",
+            headers={"Authorization": os.environ.get("CLICKUP_API_TOKEN",
+                                                     "")},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        task = resp.json()
+    except Exception as exc:
+        return {"status": "unreadable", "shipped": False, "error": str(exc)}
+    status = ((task.get("status") or {}).get("status") or "").lower()
+    names = [a.get("username") or a.get("email") or ""
+             for a in task.get("assignees") or []]
+    return {"status": status, "shipped": status in SHIPPED,
+            "assignee": ", ".join(n for n in names if n)}
