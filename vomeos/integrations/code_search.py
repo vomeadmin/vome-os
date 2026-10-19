@@ -17,6 +17,12 @@ the filesystem. Three reasons not to:
     or by disk. A clone would be the first exception, and exceptions are how
     that rule dies.
 
+One narrow exception exists, for search only: when GitHub reports its own
+index of a repository as incomplete (vome-react, every query), GitHub.
+search_code greps a downloaded copy instead. It re-checks the live commit
+before searching and names the commit it searched, so it cannot drift
+silently. See code_mirror.py for why that answers the objections above.
+
 WHAT THIS CAN AND CANNOT DO
 ---------------------------
 Read operations only: search code, read a file, list recent commits touching
