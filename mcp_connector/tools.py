@@ -525,10 +525,25 @@ def search_code(query: str, repo: str = "") -> dict:
             )
             label = target.slug
             parsed = _github_hits(result.data) if result.ok else []
-        sources[label] = (
-            f"searched, {len(parsed)} files" if result.ok
-            else f"NOT searched ({result.error[:150]})"
+        # GitHub answers a search it could not finish with 200, no items and
+        # incomplete_results. vome-react (~500 MB) gets that for every query,
+        # so "searched, 0 files" there meant "unknown", and the triage agent
+        # read it as "not in the code" (#9582, 2026-10-19).
+        incomplete = (
+            result.ok and not parsed and isinstance(result.data, dict)
+            and result.data.get("incomplete_results")
         )
+        if incomplete:
+            sources[label] = (
+                "NOT searched (GitHub's index for this repository is "
+                "incomplete, so no hits is unknown, not absent; open files "
+                "with read_code_file instead)"
+            )
+        else:
+            sources[label] = (
+                f"searched, {len(parsed)} files" if result.ok
+                else f"NOT searched ({result.error[:150]})"
+            )
         hits += parsed
 
     # A workspace-wide Bitbucket search reaches every repo in the workspace,

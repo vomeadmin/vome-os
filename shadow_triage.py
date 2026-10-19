@@ -283,13 +283,18 @@ def draft_reply(ticket_number: str, card: dict, context: dict,
 
 def _language(thread: str) -> str:
     """French when the customer writes French. The cheap, reliable signal."""
+    text = (thread or "").lower()
+    # A pasted Vome Error Report is English boilerplate and a stack trace; it
+    # outvoted the customer's own French sentence on #9582. Count only what
+    # comes before it.
+    text = text.split("=== vome error report ===")[0]
     french = len(re.findall(
         r"\b(bonjour|merci|nous|vous|est|pas|les|des|une|pour|avec)\b",
-        (thread or "").lower(),
+        text,
     ))
     english = len(re.findall(
         r"\b(the|and|you|is|not|for|with|this|that|have)\b",
-        (thread or "").lower(),
+        text,
     ))
     return "French" if french > english else "English"
 

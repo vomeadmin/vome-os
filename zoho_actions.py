@@ -136,7 +136,10 @@ def _secondary_emails(ticket_id: str) -> list[str]:
 def recipients(ticket_id: str) -> dict:
     """{"to", "cc", "first_name", "thread_id"} for a reply to this ticket."""
     latest = latest_inbound(ticket_id)
-    sender = emails_in(latest.get("fromEmailAddress"))
+    # Web-form tickets (channel WEB) carry no fromEmailAddress; the address
+    # is only on the author.
+    sender = (emails_in(latest.get("fromEmailAddress"))
+              or emails_in((latest.get("author") or {}).get("email")))
     to = sender[0] if sender else ""
     author = (latest.get("author") or {}).get("name") or ""
     cc: list[str] = []
