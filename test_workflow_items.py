@@ -376,8 +376,8 @@ def test_one_attempt_per_ticket(monkeypatch):
 
 def test_merged_pr_fills_fix_commit_and_moves_to_on_dev(monkeypatch):
     calls = []
-    monkeypatch.setattr(ticket_fix, "_pr_merge_commit",
-                        lambda url: ("core", "abc12345"))
+    monkeypatch.setattr(ticket_fix, "_pr_state",
+                        lambda url: ("merged", "core", "abc12345"))
     monkeypatch.setattr(ticket_fix, "_clickup",
                         lambda m, p, b=None: calls.append((m, p, b)) or {})
     tasks = [
@@ -398,7 +398,8 @@ def test_merged_pr_fills_fix_commit_and_moves_to_on_dev(monkeypatch):
 
 def test_an_open_pr_is_not_promoted(monkeypatch):
     calls = []
-    monkeypatch.setattr(ticket_fix, "_pr_merge_commit", lambda url: None)
+    monkeypatch.setattr(ticket_fix, "_pr_state",
+                        lambda url: ("open", "web", ""))
     monkeypatch.setattr(ticket_fix, "_clickup",
                         lambda *a, **k: calls.append(a) or {})
     ticket_fix.promote_merged([

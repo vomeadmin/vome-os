@@ -43,13 +43,19 @@ ZONE = ZoneInfo("America/Montreal")
 DAYS = "vomeos_sprint_days"
 ITEMS = "vomeos_sprint_items"
 
-# Item statuses. `open` and `held` carry forward; the rest are finished.
+# Item statuses. `open`, `held` and `fixing` carry forward; the rest are
+# finished.
 OPEN = "open"
 HELD = "held"
 SENT = "sent"
 ROUTED = "routed"
 DONE = "done"
-CARRIES = (OPEN, HELD)
+# The agent opened a fix PR and owns the ticket until the fix is live. The
+# item stays out of the queue (one line per sprint) and is not re-triaged;
+# it comes back as a resolution when the release watcher proves it live, or
+# as a decision if the PR is closed without merging. (#9582, 2026-10-19)
+FIXING = "fixing"
+CARRIES = (OPEN, HELD, FIXING)
 
 store.register_table(
     DAYS,
@@ -203,7 +209,7 @@ def working_set(hours: int = 36) -> list[dict]:
     "what happened with 5" still has an answer after 5 was sent."""
     rows = store.query(
         f"SELECT * FROM {ITEMS} WHERE kind = 'ticket' AND (status IN"
-        " ('open', 'held') OR updated_at >= NOW() - make_interval("
+        " ('open', 'held', 'fixing') OR updated_at >= NOW() - make_interval("
         "hours => :h)) ORDER BY number",
         {"h": int(hours)},
     )
@@ -397,8 +403,66 @@ def set_draft(item_id: int, draft: str, status: str, why: str = "",
 
 
 def set_fix_pr(item_id: int, url: str) -> None:
-    store.execute(f"UPDATE {ITEMS} SET fix_pr = :u WHERE id = :i",
-                  {"u": url, "i": item_id})
+    """The agent opened a fix PR: the item becomes `fixing`.
+
+    `decided_at` marks when the agent took it, so the sprint can say how
+    long the fix has been in flight. An item already finished keeps its
+    status.
+    """
+    store.execute(
+        f"UPDATE {ITEMS} SET fix_pr = :u, status = CASE WHEN status IN"
+        " ('open', 'held') THEN 'fixing' ELSE status END,"
+        " decision = CASE WHEN status IN ('open', 'held')"
+        " THEN 'agent fix PR open' ELSE decision END,"
+        " decided_at = CASE WHEN status IN ('open', 'held') THEN :now"
+        " ELSE decided_at END, updated_at = :now WHERE id = :i",
+        {"u": url, "i": item_id, "now": _now()},
+    )
+
+
+def keep_fixing(item_id: int) -> None:
+    """After the acknowledgment is sent: still the agent's, still in flight.
+
+    Unlike `decide`, leaves `decided_at` (when the agent took it) alone.
+    """
+    store.execute(
+        f"UPDATE {ITEMS} SET status = 'fixing', updated_at = :now"
+        " WHERE id = :i",
+        {"i": item_id, "now": _now()},
+    )
+
+
+# Decision text on an item whose agent fix PR was closed without merging.
+FIX_ABANDONED = "agent fix PR closed without merging"
+
+
+def fix_progress(pr_url: str, note: str) -> int:
+    """Record where an in-flight fix stands ("merged into dev as web@abc").
+
+    Only the decision text changes, so `decided_at` still says when the
+    agent took the ticket. Returns how many items were updated.
+    """
+    rows = store.query(
+        f"UPDATE {ITEMS} SET decision = :d WHERE fix_pr = :u"
+        " AND status = 'fixing' RETURNING id",
+        {"d": note, "u": pr_url}, write=True,
+    )
+    return len(rows)
+
+
+def fix_abandoned(pr_url: str) -> list[dict]:
+    """The PR was closed unmerged: hand the item back to Sam to decide.
+
+    `fix_pr` is kept so the card can say what happened, and so the queue
+    sync does not mistake the ticket's In Progress status for "handled".
+    """
+    rows = store.query(
+        f"UPDATE {ITEMS} SET status = 'open', decision = :d,"
+        " decided_at = :now, updated_at = :now WHERE fix_pr = :u"
+        " AND status = 'fixing' RETURNING *",
+        {"d": FIX_ABANDONED, "u": pr_url, "now": _now()}, write=True,
+    )
+    return [_decode(r) for r in rows]
 
 
 def record_sent(item_id: int, text: str) -> None:
@@ -455,7 +519,7 @@ def carry_forward() -> int:
     day = today()
     rows = store.query(
         f"SELECT id FROM {ITEMS} WHERE day < :day AND status IN"
-        " ('open', 'held') ORDER BY arrived_at",
+        " ('open', 'held', 'fixing') ORDER BY arrived_at",
         {"day": day},
     )
     moved = 0

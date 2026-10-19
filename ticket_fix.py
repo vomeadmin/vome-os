@@ -47,6 +47,7 @@ from datetime import datetime, timezone
 
 import httpx
 
+import sprint_store
 from vomeos import store
 
 AGENT_FIXES_LIST = "901115573468"
@@ -275,8 +276,14 @@ def _propose(ticket_id, ticket_number, account, card, zoho_url,
                                 zoho_url)
     _record(ticket_id, ticket_number, "pr_opened", "", pr["url"], parent,
             child)
+    # Zoho says so straight away: In Progress, Sam, tagged agent-fix.
+    import zoho_actions
+
+    zoho = zoho_actions.mark_agent_fix(
+        ticket_id, pr["url"],
+        f"https://app.clickup.com/t/{parent}" if parent else "")
     return {"outcome": "pr_opened", "reason": "", "pr_url": pr["url"],
-            "parent": parent, "child": child}
+            "parent": parent, "child": child, "zoho": zoho}
 
 
 # ---------------------------------------------------------------------------
@@ -344,8 +351,9 @@ def _file_tasks(ticket_number, account, card, repo, pr_url, zoho_url):
 # PR merged -> on dev
 # ---------------------------------------------------------------------------
 
-def _pr_merge_commit(pr_url: str) -> tuple[str, str] | None:
-    """(alias, merge sha) once the PR has merged, else None."""
+def _pr_state(pr_url: str) -> tuple[str, str, str]:
+    """(state, alias, merge sha). state: merged, closed (unmerged), open,
+    or unknown when the PR could not be read."""
     from vomeos.integrations.code_search import Bitbucket, GitHub
     from vomeos.tools import repo_map
 
@@ -357,15 +365,31 @@ def _pr_merge_commit(pr_url: str) -> tuple[str, str] | None:
         repo = by_slug.get(gh.group(2))
         result = GitHub().pull_request(gh.group(2), gh.group(3),
                                        owner=gh.group(1))
-        if repo and result.ok and result.get("merged"):
-            return repo.alias, str(result.get("merge_commit_sha") or "")[:9]
-    elif bb:
+        if not (repo and result.ok):
+            return "unknown", "", ""
+        if result.get("merged"):
+            return ("merged", repo.alias,
+                    str(result.get("merge_commit_sha") or "")[:9])
+        return ("closed" if result.get("state") == "closed" else "open",
+                repo.alias, "")
+    if bb:
         repo = by_slug.get(bb.group(2))
         result = Bitbucket().pull_request(bb.group(2), bb.group(3))
-        if repo and result.ok and result.get("state") == "MERGED":
+        if not (repo and result.ok):
+            return "unknown", "", ""
+        state = result.get("state")
+        if state == "MERGED":
             commit = result.get("merge_commit") or {}
-            return repo.alias, str(commit.get("hash") or "")[:8]
-    return None
+            return "merged", repo.alias, str(commit.get("hash") or "")[:8]
+        return ("closed" if state in ("DECLINED", "SUPERSEDED") else "open",
+                repo.alias, "")
+    return "unknown", "", ""
+
+
+def _pr_merge_commit(pr_url: str) -> tuple[str, str] | None:
+    """(alias, merge sha) once the PR has merged, else None."""
+    state, alias, sha = _pr_state(pr_url)
+    return (alias, sha) if state == "merged" else None
 
 
 def _status(task: dict) -> str:
@@ -395,10 +419,14 @@ def promote_merged(tasks: list[dict]) -> list[str]:
                                 or task.get("text_content") or "")
         if not match:
             continue
-        merged = _pr_merge_commit(match.group(1))
-        if not merged or not merged[1]:
+        pr_url = match.group(1)
+        state, alias, sha = _pr_state(pr_url)
+        if state == "closed":
+            changed += _abandon(task, pr_url, tasks)
             continue
-        value = f"{merged[0]}@{merged[1]}"
+        if state != "merged" or not sha:
+            continue
+        value = f"{alias}@{sha}"
         try:
             _clickup("POST", f"/task/{task['id']}/field/{FIELD_FIX_COMMIT}",
                      {"value": value})
@@ -410,7 +438,47 @@ def promote_merged(tasks: list[dict]) -> list[str]:
             changed.append(f"{task['id']} merged as {value}")
         except Exception as exc:
             changed.append(f"{task['id']} promote failed: {exc}")
+        # The sprint's one line moves on to "waiting on production".
+        _sprint_note(lambda: sprint_store.fix_progress(
+            pr_url, f"merged into dev as {value}"), changed)
     return changed
+
+
+def _sprint_note(update, changed: list[str]) -> None:
+    try:
+        if sprint_store.ready():
+            update()
+    except Exception as exc:
+        changed.append(f"sprint item not updated: {exc}")
+
+
+def _abandon(task: dict, pr_url: str, tasks: list[dict]) -> list[str]:
+    """A fix PR closed without merging: nobody is fixing these tickets now.
+
+    The sprint item goes back to Sam as a decision, Zoho stops saying the
+    agent has it, and the Agent Fixes task closes so the release watcher
+    stops waiting on a commit that will never come.
+    """
+    import zoho_actions
+
+    out = []
+    items: list[dict] = []
+    _sprint_note(lambda: items.extend(sprint_store.fix_abandoned(pr_url)),
+                 out)
+    for item in items:
+        problem = zoho_actions.unmark_agent_fix(item["ticket_id"], pr_url)
+        out.append(f"#{item.get('ticket_number')} handed back"
+                   + (f" ({problem})" if problem else ""))
+    # `Closed`, never `on prod`: on prod fires the on-prod handler, which
+    # would email the client about a fix that never shipped.
+    for target in [task] + [t for t in tasks
+                            if t.get("parent") == task["id"]]:
+        try:
+            _clickup("PUT", f"/task/{target['id']}", {"status": "Closed"})
+        except Exception as exc:
+            out.append(f"{target['id']} not closed: {exc}")
+    out.append(f"{task['id']} PR closed unmerged: {pr_url}")
+    return out
 
 
 def list_in_progress() -> list[dict]:

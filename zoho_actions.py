@@ -37,6 +37,8 @@ FROM_ADDRESS = os.environ.get(
 
 BACKEND_TEAM = os.environ.get("ZOHO_AGENT_BACKEND", "569440000023160001")
 FRONTEND_TEAM = os.environ.get("ZOHO_AGENT_FRONTEND", "569440000023159001")
+# Owner of a ticket the agent is fixing: Sam merges agent PRs into dev.
+SAM_AGENT = os.environ.get("ZOHO_AGENT_SAM") or "569440000000139001"
 
 _EMAIL = re.compile(r"[\w.+'-]+@[\w-]+(?:\.[\w-]+)+")
 _OUR_MAILBOXES = ("zohodesk.com", "support@vomevolunteer")
@@ -200,6 +202,68 @@ def set_in_progress(ticket_id: str, team: str) -> dict:
     owner = FRONTEND_TEAM if team == "frontend" else BACKEND_TEAM
     return _send("PATCH", f"/tickets/{ticket_id}",
                  {"status": "In Progress", "assigneeId": owner})
+
+
+AGENT_FIX_TAG = "agent-fix"
+
+
+def mark_agent_fix(ticket_id: str, pr_url: str, task_url: str = "") -> str:
+    """The agent opened a fix PR: show it in Zoho, without emailing anyone.
+
+    In Progress (the status routing to an engineer uses, which sends the
+    client nothing), assigned to Sam because his merge is the next human
+    step, tagged `agent-fix`, with a private note linking the PR. Each part
+    fails on its own and is reported, never raised: the PR already exists.
+    """
+    notes = []
+    steps = (
+        ("status", lambda: _send("PATCH", f"/tickets/{ticket_id}",
+                                 {"status": "In Progress",
+                                  "assigneeId": SAM_AGENT})),
+        ("tag", lambda: _send("POST", f"/tickets/{ticket_id}/associateTag",
+                              {"tags": [AGENT_FIX_TAG]})),
+        ("note", lambda: _send("POST", f"/tickets/{ticket_id}/comments", {
+            "isPublic": False, "contentType": "plainText",
+            "content": ("Vome OS: the agent opened a fix for this ticket "
+                        f"and owns it until it is live.\nFix PR: {pr_url}"
+                        + (f"\nAgent Fixes task: {task_url}"
+                           if task_url else "")),
+        })),
+    )
+    for name, step in steps:
+        try:
+            step()
+        except Exception as exc:
+            notes.append(f"Zoho {name} not set ({str(exc)[:120]})")
+    return "; ".join(notes)
+
+
+def unmark_agent_fix(ticket_id: str, pr_url: str) -> str:
+    """The fix PR was closed unmerged: nobody is fixing this any more.
+
+    Back to Processing (needs attention) with the tag removed and a note
+    saying why, so Zoho does not keep claiming the agent has it.
+    """
+    notes = []
+    steps = (
+        ("status", lambda: _send("PATCH", f"/tickets/{ticket_id}",
+                                 {"status": "Processing"})),
+        ("tag", lambda: _send("POST",
+                              f"/tickets/{ticket_id}/dissociateTag",
+                              {"tags": [AGENT_FIX_TAG]})),
+        ("note", lambda: _send("POST", f"/tickets/{ticket_id}/comments", {
+            "isPublic": False, "contentType": "plainText",
+            "content": ("Vome OS: the agent's fix PR was closed without "
+                        f"merging ({pr_url}). Nobody is fixing this now; "
+                        "it is back in the sprint for a decision."),
+        })),
+    )
+    for name, step in steps:
+        try:
+            step()
+        except Exception as exc:
+            notes.append(f"Zoho {name} not reset ({str(exc)[:120]})")
+    return "; ".join(notes)
 
 
 def ticket_url(ticket_id: str) -> str:

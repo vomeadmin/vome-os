@@ -120,6 +120,9 @@ def view(item: dict) -> dict:
         "recipients": {k: v for k, v in (item.get("recipients") or {}).items()
                        if k in ("to", "cc", "first_name")},
         "fix_pr": item.get("fix_pr") or "",
+        # Who owns the ticket now, in words: set whenever a fix PR exists.
+        "agent_fix": (sprint_batch.fix_stage(item)
+                      if item.get("fix_pr") else ""),
         "decision": item.get("decision") or "",
     }
 
@@ -128,7 +131,8 @@ def view(item: dict) -> dict:
 # Read tools
 # ---------------------------------------------------------------------------
 
-SECTIONS = ("ready", "fix", "decide", "quiet", "owed_nothing", "held")
+SECTIONS = ("ready", "fix", "decide", "quiet", "owed_nothing", "held",
+            "in_flight")
 
 
 def sprint_queue(include_finished: bool = False) -> dict:
@@ -167,12 +171,17 @@ def sprint_queue(include_finished: bool = False) -> dict:
         "close_quietly": groups["quiet"],
         "nothing_owed": groups["owed_nothing"],
         "held": groups["held"],
+        "agent_fixing": groups["in_flight"],
         "how_to_use_this": (
             "ready_to_send drafts are complete; show each one in full and "
-            "send only on Sam's explicit word. needs_decision carries the "
-            "agent's first pass (code_check, recommended_action, "
-            "escalation_reason). For a ticket not listed, call "
-            "ticket_first_pass."),
+            "send only on Sam's explicit word. An item with agent_fix set "
+            "is one the agent is fixing: say so plainly (the agent is "
+            "fixing this, here is the acknowledgment to send). "
+            "agent_fixing lists tickets already acknowledged that the agent "
+            "still owns: one line each with agent_fix, nothing to do unless "
+            "it says Sam's merge. needs_decision carries the agent's first "
+            "pass (code_check, recommended_action, escalation_reason). For "
+            "a ticket not listed, call ticket_first_pass."),
     }
     if include_finished:
         out["finished_recently"] = finished

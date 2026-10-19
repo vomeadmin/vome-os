@@ -75,6 +75,9 @@ READY, FIX, DECIDE, HELD = "ready", "fix", "decide", "held"
 OWED_NOTHING = "owed_nothing"
 # Nothing owed and nothing to do (triage lane housekeeping): `close quiet`.
 QUIET = "quiet"
+# The agent owns it: a fix PR is open and the client has been acknowledged.
+# One line per sprint until it is live or the PR is closed.
+IN_FLIGHT = "in_flight"
 
 ESCALATION_LABELS = {
     "data_lookup": "needs a record we cannot read",
@@ -189,6 +192,21 @@ def section(item: dict, now: datetime | None = None) -> str:
         return ""
     if status == sprint_store.HELD and not held_is_due(item, now):
         return HELD
+    if status == sprint_store.FIXING:
+        # Until the acknowledgment goes out it is a normal reply to send;
+        # after that the agent owns it and it needs nobody.
+        if item.get("sent_at"):
+            return IN_FLIGHT
+        if item.get("draft_status") == "ok" and (
+                item.get("recipients") or {}).get("to"):
+            return READY
+        if (item.get("draft") or "").strip():
+            return FIX
+        return IN_FLIGHT
+    # Already answered and handed back (the agent's fix PR was closed):
+    # re-offering the old draft would send the same reply twice.
+    if status == sprint_store.OPEN and item.get("sent_at"):
+        return DECIDE
     # Works as built, but maybe not as it should: Sam decides whether to
     # change it, log it, or answer it, even when a how-to draft exists.
     if is_design_question(item):
@@ -240,6 +258,8 @@ def select(items: list[dict], exclude: set | None = None,
         OWED_NOTHING: owed,
         QUIET: sorted((i for i in items if section(i, now) == QUIET),
                       key=_priority),
+        IN_FLIGHT: sorted((i for i in items if section(i, now) == IN_FLIGHT),
+                          key=_priority),
     }
 
 
@@ -301,6 +321,29 @@ def _index_line(item: dict, resolutions: set, now: datetime) -> str:
     return line
 
 
+def fix_stage(item: dict) -> str:
+    """Where the agent's fix stands, in a few words, and whose move it is."""
+    decision = str(item.get("decision") or "")
+    if decision == sprint_store.FIX_ABANDONED:
+        return ("the agent's fix PR was closed without merging, so nobody "
+                "is fixing this now")
+    if decision.startswith("merged"):
+        return (f"{decision}, waiting on production "
+                f"({_after_merge(item.get('fix_pr'))})")
+    return "PR open, waiting on your merge into the dev branch"
+
+
+def _in_flight_line(item: dict, now: datetime) -> str:
+    took = item.get("decided_at")
+    days = ""
+    if isinstance(took, datetime):
+        hours = (now - took).total_seconds() / 3600
+        days = " · " + ("today" if hours < 24 else f"{int(hours // 24)}d")
+    return (f"*{item.get('number')}* {_star(item)}{_zoho(item)} "
+            f"{_account(item)}{days} · {fix_stage(item)} · "
+            f"<{item.get('fix_pr')}|PR>")
+
+
 def _recipients(item: dict) -> str:
     rcpt = item.get("recipients") or {}
     cc = ", ".join(rcpt.get("cc") or [])
@@ -316,12 +359,19 @@ def detail(item: dict, resolutions: set, now: datetime) -> str:
             + (f" · waiting {age(item, now)}" if age(item, now) else ""))
     kind = section(item, now)
     lines = [head]
-    if item.get("fix_pr"):
+    if item.get("decision") == sprint_store.FIX_ABANDONED:
+        lines.append(f":warning: The agent's fix PR was closed without "
+                     f"merging ({item['fix_pr']}), so nobody is fixing this "
+                     f"now. Route it to an engineer, or `fix {n}` to try "
+                     "again.")
+    elif item.get("fix_pr"):
         # The agent opened a fix for this ticket. The client hears about it
         # when the release watcher proves it live, as a resolution here.
-        lines.append(f":hammer_and_wrench: Fix PR opened, waiting on your "
-                     f"merge into the dev branch (then "
-                     f"{_after_merge(item['fix_pr'])}): {item['fix_pr']}")
+        lines.append(f":robot_face: *The agent is fixing this.* "
+                     f"{fix_stage(item)} (then "
+                     f"{_after_merge(item['fix_pr'])}): {item['fix_pr']}. "
+                     "Send the acknowledgment now; the resolution comes "
+                     "back here once the fix is live.")
     if kind in (READY, FIX):
         lines.append(_recipients(item))
         if kind == FIX:
@@ -453,6 +503,12 @@ def render(batch_number: int, picked: dict, context: dict,
                          or (i.get("card") or {}).get("situation")
                          or i.get("summary"), 110)
                 for i in closing]
+
+    fixing = picked.get(IN_FLIGHT) or []
+    if fixing:
+        top.append(f"\n*AGENT IS FIXING ({len(fixing)})* · client "
+                   "acknowledged · nothing for you unless it says your merge")
+        top += [_in_flight_line(i, now) for i in fixing]
 
     quiet = []
     held = picked.get("held") or []
@@ -746,7 +802,10 @@ def _needs_triage(ticket: dict, fresh_since: datetime | None) -> bool:
     if fresh_since is None:
         return False
     updated = item.get("updated_at")
+    # A fresh clear does not re-triage what the agent is fixing: that would
+    # reopen it as a new ticket. A new customer message still does.
     return (item.get("status") in sprint_store.CARRIES
+            and item.get("status") != sprint_store.FIXING
             and isinstance(updated, datetime) and updated < fresh_since)
 
 

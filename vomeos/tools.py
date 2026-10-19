@@ -37,13 +37,21 @@ host, owner, slug and the branch production runs:
 Reads always use that live branch, never the default branch, because the
 default branch is not always what production runs (core's `main` is a 2024
 stub).
+
+OTHER BRANCHES
+--------------
+A bug found while building (Ron's #bug-reports, 2026-10-19) may exist only
+on the integration branch, or only in the reporter's own unmerged work. So a
+tool call may name `branch`, but only one listed for that repo in
+`VOMEOS_CODE_EXTRA_BRANCHES` (`core=development,web=develop|RON_DEVELOP`).
+Anything else is refused. With no `branch`, reads stay on the live branch.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from vomeos.integrations import code_search
 
@@ -52,6 +60,10 @@ DEFAULT_REPO_MAP = (
     "database=bitbucket:vomedjango/vomedjango-database-app@master,"
     "web=github:vomeadmin/vome-react@master,"
     "mobile=github:vomeadmin/VomeApp@master"
+)
+
+DEFAULT_EXTRA_BRANCHES = (
+    "core=development,database=development,web=develop|RON_DEVELOP"
 )
 
 MAX_RESULT_CHARS = int(os.environ.get("VOMEOS_TOOL_MAX_CHARS", "12000"))
@@ -82,6 +94,30 @@ def repo_map() -> dict[str, Repo]:
                                     owner.strip(), slug.strip(),
                                     branch.strip() or "master")
     return repos
+
+
+def extra_branches() -> dict[str, tuple[str, ...]]:
+    """alias -> branches a tool call may read besides the live one."""
+    raw = os.environ.get("VOMEOS_CODE_EXTRA_BRANCHES", DEFAULT_EXTRA_BRANCHES)
+    out: dict[str, tuple[str, ...]] = {}
+    for part in raw.split(","):
+        alias, _, names = part.partition("=")
+        branches = tuple(b.strip() for b in names.split("|") if b.strip())
+        if alias.strip() and branches:
+            out[alias.strip()] = branches
+    return out
+
+
+def _on_branch(repo: Repo, branch: str) -> Repo | str:
+    """The repo read at `branch`, or the refusal text."""
+    if not branch or branch == repo.branch:
+        return repo
+    allowed = extra_branches().get(repo.alias, ())
+    if branch not in allowed:
+        listed = ", ".join((repo.branch,) + allowed)
+        return (f"Branch {branch!r} is not readable on {repo.alias}. "
+                f"Use: {listed}.")
+    return replace(repo, branch=branch)
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +189,17 @@ def definitions(names) -> list[dict]:
             },
         },
     }
+    extra = extra_branches()
+    if extra:
+        listed = "; ".join(f"{a}: {', '.join(b)}" for a, b in sorted(
+            extra.items()))
+        branch = {
+            "type": "string",
+            "description": "Optional. Omit to read what production runs. "
+                           f"Otherwise one of: {listed}.",
+        }
+        for d in defs.values():
+            d["input_schema"]["properties"]["branch"] = branch
     return [defs[n] for n in names if n in defs]
 
 
@@ -285,6 +332,9 @@ def execute(name: str, arguments: dict) -> str:
         if repo is None:
             return (f"Unknown repo {arguments.get('repo')!r}. Use one of: "
                     f"{', '.join(sorted(repo_map()))}.")
+        repo = _on_branch(repo, str(arguments.get("branch") or "").strip())
+        if isinstance(repo, str):
+            return repo
         if name == "search_code":
             out = _search(repo, str(arguments.get("query") or ""))
         elif name == "read_code_file":

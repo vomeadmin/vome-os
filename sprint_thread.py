@@ -354,6 +354,7 @@ def _release_lines() -> list[str]:
 def render_update(items: list[dict], label: str) -> str:
     needs = [i for i in items if i.get("status") == sprint_store.OPEN]
     held = [i for i in items if i.get("status") == sprint_store.HELD]
+    fixing = [i for i in items if i.get("status") == sprint_store.FIXING]
     done = [i for i in items if i.get("status") not in sprint_store.CARRIES]
 
     def line(i: dict) -> str:
@@ -366,13 +367,21 @@ def render_update(items: list[dict], label: str) -> str:
                 f"`{i.get('category') or '?'}` · {draft} · {_age(i)}")
 
     out = [f":spiral_calendar_pad: *{label}* · {len(needs)} need you · "
-           f"{len(held)} held · {len(done)} done today"]
+           f"{len(held)} held · {len(fixing)} agent fixing · "
+           f"{len(done)} done today"]
     if needs:
         out.append("*Needs you*")
         out += [line(i) for i in needs]
     if held:
         out.append("*Held*")
         out += [line(i) for i in held]
+    if fixing:
+        import sprint_batch
+
+        out.append("*Agent is fixing*")
+        out += [f"*{i.get('number')}.* {_zoho_link(i)} "
+                f"{i.get('account') or ''} · {sprint_batch.fix_stage(i)}"
+                for i in fixing]
     release = _release_lines()
     if release:
         out.append("*Waiting on a release*")
@@ -1294,6 +1303,10 @@ def _send(item: dict) -> str:
     n = item.get("number")
     if item.get("status") not in sprint_store.CARRIES:
         return f"*{n}.* already {item.get('status')}, nothing sent."
+    if item.get("status") == sprint_store.FIXING and item.get("sent_at"):
+        return (f"*{n}.* already acknowledged and the agent is fixing it, "
+                "nothing sent. The resolution comes back here once the fix "
+                "is live.")
     draft = (item.get("draft") or "").strip()
     if not draft or item.get("draft_status") != "ok":
         return (f"*{n}.* has no ready draft ({item.get('draft_status')}). "
@@ -1314,13 +1327,29 @@ def _send(item: dict) -> str:
                 "message), so nothing was sent. Reply from Zoho, or say "
                 f"`retriage {n}`.")
     zoho_actions.send_reply(item["ticket_id"], to, cc, draft)
-    sprint_store.decide(item["id"], sprint_store.SENT, "sent by Sam")
+    if _still_fixing(item):
+        # The acknowledgment went; the agent still owns the fix, so the item
+        # stays in flight instead of finishing (#9582).
+        sprint_store.keep_fixing(item["id"])
+    else:
+        sprint_store.decide(item["id"], sprint_store.SENT, "sent by Sam")
     sprint_store.record_sent(item["id"], draft)
     copied = f" cc {', '.join(cc)}" if cc else ""
     _post(f"Sent #{item.get('ticket_number')} to {to}{copied} on Sam's "
           "approval in the sprint.", channel=AGENT_LOG)
     after = _after_send(item)
     return f"*{n}.* sent to {to}{copied}." + (f" {after}" if after else "")
+
+
+def _still_fixing(item: dict) -> bool:
+    """An agent fix PR is open for this ticket and not yet live."""
+    if item.get("status") != sprint_store.FIXING:
+        return False
+    import shadow_triage
+
+    release = shadow_triage.release_state(item.get("ticket_number") or "",
+                                          item.get("ticket_id") or "")
+    return not release.get("live")
 
 
 # What a sent reply means for the ticket. The reply is the decision; the
