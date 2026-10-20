@@ -54,6 +54,16 @@ def test_sams_decisions_are_never_routed_for_him():
     assert tr.should_route(design, {})[0] is False
 
 
+def test_works_as_designed_is_never_routed_for_him():
+    """#9547: a works-as-built waitlist question went to OnlyG as a data
+    lookup."""
+    card = _card(escalation_reason="data_lookup",
+                 code_check={"verdict": "works_as_designed",
+                             "where": "core:opportunity_app/t.py:1"})
+    assert tr.should_route(card, {}) == (
+        False, "works as designed: Sam decides")
+
+
 def test_an_agent_fix_stays_with_the_agent_until_it_declines():
     card = _card(lane="agent_fix")
     assert tr.should_route(card, {"pr_url": "https://pr/1"})[0] is False
@@ -195,11 +205,23 @@ def test_the_same_problem_joins_the_task_already_filed(world):
     world.siblings = [{"ticket_number": "9501", "account": "Sarasota (U)",
                        "eng_task": {"id": "86old", "url": "https://cu/86old",
                                     "owner": "onlyg"}}]
+    world.live = {"86old": "in progress"}
     out = tr.route(_item(account="Sarasota (U)"), _card(),
                    {}, {"same_as": ["9501"]}, 0)
     assert world.created == []
     assert world.comments[0][0] == "86old"
     assert out["task"]["how"] == "joined (same problem as #9501)"
+
+
+def test_a_closed_task_of_the_same_problem_is_not_joined(world):
+    """#9462, #9563 and #9583 joined 868mka0f8 after it was closed."""
+    world.siblings = [{"ticket_number": "9560", "account": "Sarasota (U)",
+                       "eng_task": {"id": "86shut", "url": "https://cu/86s",
+                                    "owner": "onlyg"}}]
+    world.live = {"86shut": "closed"}
+    out = tr.route(_item(account="Summit (P)"), _card(),
+                   {}, {"same_as": ["9560"]}, 0)
+    assert world.comments == [] and out["task"]["how"] == "created"
 
 
 def test_a_task_already_linked_to_the_ticket_is_reused(world):
@@ -383,6 +405,28 @@ def test_a_reply_on_a_ticket_triage_routed_is_triaged_again(
 # Walking the Zoho queue from Claude.ai
 # ---------------------------------------------------------------------------
 
+def test_the_urgency_count_is_the_tickets_the_matcher_named(monkeypatch):
+    """#9550 read "same problem reported by 7 accounts" because everyone
+    tied to one noisy Sentry error shared its key."""
+    crowd = [{"ticket_number": str(n), "account": f"Org {n} (low)"}
+             for n in range(9400, 9409)]
+    monkeypatch.setattr(sprint_store, "by_incident", lambda key: crowd)
+    monkeypatch.setattr(sprint_store, "by_ticket_numbers", lambda numbers: [
+        i for i in crowd if i["ticket_number"] in numbers])
+    named = _item(incident_key="sentry:7624230698",
+                  card=_card(incident={"same_as": [], "sentry_issue":
+                                       "7624230698"}))
+    assert tr.incident_of(named)["same_as"] == []
+    assert tr.urgency(0, "Lone (low)", tr.incident_of(named)) == ""
+    # Triaged before the card kept the match: a Sentry key names nobody.
+    old = _item(incident_key="sentry:7624230698", card=_card())
+    assert tr.incident_of(old)["same_as"] == []
+    pair = _item(incident_key="tickets:9400",
+                 card=_card(incident={"same_as": ["9401"]}))
+    assert tr.urgency(0, "Lone (low)", tr.incident_of(pair)) == (
+        "same problem reported by 2 accounts")
+
+
 def test_arr_comes_from_the_account_label():
     assert tr.arr_of("Sarasota County (very-high, 7000 CAD combined ARR)") \
         == 7000
@@ -442,6 +486,15 @@ def test_walk_shows_who_has_every_open_ticket(queue, monkeypatch):
     assert [x["ticket"] for x in out["agent_fixing"]] == ["#9590"]
     assert [x["ticket"] for x in out["close_quietly"]] == ["#9556"]
     assert out["not_triaged"][0]["ticket"] == "#9600"
+
+
+def test_an_engineer_card_that_is_not_routed_is_sams_call(queue):
+    wad = _item(ticket_id="Z1", ticket_number="9547", card=_card(
+        escalation_reason="data_lookup",
+        code_check={"verdict": "works_as_designed"}))
+    section, line = queue._walk_one(wad)
+    assert section == "your_call"
+    assert line["why_yours"] == "works as designed: Sam decides"
 
 
 def test_a_card_from_before_lanes_is_never_routed(queue):

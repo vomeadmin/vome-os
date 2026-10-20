@@ -116,6 +116,12 @@ def should_route(card: dict, fix: dict) -> tuple[bool, str]:
         card.get("code_check"), dict) else {}
     if code.get("verdict") == "design_question":
         return False, "design question: Sam decides"
+    # #9547 asked whether the waitlist can skip a conflicting user. The code
+    # check said it works as built and the card still went to OnlyG as a
+    # data lookup (2026-10-20). Nothing is broken, so it is Sam's answer or
+    # his feature call; he can still route it by hand.
+    if code.get("verdict") == "works_as_designed":
+        return False, "works as designed: Sam decides"
     if lane == "engineer":
         reason = card.get("escalation_reason") or ""
         if reason == "product_decision":
@@ -164,11 +170,23 @@ def arr_of(account: str) -> float:
 
 
 def incident_of(item: dict) -> dict:
-    """The incident as urgency() needs it, rebuilt from the stored key: the
-    other tickets triage gave the same incident."""
+    """The incident as urgency() needs it: the tickets the matcher named
+    for this one, as triage stored them on the card.
+
+    Not everyone who shares the key. A key is a Sentry issue more often
+    than not, and tickets tied to one noisy error are not the same problem
+    as each other: #9550 (an email change) read "same problem reported by
+    7 accounts" because nine unrelated tickets had been tied to one
+    27k-event Sentry error (2026-10-20)."""
     key = item.get("incident_key") or ""
-    if not key:
-        return {}
+    card = item.get("card") or {}
+    if "incident" in card:
+        stored = card.get("incident") or {}
+        return {"key": key, "same_as": list(stored.get("same_as") or [])}
+    # Triaged before the card kept the match: a ticket key still names
+    # tickets matched to each other, a Sentry key names nobody.
+    if not key or key.startswith("sentry:"):
+        return {"key": key, "same_as": []} if key else {}
     others = [i.get("ticket_number") for i in sprint_store.by_incident(key)
               if i.get("ticket_number") != item.get("ticket_number")]
     return {"key": key, "same_as": others}
@@ -183,9 +201,17 @@ def _existing_task(item: dict, incident: dict) -> tuple[dict, str]:
     for other in sprint_store.by_ticket_numbers(
             (incident or {}).get("same_as") or []):
         filed = other.get("eng_task") or {}
-        if filed.get("url"):
-            return (dict(filed),
-                    f"same problem as #{other.get('ticket_number')}")
+        if not filed.get("url"):
+            continue
+        # #9462, #9563 and #9583 joined 868mka0f8 after it was closed
+        # (2026-10-20): a sibling's task is checked like a linked one.
+        live = _read_state(filed["id"])
+        if live.get("status") == "unreadable":
+            raise RuntimeError(f"could not read task {filed['id']}")
+        if live.get("shipped"):
+            continue
+        return (dict(filed),
+                f"same problem as #{other.get('ticket_number')}")
     import clickup_search
 
     for task in clickup_search.linked_tasks(
