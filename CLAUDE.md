@@ -95,6 +95,9 @@ feature_desk.py    #feature-requests: engineering.feature_architect shapes each
                    become fix_author PRs; Sam answers go N / log N / no N.
                    Always on; FEATURE_DESK_PR_ENABLED (off) gates the PRs
 WORKFLOWS.md       the workflow map + gap register (source of truth)
+VIDEO_STUDIO.md    marketing videos from #video-studio: the team, replies,
+                   sources, costs, data, debugging (read before touching
+                   video_*.py, slack_video_studio_handler.py, agents/content)
 scripts/render_workflow_map.py  WORKFLOWS.md -> the published map page
 product_*.py       product knowledge: navigation, UI strings, guides
 mcp_connector/     Vome OS as a claude.ai connector (MCP + Google OAuth).

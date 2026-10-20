@@ -13,7 +13,7 @@ To propose a change: edit a diagram or add a register row, set its status,
 and regenerate. A new AI session should read this file, `CLAUDE.md`, and the
 ClickUp handoff page (doc 3dztm-3311, page 3dztm-6351) before acting.
 
-**As of:** 2026-10-18
+**As of:** 2026-10-20
 
 ## Status key
 
@@ -210,6 +210,25 @@ flowchart TD
   C & CM --> R["Thread: check mark + link"]:::built
 ```
 
+<!-- map:diagram id=video title="11. A marketing video, from idea in #video-studio to a link on Sam's phone (deployed 2026-10-18, full reference: VIDEO_STUDIO.md)" -->
+```mermaid
+flowchart TD
+  P["A person posts an idea + help-centre link<br/>top level of #video-studio"]:::live --> F{"Slackbot, an app, a workflow<br/>or a reminder?"}:::deployed
+  F -->|yes| X["Ignored, nothing runs (2026-10-20)"]:::deployed
+  F -->|no| SC["Scout (Sonnet 5.5): the bigger capability,<br/>is it new, what to look up"]:::live
+  SC --> RS["Research: related help articles, website copy,<br/>ClickUp Product Marketing Playbook, product labels"]:::live
+  RS --> ST["Strategist (Fable 5.1): audience, one claim,<br/>context first, then what is new"]:::live
+  ST --> CD["Creative director (Fable 5.1): three concepts<br/>in formats Studio can draw (Explainer, Reveal)"]:::live
+  CD --> PK["Person replies 1, 2 or 3<br/>(anything else is direction, new concepts)"]:::live
+  PK --> CW["Copywriter (Opus 5.5), then brand editor (Opus 5.5):<br/>the script in that concept's format"]:::deployed
+  CW --> VA["Studio validates; script posted for review"]:::deployed
+  VA --> NT["Notes revise the script; start over, scrap this"]:::deployed
+  PK & NT --> LK["Lesson keeper (Opus 5.5): standing taste kept<br/>for every future video; forget that undoes"]:::deployed
+  VA --> GL["'go build the video', the whole message, only"]:::deployed
+  GL --> BU["Studio on Railway: ElevenLabs voice,<br/>render 4 formats, publish to R2"]:::live
+  BU --> DL["Thread: phone link first, every format linked"]:::deployed
+```
+
 ## Schedule (America/Montreal, run by Celery beat on `vome-os-worker`)
 
 | When | Job | Status |
@@ -283,3 +302,11 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 | G38 | featuredesk | Agent-built PRs from #feature-requests (`FEATURE_DESK_PR_ENABLED`) | decide | Off, an agent_build item is held and Sam says `go N` | Turn on after a week of verdicts Sam agrees with | Sam |
 | G39 | featuredesk | Ticket feature requests the sprint posts in #feature-requests are not shaped by the architect | proposed | Bot posts are skipped, so client asks from tickets get no shape analysis | Run the architect on the sprint's feature posts too, reusing the same thread commands | agent |
 | G20 | items 1-5 | Close the loop, code checks, ticket fixes, autonomy report, Sam signature, resolution drafts | deployed | Pushed Oct 17/18 | Prove each on a real ticket | agent |
+| G44 | video | Slackbot, app, workflow and reminder messages ignored in #video-studio; threads record who started them | deployed | A 3:55 AM reminder was taken as a video idea and the full team ran on it (about $1.30) | Prove: the next reminder in the channel starts nothing | agent |
+| G45 | video | A new thread with no help-centre link still keyword-searches for an article | decide | It can draft from a neighbouring article without saying so | Ask for the link instead, or keep the search | Sam |
+| G46 | video | Creative director runs on Fable 5.1 (about $0.63 a round, a third of a round's cost) | decide | Fable is two thirds of a round's cost; the strategist is where it matters most | Try Opus 5.5 for the director on a few rounds and compare | Sam |
+| G47 | video | No Studio format can draw a dashboard or list screen (sequence progress, database views) | proposed | Concepts for those features fall back to capability cards and large type | Design a dashboard-style scene for the Reveal | Sam |
+| G48 | studio | 16:9 reuses the portrait card | proposed | Looks thin in a wide frame (YouTube, LinkedIn native) | A landscape layout: mock one side, headline the other | agent |
+| G49 | studio | Railway stops reading railway.toml (config as code) on 2026-12-01 | proposed | Studio deploys would lose the Dockerfile builder and restart policy | Migrate to .railway/railway.ts, adding the builder and restart policy the generator drops; never with managed variables | agent |
+| G50 | video | Local test runs of the video team write run logs into production's vomeos_agent_runs | proposed | Cost reports include tests (subject ids starting local.) | Point local runs at a throwaway VOMEOS_DATABASE_URL | agent |
+| G51 | studio | The free draft voice (Kokoro) is not in the Studio image | decide | Every build on Railway is a paid ElevenLabs build | Add Kokoro to the image for draft builds, or keep builds paid only | Sam |
