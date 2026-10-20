@@ -183,6 +183,13 @@ def _existing_task(item: dict, incident: dict) -> tuple[dict, str]:
             continue
         if (task.get("status") or "").lower() in SHIPPED:
             continue
+        # The list search is cached for minutes. #9526's task was closed 70
+        # seconds before triage joined it (2026-10-20), so ask ClickUp now.
+        live = _read_state(task["id"])
+        if live.get("status") == "unreadable":
+            raise RuntimeError(f"could not read task {task['id']}")
+        if live.get("shipped"):
+            continue
         return ({"id": task["id"],
                  "url": task.get("url")
                  or f"https://app.clickup.com/t/{task['id']}"},

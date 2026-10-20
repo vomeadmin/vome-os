@@ -169,6 +169,7 @@ def test_the_worker_refreshes_and_skips_the_cap_when_sam_asks(monkeypatch):
     calls = []
     monkeypatch.setattr(shadow_triage, "enabled", lambda: True)
     monkeypatch.setattr(sprint_store, "ready", lambda: True)
+    monkeypatch.setattr(shadow_triage, "_auto_reply", lambda tid: False)
     monkeypatch.setattr(shadow_triage, "_handle",
                         lambda tid, reason, **k: calls.append(k) or {})
     shadow_triage.handle({"ticket_id": "1", "reason": "claude_ai",
@@ -176,6 +177,55 @@ def test_the_worker_refreshes_and_skips_the_cap_when_sam_asks(monkeypatch):
     shadow_triage.handle({"ticket_id": "1", "reason": "reply"})
     assert calls == [{"refresh": True, "ignore_cap": True},
                      {"refresh": False, "ignore_cap": False}]
+
+
+def _conversation(text, author_type="END_USER"):
+    return {"data": [{"summary": text, "isPublic": True,
+                      "author": {"type": author_type,
+                                 "email": "allie@womenscommunity.org"}}]}
+
+
+@pytest.mark.parametrize("text,skipped", [
+    ("I will be out of the office Oct 20-21, I will get back to you as "
+     "soon as I can.", True),
+    ("Thanks, but I still can't see the completion date.", False),
+])
+def test_an_out_of_office_is_never_triaged_as_a_reply(monkeypatch, text,
+                                                     skipped):
+    """#9526: an out-of-office right after Sam's answer was triaged as a
+    new message and routed to OnlyG again."""
+    import agent
+    import shadow_triage
+
+    calls = []
+    monkeypatch.setattr(shadow_triage, "enabled", lambda: True)
+    monkeypatch.setattr(sprint_store, "ready", lambda: True)
+    monkeypatch.setattr(agent, "fetch_ticket_conversations",
+                        lambda tid: _conversation(text))
+    monkeypatch.setattr(shadow_triage, "_handle",
+                        lambda tid, reason, **k: calls.append(reason) or {})
+    out = shadow_triage.handle({"ticket_id": "1", "reason": "reply"})
+    if skipped:
+        assert out == {"status": "skipped", "reason": "auto-reply"}
+        assert calls == []
+    else:
+        assert calls == ["reply"]
+
+
+def test_sam_asking_triages_even_an_out_of_office(monkeypatch):
+    import agent
+    import shadow_triage
+
+    calls = []
+    monkeypatch.setattr(shadow_triage, "enabled", lambda: True)
+    monkeypatch.setattr(sprint_store, "ready", lambda: True)
+    monkeypatch.setattr(agent, "fetch_ticket_conversations",
+                        lambda tid: _conversation("I am out of the office"))
+    monkeypatch.setattr(shadow_triage, "_handle",
+                        lambda tid, reason, **k: calls.append(reason) or {})
+    shadow_triage.handle({"ticket_id": "1", "reason": "claude_ai",
+                          "refresh": True})
+    assert calls == ["claude_ai"]
 
 
 # ---------------------------------------------------------------------------

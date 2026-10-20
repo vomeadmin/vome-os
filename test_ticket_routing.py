@@ -119,12 +119,18 @@ def world(monkeypatch):
         filed, zoho, notes, decided = [], [], [], []
         siblings: list = []
         linked: list = []
+        live: dict = {}
         search_fails = False
 
     def linked(number, tid):
         if W.search_fails:
             raise RuntimeError("ClickUp 429")
         return W.linked
+
+    def live(task_id):
+        status = W.live.get(task_id) or next(
+            t["status"] for t in W.linked if t["id"] == task_id)
+        return {"status": status, "shipped": status in tr.SHIPPED}
 
     monkeypatch.setattr(sprint_thread, "_clickup_create",
                         lambda list_id, body: W.created.append(
@@ -146,6 +152,7 @@ def world(monkeypatch):
     monkeypatch.setattr(sprint_store, "by_ticket_numbers",
                         lambda n: W.siblings)
     monkeypatch.setattr(clickup_search, "linked_tasks", linked)
+    monkeypatch.setattr(tr, "_read_state", live)
     monkeypatch.setattr(zoho_actions, "set_in_progress",
                         lambda tid, team: W.zoho.append((tid, team)))
     monkeypatch.setattr(zoho_actions, "send_reply",
@@ -155,7 +162,7 @@ def world(monkeypatch):
     monkeypatch.delenv("AUTO_ROUTE_ENABLED", raising=False)
     W.created, W.comments, W.posts, W.alerts = [], [], [], []
     W.filed, W.zoho, W.notes, W.decided = [], [], [], []
-    W.siblings, W.linked, W.search_fails = [], [], False
+    W.siblings, W.linked, W.live, W.search_fails = [], [], {}, False
     return W
 
 
@@ -203,6 +210,26 @@ def test_a_task_already_linked_to_the_ticket_is_reused(world):
          "url": "https://cu/86pq"}]
     out = tr.route(_item(), _card(), {}, {}, 0)
     assert world.created == [] and out["task"]["id"] == "86pq"
+
+
+def test_a_task_closed_since_the_cached_search_is_not_joined(world):
+    """#9526: the list cache still said queued; the engineer had closed it."""
+    world.linked = [{"id": "86pq", "list": "Priority Queue",
+                     "status": "queued", "url": "https://cu/86pq"}]
+    world.live = {"86pq": "closed"}
+    tr.route(_item(), _card(), {}, {}, 0)
+    assert world.comments == [] and world.created[0][1]["assignees"]
+
+
+def test_nothing_is_joined_blind_when_the_task_cannot_be_read(
+        monkeypatch, world):
+    world.linked = [{"id": "86pq", "list": "Priority Queue",
+                     "status": "queued", "url": "https://cu/86pq"}]
+    monkeypatch.setattr(tr, "_read_state",
+                        lambda tid: {"status": "unreadable"})
+    out = tr.route(_item(), _card(), {}, {}, 0)
+    assert out["routed"] is False
+    assert world.comments == [] and world.created == []
 
 
 def test_nothing_is_filed_blind_when_clickup_cannot_be_searched(world):

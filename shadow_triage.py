@@ -361,11 +361,29 @@ def handle(message: dict) -> dict:
     # daily cap: he is looking at it right now.
     asked = bool(message.get("refresh"))
     try:
+        if message.get("reason") == "reply" and _auto_reply(ticket_id):
+            return {"status": "skipped", "reason": "auto-reply"}
         return _handle(ticket_id, message.get("reason") or "",
                        refresh=asked, ignore_cap=asked)
     except Exception as exc:
         print(f"[SHADOW] {ticket_id} failed: {type(exc).__name__}: {exc}")
         return {"status": "error", "error": str(exc)}
+
+
+def _auto_reply(ticket_id: str) -> bool:
+    """The newest customer message is an out-of-office or autoresponder.
+
+    agent.process_ticket_update already ignores those, but the webhook
+    queues this handler beside it. On #9526 (2026-10-20) Allie's
+    out-of-office, a few seconds after Sam's answer closed the ticket, was
+    triaged as a fresh message and routed to OnlyG again.
+    """
+    from agent import (_extract_reply_text, _is_client_reply,
+                       _looks_like_auto_reply, fetch_ticket_conversations)
+
+    is_reply, latest = _is_client_reply(
+        fetch_ticket_conversations(ticket_id), ticket_id)
+    return is_reply and _looks_like_auto_reply(_extract_reply_text(latest))
 
 
 def _handle(ticket_id: str, reason: str, force: bool = False,
