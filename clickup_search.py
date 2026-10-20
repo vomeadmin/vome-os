@@ -31,9 +31,9 @@ and an intention.
 
 THE LISTS
 ---------
-All five from the System Configuration doc, because a request arriving for
-the fifth time may be sitting in Declined, and that is information about
-priority rather than a new request.
+The five from the System Configuration doc plus Sam Accepted (Build Now),
+because a request arriving for the fifth time may be sitting in Declined,
+and that is information about priority rather than a new request.
 """
 
 from __future__ import annotations
@@ -53,6 +53,8 @@ CLICKUP_BASE = "https://api.clickup.com/api/v2"
 LISTS: dict[str, str] = {
     "Priority Queue": "901113386257",
     "Raw Intake": "901113386484",
+    # Requests Sam builds himself; searched so a second client +1s them.
+    "Sam Accepted (Build Now)": "901115573620",
     "Accepted Backlog": "901113389889",
     "Sleeping": "901113389897",
     "Declined": "901113389900",
