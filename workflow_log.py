@@ -70,6 +70,8 @@ SAM_CLICKUP = 3691763
 
 TYPES = ("bug", "idea", "improvement", "question")
 TAG_SLACK = "from slack"
+LOGGED_MARK = "clipboard"  # on the thread's first message once logged
+TAG_AUTO = "auto logged"   # filed by an agent after a failure, not a person
 
 _ASK = re.compile(r"\b(log|add|put|save)\s+(this|it|that)\b", re.I)
 _WHERE = re.compile(r"click\s*up|agent\s+workflows?|\bfor\s+(us|later)\b",
@@ -179,6 +181,7 @@ def _log(channel: str, ts: str, thread_ts: str, message: dict) -> dict:
         ]).strip())
         _record(ts, task_id, name)
         url = f"https://app.clickup.com/t/{task_id}"
+        _mark_logged(channel, thread_ts)
         _post(channel, thread_ts, ":white_check_mark: Added to the existing "
               f"task in Agent Workflows: <{url}|{name}>")
         return {"status": "ok", "task": task_id, "action": "commented"}
@@ -205,6 +208,7 @@ def _log(channel: str, ts: str, thread_ts: str, message: dict) -> dict:
         _tag(task_id, tag)
     _record(ts, task_id, name)
     url = task.get("url") or f"https://app.clickup.com/t/{task_id}"
+    _mark_logged(channel, thread_ts)
     _post(channel, thread_ts, ":white_check_mark: Logged on ClickUp in Agent "
           f"Workflows: <{url}|{name}>")
     return {"status": "ok", "task": task_id, "type": kind}
@@ -218,6 +222,68 @@ def _fallback(request: str) -> dict:
             "summary": "Logged from Slack. The summary could not be written; "
                        "the thread link has everything.",
             "details": "", "next_step": "Read the Slack thread."}
+
+
+# ---------------------------------------------------------------------------
+# Logged by the agents themselves
+# ---------------------------------------------------------------------------
+
+def log_issue(area: str, title: str, summary: str, details: str,
+              channel: str = "", thread_ts: str = "", next_step: str = "",
+              kind: str = "bug") -> str:
+    """A workflow went wrong: put it in Agent Workflows without anyone
+    asking, and return the task's link ("" if it could not be logged).
+
+    Sam, 2026-10-20: every time an agent fails to build something it must be
+    logged, so he and Claude can review what the workflow needs. One task per
+    Slack thread: a second failure in the same thread is a comment on the
+    first. Never raises; a failed log must not hide the original failure.
+    """
+    if not enabled():
+        return ""
+    try:
+        existing = (_existing_task(channel, thread_ts, "")
+                    if channel and thread_ts else None)
+        link = _permalink(channel, thread_ts) if channel and thread_ts else ""
+        if existing:
+            task_id, name = existing
+            _comment(task_id, "\n".join([
+                f"Happened again ({area}): {summary}", "", details]).strip())
+            if channel and thread_ts:
+                _mark_logged(channel, thread_ts)
+            return f"https://app.clickup.com/t/{task_id}"
+        kind = kind if kind in TYPES else "bug"
+        name = f"[{kind.capitalize()}] {title}"[:180]
+        task = _clickup("POST", f"/list/{LIST}/task", {
+            "name": name,
+            "markdown_description": "\n".join([
+                f"**Summary:** {summary}", "",
+                "**Details**", details, "",
+                f"**Next step:** {next_step or 'Review with Claude.'}", "",
+                "---",
+                f"Area: {area} · Logged automatically by the {area} workflow"
+                + (f" · [Slack thread]({link})" if link else ""),
+            ]),
+            "status": "to do",
+            "assignees": [SAM_CLICKUP],
+        })
+        task_id = str(task.get("id") or "")
+        for tag in (kind, TAG_AUTO):
+            _tag(task_id, tag)
+        if store.ensure_table(LEDGER):
+            store.execute(
+                f"INSERT INTO {LEDGER} (trigger_ts, channel, thread_ts,"
+                " logged_by, task_id, task_name) VALUES (:t, :c, :th,"
+                " 'agent', :id, :n) ON CONFLICT (trigger_ts) DO NOTHING",
+                {"t": f"auto:{channel}:{thread_ts}:{task_id}", "c": channel,
+                 "th": thread_ts, "id": task_id, "n": name},
+            )
+        if channel and thread_ts:
+            _mark_logged(channel, thread_ts)
+        return task.get("url") or f"https://app.clickup.com/t/{task_id}"
+    except Exception as exc:
+        print(f"[WORKFLOW LOG] could not log {area} issue: {exc}")
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +382,17 @@ def _permalink(channel: str, ts: str) -> str:
             channel=channel, message_ts=ts).get("permalink") or "")
     except Exception:
         return ""
+
+
+def _mark_logged(channel: str, thread_ts: str) -> None:
+    """A clipboard on the thread's first message: this thread is in Agent
+    Workflows, visible without opening it (Sam, 2026-10-19)."""
+    try:
+        _slack().reactions_add(channel=channel, timestamp=thread_ts,
+                               name=LOGGED_MARK)
+    except Exception as exc:
+        if "already_reacted" not in str(exc):
+            print(f"[WORKFLOW LOG] could not mark {thread_ts}: {exc}")
 
 
 def _post(channel: str, thread_ts: str, text: str) -> None:

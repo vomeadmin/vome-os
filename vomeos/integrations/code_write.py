@@ -249,14 +249,25 @@ class GitHubWriter(Connector):
         return os.environ.get("VOMEOS_GITHUB_WRITE_TOKEN", "")
 
     def configured(self, owner: str = "") -> bool:
+        """With an owner: can we write to that account. Without: any at all.
+
+        `Connector._call` asks the no-owner question before every request,
+        so it must count the alias tokens too. It did not, and with the one
+        GitHub token held under its alias (`vome-os-sentry-write-web`) and no
+        VOMEOS_GITHUB_OWNER, every GitHub write was refused before it was
+        sent: "could not resolve 'develop' to a commit" on the first web
+        agent fix (#bug-reports, 2026-10-20). Same rule as the reader.
+        """
         if owner:
             return bool(self.token_for(owner))
         if os.environ.get("VOMEOS_GITHUB_WRITE_TOKEN"):
             return True
-        return any(
-            name.startswith("VOMEOS_GITHUB_WRITE_TOKEN_") and value
-            for name, value in os.environ.items()
-        )
+        if any(name.startswith("VOMEOS_GITHUB_WRITE_TOKEN_") and value
+               for name, value in os.environ.items()):
+            return True
+        return any(os.environ.get(alias)
+                   for aliases in OWNER_TOKEN_ALIASES.values()
+                   for alias in aliases)
 
     def headers(self, owner: str = "") -> dict[str, str]:
         return {

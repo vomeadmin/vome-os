@@ -112,6 +112,11 @@ def rec(monkeypatch):
     monkeypatch.setattr(sentry_fix, "open_pull_request", open_pr)
     # Cards here carry no "read" list; looking again finds nothing new.
     monkeypatch.setattr(bug_reports, "_refresh_card", lambda ts: {})
+    # Failures go to Agent Workflows; record them instead of calling ClickUp.
+    r.logged = []
+    monkeypatch.setattr(bug_reports, "_log_failure",
+                        lambda ts, card, reason, what="build": r.logged.append(
+                            (what, reason)) or "https://app.clickup.com/t/AW1")
     monkeypatch.setattr(bug_reports, "_post",
                         lambda text, thread_ts="", channel="":
                         r.posts.append((channel or "bug", thread_ts, text))
@@ -489,6 +494,61 @@ def test_a_greenlit_build_that_fails_offers_route_and_never_routes(
     assert rec.saved["status"] == bug_reports.GREENLIT
 
 
+# ---------------------------------------------------------------------------
+# Every failure is logged in Agent Workflows (Sam, 2026-10-20)
+# ---------------------------------------------------------------------------
+
+def test_a_failed_greenlit_build_is_logged_and_linked(rec, monkeypatch):
+    _greenlight_waiting(monkeypatch)
+    rec.pr_opens = False
+    bug_reports._on_reply(TS, _sam("yes"))
+    assert rec.logged and "patch does not apply" in rec.logged[0][1]
+    assert ("Logged for review in Agent Workflows: "
+            "<https://app.clickup.com/t/AW1|task>") in rec.posts[-1][2]
+
+
+def test_a_partly_built_fix_logs_the_rest(rec, monkeypatch):
+    _greenlight_waiting(monkeypatch)
+    rec.diff["web"] = ""
+    bug_reports._on_reply(TS, _sam("yes"))
+    assert rec.logged[0][0] == "Part of the fix was not built"
+    assert "Agent Workflows" in rec.posts[-1][2]
+
+
+def test_the_agents_own_small_fix_failing_is_logged(rec):
+    rec.diff["core"] = ""
+    out = bug_reports.act(TS, _row(), BUG)
+    assert out["verdict"] == bug_reports.GREENLIGHT
+    assert rec.logged[0][0] == "The agent's own small fix failed"
+    assert "Agent Workflows" in rec.posts[-1][2]
+
+
+def test_a_hard_limit_is_a_refusal_not_a_failure(rec, monkeypatch):
+    _greenlight_waiting(monkeypatch, card={**GUEST,
+                                           "hard_limit": "migration"})
+    bug_reports._on_reply(TS, _sam("yes"))
+    assert rec.logged == []
+
+
+def test_a_crash_is_logged(monkeypatch):
+    logged, posts = [], []
+    monkeypatch.setattr(bug_reports.store, "ensure_table", lambda t: True)
+    monkeypatch.setattr(bug_reports, "_row", lambda ts: {})
+    monkeypatch.setattr(bug_reports, "analyse",
+                        lambda ts: (_ for _ in ()).throw(KeyError("x")))
+    monkeypatch.setattr(bug_reports, "_save", lambda ts, **f: None)
+    monkeypatch.setattr(bug_reports, "_post",
+                        lambda text, thread_ts="", channel="":
+                        posts.append(text))
+    monkeypatch.setattr(bug_reports, "_log_failure",
+                        lambda ts, card, reason, what="":
+                        logged.append(what) or "https://app.clickup.com/t/X")
+    out = bug_reports.handle({"ts": TS})
+    assert out["status"] == "error"
+    assert logged == ["The bug report workflow crashed"]
+    assert "Agent Workflows" in posts[-1]
+
+
 def test_part_built_says_what_is_left(rec, monkeypatch):
     _greenlight_waiting(monkeypatch)
     rec.diff["web"] = ""
@@ -734,6 +794,159 @@ def test_same_reply_twice_runs_once(rec, monkeypatch):
     out = bug_reports._on_reply(TS, {"ts": "2.0", "text": "close",
                                      "user": bug_reports.SAM_SLACK})
     assert out["reason"] == "reply already handled"
+
+
+# ---------------------------------------------------------------------------
+# The icon on each report (Sam, 2026-10-19)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("status,icon", [
+    (bug_reports.CHECKING, "eyes"),
+    (bug_reports.GREENLIGHT, "hourglass_flowing_sand"),
+    (bug_reports.NEEDS_INFO, "hourglass_flowing_sand"),
+    (bug_reports.ROUTED, "white_check_mark"),
+    (bug_reports.FIXING, "white_check_mark"),
+    (bug_reports.CLOSED, "white_check_mark"),
+    (bug_reports.ERROR, "warning"),
+])
+def test_saving_a_status_sets_the_reports_icon(monkeypatch, status, icon):
+    marked = []
+    monkeypatch.setattr(bug_reports, "_mark",
+                        lambda ts, state: marked.append(
+                            bug_reports.MARKS[state]))
+    monkeypatch.setattr(bug_reports.store, "ensure_table", lambda t: False)
+    bug_reports._save(TS, status=status)
+    assert marked == [icon]
+
+
+def test_saving_without_a_status_leaves_the_icon(monkeypatch):
+    monkeypatch.setattr(bug_reports, "_mark",
+                        lambda *a: pytest.fail("should not mark"))
+    monkeypatch.setattr(bug_reports.store, "ensure_table", lambda t: False)
+    bug_reports._save(TS, last_reply_ts="2.0")
+
+
+def test_marking_swaps_only_the_bots_own_icons(monkeypatch):
+    calls = []
+
+    class Client:
+        def reactions_remove(self, **kw):
+            calls.append(("remove", kw["name"]))
+            if kw["name"] != "eyes":
+                raise RuntimeError("no_reaction")
+
+        def reactions_add(self, **kw):
+            calls.append(("add", kw["name"]))
+
+    monkeypatch.setattr(bug_reports, "_slack", Client)
+    bug_reports._mark(TS, "done")
+    assert ("add", "white_check_mark") in calls
+    removed = {name for verb, name in calls if verb == "remove"}
+    assert removed == set(bug_reports.MARKS.values()) - {"white_check_mark"}
+
+
+def test_a_new_report_gets_eyes_straight_away(monkeypatch):
+    import vomeos.worker
+
+    marked = []
+    monkeypatch.setattr(bug_reports, "_post", lambda *a, **k: "1")
+    monkeypatch.setattr(bug_reports, "_mark",
+                        lambda ts, state: marked.append((ts, state)))
+    monkeypatch.setattr(vomeos.worker, "enqueue_event", lambda *a, **k: None)
+    bug_reports.handle_message({"ts": TS, "text": "a bug", "user": "U1"})
+    assert marked == [(TS, "checking")]
+
+
+# ---------------------------------------------------------------------------
+# The reporter hears when the fix merges and when it is live
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def progress(monkeypatch):
+    import ticket_fix
+
+    p = type("P", (), {})()
+    p.rows, p.states, p.live, p.posts, p.saved, p.offered = [], {}, False, \
+        [], [], []
+    monkeypatch.setattr(bug_reports.store, "ensure_table", lambda t: True)
+    monkeypatch.setattr(bug_reports.store, "query",
+                        lambda sql, params=None, **k: p.rows)
+    monkeypatch.setattr(ticket_fix, "_pr_state", lambda url: p.states[url])
+    monkeypatch.setattr(bug_reports, "_is_live", lambda task: p.live)
+    monkeypatch.setattr(bug_reports, "_reporter_mention",
+                        lambda ts: "<@U01B6D235N1> ")
+    monkeypatch.setattr(bug_reports, "_post",
+                        lambda text, thread_ts="", channel="":
+                        p.posts.append((thread_ts, text)))
+    monkeypatch.setattr(bug_reports, "_save",
+                        lambda ts, **f: p.saved.append((ts, f)))
+    monkeypatch.setattr(bug_reports, "_offer_route",
+                        lambda ts, card, reason, dry_run=False:
+                        p.offered.append((ts, reason)))
+    return p
+
+
+def _fixing(pr_url="https://pr/core", status=bug_reports.FIXING):
+    return {"ts": TS, "status": status, "pr_url": pr_url,
+            "fix_task": "F1", "card": "{}"}
+
+
+def test_merged_fix_tells_the_reporter_to_test(progress):
+    progress.rows = [_fixing()]
+    progress.states = {"https://pr/core": ("merged", "core", "abc1234")}
+    out = bug_reports.notify_progress()
+    assert out["told"] == [f"{TS} merged"]
+    thread, text = progress.posts[0]
+    assert thread == TS
+    assert text.startswith("<@U01B6D235N1> Merged into `development` "
+                           "(`core@abc1234`). Ready to test there")
+    assert progress.saved == [(TS, {"status": bug_reports.MERGED})]
+
+
+def test_an_open_pr_says_nothing_yet(progress):
+    progress.rows = [_fixing()]
+    progress.states = {"https://pr/core": ("open", "core", "")}
+    bug_reports.notify_progress()
+    assert progress.posts == [] and progress.saved == []
+
+
+def test_multi_repo_waits_for_every_pr(progress):
+    progress.rows = [_fixing("https://pr/core https://pr/web")]
+    progress.states = {"https://pr/core": ("merged", "core", "abc"),
+                       "https://pr/web": ("open", "web", "")}
+    bug_reports.notify_progress()
+    assert progress.posts == []
+    progress.states["https://pr/web"] = ("merged", "web", "def")
+    bug_reports.notify_progress()
+    assert "`core@abc`, `web@def`" in progress.posts[0][1]
+
+
+def test_a_pr_closed_unmerged_goes_back_to_sam(progress):
+    progress.rows = [_fixing()]
+    progress.states = {"https://pr/core": ("closed", "core", "")}
+    bug_reports.notify_progress()
+    assert progress.offered and "closed without merging" in \
+        progress.offered[0][1]
+    assert progress.posts == []
+
+
+def test_live_fix_tells_the_thread_once(progress):
+    progress.rows = [_fixing(status=bug_reports.MERGED)]
+    progress.live = False
+    bug_reports.notify_progress()
+    assert progress.posts == []
+    progress.live = True
+    bug_reports.notify_progress()
+    assert progress.posts == [(TS, "<@U01B6D235N1> Live in production now. "
+                                   ":rocket:")]
+    assert progress.saved == [(TS, {"status": bug_reports.LIVE})]
+
+
+def test_merged_and_live_have_their_own_icons():
+    assert bug_reports.MARKS[bug_reports.STATUS_MARK[bug_reports.MERGED]] \
+        == "test_tube"
+    assert bug_reports.MARKS[bug_reports.STATUS_MARK[bug_reports.LIVE]] \
+        == "rocket"
 
 
 def test_linked_task_id_is_read_from_the_report():

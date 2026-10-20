@@ -164,7 +164,7 @@ def _register_workflow_log() -> None:
 def _register_bug_reports() -> None:
     """#bug-reports: one report, or one reply in its thread. Idempotent on
     the report's Slack ts and the last reply handled."""
-    from bug_reports import HANDLER_KEY, handle, run_rollup
+    from bug_reports import HANDLER_KEY, handle, run_followups
 
     register_event_handler(
         HANDLER_KEY,
@@ -174,18 +174,22 @@ def _register_bug_reports() -> None:
         description="Check a #bug-reports report and act on it",
     )
 
-    # A greenlit fix that spans repos has one PR per repo. Once every one
-    # has merged, its Agent Fixes task gets all the commits in Fix Commit and
-    # moves to on dev, the same 15 minutes as the release watcher. Safe to
-    # rerun: a task with Fix Commit already set is skipped.
+    # Every 15 minutes, the same as the release watcher:
+    #   * a greenlit fix spanning repos gets every commit in Fix Commit and
+    #     moves to on dev once all its PRs merge (a task with Fix Commit set
+    #     is skipped, so reruns are safe);
+    #   * each report's thread hears when its fix merges into the dev branch
+    #     (ready to test) and when it is live (the status moves on after
+    #     each post, so it is said once).
     register_job(
         "engineering.bug_report_rollup",
-        run_rollup,
+        run_followups,
         cron="*/15 * * * *",
         queue=QUEUE,
         claim=CLAIM_NONE,
         time_limit=300,
-        description="Move multi-repo bug report fixes to on dev once merged",
+        description="Bug report fixes: multi-repo roll-up, merged and live "
+                    "updates in the report's thread",
     )
 
 

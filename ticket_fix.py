@@ -609,7 +609,20 @@ def promote_merged(tasks: list[dict]) -> list[str]:
         # The sprint's one line moves on to "waiting on production".
         _sprint_note(lambda: sprint_store.fix_progress(
             pr_url, f"merged into dev as {value}"), changed)
+        # A #feature-requests build tells its thread it can be tested.
+        _desk_note(lambda d: d.pr_merged(pr_url, value), changed)
     return changed
+
+
+def _desk_note(update, changed: list[str]) -> None:
+    """Tell the #feature-requests thread a PR came from, if one did. A
+    failure here never stops the promotion it reports on."""
+    try:
+        import feature_desk
+
+        changed += update(feature_desk)
+    except Exception as exc:
+        changed.append(f"feature desk not told: {exc}")
 
 
 def _sprint_note(update, changed: list[str]) -> None:
@@ -646,6 +659,7 @@ def _abandon(task: dict, pr_url: str, tasks: list[dict]) -> list[str]:
         except Exception as exc:
             out.append(f"{target['id']} not closed: {exc}")
     out.append(f"{task['id']} PR closed unmerged: {pr_url}")
+    _desk_note(lambda d: d.pr_closed(pr_url), out)
     return out
 
 

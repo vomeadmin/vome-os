@@ -116,6 +116,10 @@ FINAL = (PR_OPEN, LOGGED, DECLINED, EXISTS, FRONTEND)
 
 # Post states.
 ANALYSING, OPEN, CLOSED, ERROR = "analysing", "open", "closed", "error"
+# Every item landed and the outcome is on ClickUp: the post gets a check
+# mark so the channel shows what is handled at a glance (Sam, 2026-10-19).
+SETTLED = "settled"
+DONE_EMOJI = "white_check_mark"
 
 VERDICT_LABEL = {
     "agent_build": "Agent builds it",
@@ -235,6 +239,7 @@ def _on_reply(ts: str, reply: dict) -> dict:
     if sam:
         if text.lower().rstrip(".! ") == "close":
             _save(ts, status=CLOSED)
+            _react(ts)
             _post("Closed. Nothing more will be built or filed from this "
                   "thread.", thread_ts=ts)
             return {"status": "ok", "action": "closed"}
@@ -379,7 +384,9 @@ def analyse(ts: str, direction: str = "", approved: list | None = None,
     if not dry_run:
         _save(ts, requester=post["requester"], task_id=task_id,
               card=json.dumps(card), items=json.dumps(items),
-              rounds=rounds, status=OPEN)
+              rounds=rounds,
+              # Chat after the check mark must not earn a second one.
+              status=SETTLED if row.get("status") == SETTLED else OPEN)
     row = {**row, "ts": ts, "task_id": task_id,
            "requester": post["requester"],
            "requester_id": post["requester_id"], "rounds": rounds}
@@ -617,6 +624,7 @@ def _build(ts: str, row: dict, items: dict, n: str,
         item["recorded"] = True
     _save(ts, items=json.dumps(items))
     build = item.get("build") or {}
+    # The PR line first, then the check mark if this was the last open item.
     _post("\n".join(line for line in (
         f"*{n}. Pull request open:* <{pr['url']}|into "
         f"{repo.alias} development>. Sam reviews and merges.",
@@ -626,6 +634,7 @@ def _build(ts: str, row: dict, items: dict, n: str,
         if proposal.get("risks") else "",
         f"ClickUp: <{task_url}|Agent Fixes task>" if task_url else "",
     ) if line), thread_ts=ts)
+    _record(ts, row, items)
     return {"n": n, "built": True, "pr_url": pr["url"]}
 
 
@@ -870,17 +879,57 @@ def _record(ts: str, row: dict, items: dict, summary: str = "") -> None:
     written while any item is still open: until then Slack is the
     conversation and the outcome can still change (Sam, 2026-10-19)."""
     task_id = row.get("task_id") or ""
-    if not task_id or not items or any(
+    if not items or any(
             i.get("state") not in FINAL for i in items.values()):
         return
     fresh = {n: i for n, i in items.items() if not i.get("recorded")}
-    if not fresh:
+    if task_id and fresh:
+        _comment(task_id, _comment_text(summary, fresh, ts))
+        _set_source(task_id)
+        for item in fresh.values():
+            item["recorded"] = True
+        _save(ts, items=json.dumps(items))
+    _settle(ts, row, items)
+
+
+def _settle(ts: str, row: dict, items: dict) -> None:
+    """Once per thread: a check mark on the post and one closing line with
+    the ClickUp link. Slack is the conversation, ClickUp the record."""
+    if (_row(ts).get("status") or "") in (SETTLED, CLOSED):
         return
-    _comment(task_id, _comment_text(summary, fresh, ts))
-    _set_source(task_id)
-    for item in fresh.values():
-        item["recorded"] = True
-    _save(ts, items=json.dumps(items))
+    _save(ts, status=SETTLED)
+    _react(ts)
+    _post(_settled_line(row, items), thread_ts=ts)
+
+
+_LANDED = {PR_OPEN: "PR open for Sam to merge", LOGGED: "logged",
+           DECLINED: "not building", EXISTS: "already there",
+           FRONTEND: "frontend only"}
+
+
+def _settled_line(row: dict, items: dict) -> str:
+    landed = ", ".join(
+        f"{n} {_LANDED.get(str(i.get('state')), str(i.get('state')))}"
+        for n, i in sorted(items.items(), key=lambda kv: int(kv[0])))
+    links = []
+    if row.get("task_id"):
+        links.append(f"<https://app.clickup.com/t/{row['task_id']}|task>")
+    links += [f"<https://app.clickup.com/t/{i['clickup']}|Raw Intake>"
+              for i in items.values() if i.get("clickup")]
+    links += [f"<https://app.clickup.com/t/{i['fix_task']}|Agent Fixes>"
+              for i in items.values() if i.get("fix_task")]
+    where = (f"Recorded on ClickUp: {', '.join(links)}." if links
+             else "Nothing needed filing on ClickUp.")
+    return f":{DONE_EMOJI}: Handled: {landed}. {where}"
+
+
+def _react(ts: str) -> None:
+    try:
+        _slack().reactions_add(channel=CHANNEL, timestamp=ts,
+                               name=DONE_EMOJI)
+    except Exception as exc:
+        if "already_reacted" not in str(exc):
+            print(f"[FEATURE DESK] check mark not added on {ts}: {exc}")
 
 
 def _create_task(item: dict, ts: str, row: dict) -> str:
@@ -1059,6 +1108,93 @@ def _previous_text(items: dict) -> str:
                        in FINAL else "")
                     + (f", options {', '.join(keys)}" if keys else ""))
     return "\n".join(rows)
+
+
+# ---------------------------------------------------------------------------
+# After the PR: the release watcher reports back into the thread
+# ---------------------------------------------------------------------------
+#
+# Sam, 2026-10-19: once a desk PR merges, tell the requester in the same
+# thread so they can test on development. The release watcher already finds
+# merged agent PRs (ticket_fix.promote_merged) and proves fixes live, so it
+# calls these. Each says one thing once, per item.
+
+def _items_with(value: str) -> list[tuple[str, dict, dict]]:
+    """(ts, row, items) for every post whose items mention `value` (a PR
+    url or an Agent Fixes task id)."""
+    if not value or not store.ensure_table(LEDGER):
+        return []
+    rows = store.query(f"SELECT * FROM {LEDGER} WHERE items LIKE :v",
+                       {"v": f"%{value}%"})
+    return [(r["ts"], dict(r), _items(dict(r))) for r in rows or []]
+
+
+def _requester_tag(ts: str) -> str:
+    try:
+        who = _read_post(ts).get("requester_id") or ""
+    except Exception:
+        who = ""
+    return f"<@{who}> " if who else ""
+
+
+def pr_merged(pr_url: str, commit: str) -> list[str]:
+    """The PR merged into the dev branch: the requester can test it."""
+    out = []
+    for ts, row, items in _items_with(pr_url):
+        for n, item in items.items():
+            if item.get("pr_url") != pr_url or item.get("merged"):
+                continue
+            item["merged"] = commit
+            _save(ts, items=json.dumps(items))
+            _post(f":test_tube: *{n}. Merged into development* ({commit}). "
+                  f"{_requester_tag(ts)}it's ready to test on dev. I'll post "
+                  "here again when it's live in production.", thread_ts=ts)
+            out.append(f"feature desk {ts} item {n} merged")
+    return out
+
+
+def fix_live(fix_task_id: str) -> list[str]:
+    """The release watcher proved the merged commit live in production."""
+    out = []
+    for ts, row, items in _items_with(fix_task_id):
+        for n, item in items.items():
+            if item.get("fix_task") != fix_task_id or item.get("live"):
+                continue
+            item["live"] = True
+            _save(ts, items=json.dumps(items))
+            _post(f":rocket: *{n}. Live in production.* "
+                  f"{_requester_tag(ts)}it's out for everyone now.",
+                  thread_ts=ts)
+            out.append(f"feature desk {ts} item {n} live")
+    return out
+
+
+def pr_closed(pr_url: str) -> list[str]:
+    """The PR was closed without merging. The item is not shipping as
+    built, so it goes back to Sam and the thread loses its check mark."""
+    out = []
+    for ts, row, items in _items_with(pr_url):
+        for n, item in items.items():
+            if item.get("pr_url") != pr_url:
+                continue
+            item.update(state=HELD, closed_pr=pr_url, pr_url="",
+                        recorded=False)
+            _save(ts, items=json.dumps(items), status=OPEN)
+            _unreact(ts)
+            _post(f"*{n}*: the pull request was closed without merging, so "
+                  f"this isn't shipping as built. <@{SAM_SLACK}> `go {n}` "
+                  f"builds it again, or `log {n}`.", thread_ts=ts)
+            out.append(f"feature desk {ts} item {n} PR closed")
+    return out
+
+
+def _unreact(ts: str) -> None:
+    try:
+        _slack().reactions_remove(channel=CHANNEL, timestamp=ts,
+                                  name=DONE_EMOJI)
+    except Exception as exc:
+        if "no_reaction" not in str(exc):
+            print(f"[FEATURE DESK] check mark not removed on {ts}: {exc}")
 
 
 # ---------------------------------------------------------------------------

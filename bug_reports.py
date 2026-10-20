@@ -130,10 +130,13 @@ _LEFT_OUT = re.compile(r"Left out:\s*(.+)", re.I | re.S)
 
 # What a greenlit fix author reads: each edited file whole up to
 # WHOLE_FILE_CHARS (past that, GREENLIT_WINDOW lines either side of each
-# spot), then reference files, all within SOURCE_BUDGET per repo.
-WHOLE_FILE_CHARS = 60_000
-GREENLIT_WINDOW = 150
-SOURCE_BUDGET = 120_000
+# spot), then reference files, all within SOURCE_BUDGET per repo. Large on
+# purpose: at 60,000 the cancellation policy fix (2026-10-20) got a 300-line
+# window of MassUpdateScheduleSettings.js that missed its state and payload
+# code. A greenlit build is rare, so whole files are worth the tokens.
+WHOLE_FILE_CHARS = 300_000
+GREENLIT_WINDOW = 300
+SOURCE_BUDGET = 450_000
 MAX_REFERENCES = 6
 _MULTI_PR = re.compile(r"Bug report PR:\s*(\S+)")
 
@@ -167,6 +170,26 @@ ROUTED, FIXING, CLOSED, ERROR = "routed", "fixing", "closed", "error"
 # could not finish; from here only Sam routes it.
 GREENLIGHT, GREENLIT = "greenlight", "greenlit"
 WAITING = (NEEDS_INFO, DECISION)
+
+# One icon on each report, so #bug-reports reads as a list of what is
+# handled without opening threads (Sam, 2026-10-19). Set wherever a status
+# is saved, so every path keeps it current.
+# After an agent fix: MERGED once every PR is in the dev branch (the reporter
+# is told in the thread, to test), LIVE once the release watcher proves it
+# in production.
+MERGED, LIVE = "merged", "live"
+
+MARKS = {"checking": "eyes", "waiting": "hourglass_flowing_sand",
+         "done": "white_check_mark", "merged": "test_tube",
+         "live": "rocket", "error": "warning"}
+STATUS_MARK = {
+    CHECKING: "checking",
+    NEEDS_INFO: "waiting", DECISION: "waiting",
+    GREENLIGHT: "waiting", GREENLIT: "waiting",
+    ROUTED: "done", FIXING: "done", CLOSED: "done",
+    MERGED: "merged", LIVE: "live",
+    ERROR: "error",
+}
 
 LEDGER = "vomeos_bug_reports"
 store.register_table(
@@ -219,6 +242,7 @@ def handle_message(event: dict) -> None:
         if not thread_ts or thread_ts == ts:
             _post("Looking into this. I'll check it against the code and "
                   "update this thread.", thread_ts=ts)
+            _mark(ts, "checking")
             enqueue_event(HANDLER_KEY, {"ts": ts}, queue=QUEUE)
         else:
             enqueue_event(HANDLER_KEY, {
@@ -252,8 +276,12 @@ def handle(message: dict) -> dict:
     except Exception as exc:
         print(f"[BUG REPORTS] {ts} failed: {type(exc).__name__}: {exc}")
         _save(ts, status=ERROR)
+        reason = f"{type(exc).__name__}: {str(exc)[:300]}"
+        url = _log_failure(ts, {}, reason, what="The bug report workflow "
+                                                "crashed")
         _post(f"I couldn't finish checking this ({type(exc).__name__}). "
-              f"<@{SAM_SLACK}> it needs a look.", thread_ts=ts)
+              f"<@{SAM_SLACK}> it needs a look." + _logged_line(url),
+              thread_ts=ts)
         return {"status": "error", "error": str(exc)}
 
 
@@ -314,6 +342,10 @@ def analyse(ts: str, dry_run: bool = False, greenlit: bool = False) -> dict:
     rounds = int(row.get("rounds") or 0) + 1
     task_id = report["task_id"]
     card = _analyst_card(ts, report, run_agent)
+    if card.get("failed") and not dry_run:
+        url = _log_failure(ts, card, card["failed"],
+                           what="The bug report analysis did not finish")
+        card["question"] = card["question"] + _logged_line(url)
     if not dry_run:
         _save(ts, reporter=report["reporter"], task_id=task_id,
               verdict=str(card.get("verdict") or ""),
@@ -343,7 +375,8 @@ def _analyst_card(ts: str, report: dict, run_agent) -> dict:
             "headline": "The analysis did not finish",
             "analysis": f"The analyst returned nothing usable "
                         f"({result.why()}).",
-            "question": "Can you take a look at this one?"}
+            "question": "Can you take a look at this one?",
+            "failed": result.why()}
 
 
 def _refresh_card(ts: str) -> dict:
@@ -527,7 +560,7 @@ def _is_yes(text: str) -> bool:
 
 
 def _ask_greenlight(ts: str, row: dict, card: dict, why: str,
-                    dry_run: bool = False) -> dict:
+                    dry_run: bool = False, logged: str = "") -> dict:
     """@-mention Sam: the problem, the fix, the risk, and how to answer.
     The reporter's task stays with Sam until he decides."""
     code = card.get("code_check") or {}
@@ -550,6 +583,8 @@ def _ask_greenlight(ts: str, row: dict, card: dict, why: str,
     ]
     if url:
         lines.append(f"Details on ClickUp: <{url}|task>")
+    if logged:
+        lines.append(_logged_line(logged).strip())
     text = "\n".join(lines)
     if dry_run:
         return _dry(ts, card, [
@@ -581,15 +616,54 @@ def _auto_route(ts: str, row: dict, card: dict, reason: str,
 
 
 def _offer_route(ts: str, card: dict, reason: str,
-                 dry_run: bool = False) -> dict:
+                 dry_run: bool = False, log: bool = False) -> dict:
+    """`log`: this is a failure, not a refusal by design, so it also goes
+    to Agent Workflows for review (a hard limit is not logged)."""
     text = (f"<@{SAM_SLACK}> I can't build this: {reason.rstrip('. ')}. "
             f"Say `route {_team(card)}` to send it to an engineer, or "
             "`close`.")
     if dry_run:
-        return _dry(ts, card, [f"thread: {text}"])
+        return _dry(ts, card, [f"thread: {text}"]
+                    + (["log the failure in Agent Workflows"] if log else []))
+    if log:
+        text += _logged_line(_log_failure(ts, card, reason))
     _post(text, thread_ts=ts)
     _save(ts, status=GREENLIT)
     return {"status": "ok", "action": "route offered", "reason": reason}
+
+
+def _log_failure(ts: str, card: dict, reason: str,
+                 what: str = "The greenlit build failed") -> str:
+    """File a bug report workflow failure in Agent Workflows (Sam,
+    2026-10-20: every failure is reviewed). Returns the task link or ""."""
+    import workflow_log
+
+    code = card.get("code_check") or {}
+    repos = ", ".join(sorted(_spots(card, greenlit=True))) or "unknown"
+    return workflow_log.log_issue(
+        area="bug reports",
+        title=f"{what}: {card.get('headline') or 'a #bug-reports report'}"[
+            :150],
+        summary=f"{what} on a #bug-reports report. Reason: "
+                f"{reason.rstrip('. ')}.",
+        details="\n".join([
+            f"- Reason: {reason}",
+            f"- Fix it was building: {code.get('fix') or '(none)'}",
+            f"- Repos: {repos}",
+            f"- Where: `{code.get('where') or ''}`",
+            f"- Files: {', '.join(code.get('files') or []) or '(none)'}",
+            f"- References: "
+            f"{', '.join(code.get('references') or []) or '(none)'}",
+        ]),
+        channel=CHANNEL, thread_ts=ts,
+        next_step="Work out with Claude what the workflow needs, fix it, "
+                  "then say yes again in the thread.",
+    )
+
+
+def _logged_line(url: str) -> str:
+    return (f"\nLogged for review in Agent Workflows: <{url}|task>"
+            if url else "")
 
 
 def _build(ts: str, row: dict, card: dict, greenlit: bool,
@@ -605,7 +679,7 @@ def _build(ts: str, row: dict, card: dict, greenlit: bool,
     spots = _spots(card, greenlit)
     if not spots:
         return _offer_route(ts, card, "there is no exact location in the "
-                            "code to change", dry_run)
+                            "code to change", dry_run, log=greenlit)
 
     import sentry_fix
 
@@ -650,9 +724,12 @@ def _build(ts: str, row: dict, card: dict, greenlit: bool,
         if not greenlit:
             # The small fix the agent tried alone did not work out. Sam can
             # still say yes to the whole fix, across every file it names.
+            url = _log_failure(ts, card, reason,
+                               what="The agent's own small fix failed")
             return _ask_greenlight(ts, row, card, f"I tried the small "
-                                   f"version and it did not work ({reason})")
-        return _offer_route(ts, card, reason)
+                                   f"version and it did not work ({reason})",
+                                   logged=url)
+        return _offer_route(ts, card, reason, log=True)
 
     fix_task = _file_fix_task(card, opened, ts)
     task_url = f"https://app.clickup.com/t/{fix_task}" if fix_task else ""
@@ -675,7 +752,10 @@ def _build(ts: str, row: dict, card: dict, greenlit: bool,
     if failed:
         rest = "; ".join(f"{a}: {r.rstrip('. ')}" for a, r in failed)
         lines.append(f"Not built: {rest}. Say `route {_team(card)}` to send "
-                     "the rest to an engineer.")
+                     "the rest to an engineer."
+                     + _logged_line(_log_failure(
+                         ts, card, rest, what="Part of the fix was not "
+                                              "built")))
     _post("\n".join(lines), thread_ts=ts)
     return {"status": "ok", "verdict": "agent_fix", "pr_urls": urls,
             "not_built": [a for a, _r in failed]}
@@ -892,6 +972,93 @@ def _file_fix_task(card: dict, prs: list, ts: str) -> str:
             except Exception as exc:
                 print(f"[BUG REPORTS] child for {url} not filed: {exc}")
     return parent
+
+
+def run_followups() -> dict:
+    """Every 15 minutes: roll up multi-repo fixes, then tell each report's
+    thread when its fix merges and when it goes live."""
+    return {"rollup": run_rollup(), "threads": notify_progress()}
+
+
+def notify_progress() -> dict:
+    """Keep the reporter in their own thread after an agent fix (Sam,
+    2026-10-19: Ron should hear when it is merged and ready to test).
+
+    FIXING  every PR merged into the dev branch -> "merged into development,
+            ready to test", MERGED (test tube)
+            a PR closed unmerged -> back to Sam with `route` offered
+    MERGED  its Agent Fixes task's Release Check is Live -> "live in
+            production", LIVE (rocket)
+
+    Never moves a task: promote_merged, run_rollup and the release watcher
+    own that. This only reads their results and tells the thread.
+    """
+    import ticket_fix as tf
+
+    if not store.ensure_table(LEDGER):
+        return {"skipped": "no database"}
+    told = []
+    rows = store.query(
+        f"SELECT * FROM {LEDGER} WHERE status IN (:f, :m)"
+        " AND COALESCE(pr_url, '') <> ''",
+        {"f": FIXING, "m": MERGED},
+    )
+    for row in rows:
+        ts = row["ts"]
+        try:
+            if row["status"] == FIXING:
+                urls = str(row["pr_url"]).split()
+                states = [(url, *tf._pr_state(url)) for url in urls]
+                closed = [u for u, state, _a, _s in states
+                          if state == "closed"]
+                if closed:
+                    _offer_route(ts, _card(row), "the pull request was "
+                                 f"closed without merging ({closed[0]})")
+                    told.append(f"{ts} closed unmerged")
+                elif all(state == "merged" for _u, state, _a, _s in states):
+                    commits = ", ".join(f"`{a}@{sha}`" if sha else f"`{a}`"
+                                        for _u, _st, a, sha in states)
+                    who = _reporter_mention(ts)
+                    _post(f"{who}Merged into `development` ({commits}). "
+                          "Ready to test there; I'll post again here when "
+                          "it's live in production.", thread_ts=ts)
+                    _save(ts, status=MERGED)
+                    told.append(f"{ts} merged")
+            elif row["status"] == MERGED and _is_live(row.get("fix_task")):
+                who = _reporter_mention(ts)
+                _post(f"{who}Live in production now. :rocket:", thread_ts=ts)
+                _save(ts, status=LIVE)
+                told.append(f"{ts} live")
+        except Exception as exc:
+            told.append(f"{ts} failed: {exc}")
+    return {"told": told}
+
+
+def _is_live(fix_task: str) -> bool:
+    """The release watcher proved every commit on the task is in production
+    (Release Check = Live)."""
+    if not fix_task:
+        return False
+    import release_watcher as rw
+
+    try:
+        task = _clickup("GET", f"/task/{fix_task}")
+    except Exception as exc:
+        print(f"[BUG REPORTS] could not read {fix_task}: {exc}")
+        return False
+    return rw._release_check_value(task) == "live"
+
+
+def _reporter_mention(ts: str) -> str:
+    """A mention of whoever posted the report, or "" if Slack will not
+    say."""
+    try:
+        replies = _slack().conversations_replies(
+            channel=CHANNEL, ts=ts, limit=1).get("messages") or []
+        user = str((replies[0] if replies else {}).get("user") or "")
+        return f"<@{user}> " if user else ""
+    except Exception:
+        return ""
 
 
 def run_rollup() -> dict:
@@ -1218,6 +1385,8 @@ def _card(row: dict) -> dict:
 
 
 def _save(ts: str, **fields) -> None:
+    if fields.get("status") in STATUS_MARK:
+        _mark(ts, STATUS_MARK[fields["status"]])
     if not store.ensure_table(LEDGER):
         return
     cols = ["ts"] + list(fields)
@@ -1229,6 +1398,27 @@ def _save(ts: str, **fields) -> None:
         f"SET {updates + ', ' if updates else ''}updated_at = NOW()",
         params,
     )
+
+
+def _mark(ts: str, state: str) -> None:
+    """Show where the report stands on the report itself, swapping the
+    bot's previous icon. Only the bot's own reactions are ever removed."""
+    name = MARKS.get(state)
+    if not name:
+        return
+    client = _slack()
+    for other in MARKS.values():
+        if other == name:
+            continue
+        try:
+            client.reactions_remove(channel=CHANNEL, timestamp=ts, name=other)
+        except Exception:
+            pass  # it was not there
+    try:
+        client.reactions_add(channel=CHANNEL, timestamp=ts, name=name)
+    except Exception as exc:
+        if "already_reacted" not in str(exc):
+            print(f"[BUG REPORTS] could not mark {ts} {name}: {exc}")
 
 
 def _dry(ts: str, card: dict, actions: list[str]) -> dict:
@@ -1329,6 +1519,7 @@ def backfill(dry_run: bool, limit: int = 20) -> list[dict]:
                 continue
             _post("Looking into this. I'll check it against the code and "
                   "update this thread.", thread_ts=ts)
+            _mark(ts, "checking")
         out.append(analyse(ts, dry_run=dry_run))
     return out
 
