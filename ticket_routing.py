@@ -78,6 +78,18 @@ SHIPPED = frozenset({"on prod", "closed", "done", "complete"})
 FOOTER = ("_Filed automatically by support triage. The client has not been "
           "told yet; Sam replies from the support sprint._")
 
+# Priority Queue fields a hand-filed task carries (System Configuration).
+# #9596 (2026-10-20) was filed with only the Zoho link and Source, and no
+# priority for an important client.
+FIELD_TYPE = "e0e439f5-397d-432d-addd-e90fbf50cd30"
+TYPE_BUG = "d9c82e67-c46b-48d1-95f7-9c1f5b2fc2df"
+FIELD_PLATFORM = "5f1ff65b-18fc-49db-89aa-2c1f355ec1e7"
+PLATFORMS = {"web": "946c8214-6a65-4e63-a437-d98415dc1439",
+             "mobile": "070470c3-c248-4d64-8ceb-8c95df82506b"}
+FIELD_COMBINED_ARR = "29c41859-f24b-4143-9af4-a34202205641"
+
+TITLE_LENGTH = 90
+
 
 def enabled() -> bool:
     return os.environ.get("AUTO_ROUTE_ENABLED", "true").strip().lower() \
@@ -197,6 +209,32 @@ def _existing_task(item: dict, incident: dict) -> tuple[dict, str]:
     return {}, ""
 
 
+def _title(text: str) -> str:
+    """At most TITLE_LENGTH characters, cut between words (#9596's title
+    ended "every other profile opens, an")."""
+    text = " ".join((text or "").split())
+    if len(text) <= TITLE_LENGTH:
+        return text
+    cut = text[:TITLE_LENGTH].rsplit(" ", 1)[0].rstrip(" ,;:.")
+    return cut + "..."
+
+
+def _fields(item: dict, card: dict, arr: float) -> list[dict]:
+    """Type, Platform and Combined ARR when the card settles them. Module
+    is left to the engineer: the card has no reliable module."""
+    code = card.get("code_check") if isinstance(
+        card.get("code_check"), dict) else {}
+    repo = str(code.get("where") or "").split(":")[0].strip().lower()
+    fields = []
+    if (item.get("category") or card.get("category")) == "clear_bug":
+        fields.append({"id": FIELD_TYPE, "value": TYPE_BUG})
+    if repo in PLATFORMS:
+        fields.append({"id": FIELD_PLATFORM, "value": PLATFORMS[repo]})
+    if arr > 0:
+        fields.append({"id": FIELD_COMBINED_ARR, "value": arr})
+    return fields
+
+
 def _comment(task_id: str, text: str) -> None:
     import httpx
 
@@ -247,7 +285,7 @@ def _route(item: dict, card: dict, incident: dict, arr: float,
     account = item.get("account") or ""
     urgent = urgency(arr, account, incident)
     zoho_url = zoho_actions.ticket_url(item.get("ticket_id"))
-    summary = (card.get("live_question") or item.get("summary") or "")[:90]
+    summary = _title(card.get("live_question") or item.get("summary") or "")
 
     task, joined = _existing_task(item, incident)
     owner = forced or task.get("owner") or engineer_for(card)
@@ -271,10 +309,12 @@ def _route(item: dict, card: dict, incident: dict, arr: float,
                  "value": zoho_url},
                 {"id": sprint_thread.FIELD_SOURCE,
                  "value": sprint_thread.SOURCE_ZOHO_TICKET},
-            ],
+            ] + _fields(item, card, arr),
         }
         if urgent:
             body["priority"] = 1  # ClickUp: urgent
+        elif item.get("important"):
+            body["priority"] = 2  # ClickUp: high, an important client
         created = sprint_thread._clickup_create(sprint_thread.PRIORITY_QUEUE,
                                                 body)
         task = {"id": created.get("id"),
@@ -325,7 +365,7 @@ def flag_urgent_fix(item: dict, card: dict, pr_url: str, incident: dict,
     repo = str(code.get("where") or "").split(":")[0].strip().lower()
     production = ("then you deploy it" if repo in FRONTEND_REPOS
                   else "then OnlyG takes it to production")
-    summary = (card.get("live_question") or item.get("summary") or "")[:90]
+    summary = _title(card.get("live_question") or item.get("summary") or "")
     import sprint_thread
 
     return sprint_thread.alert_sam(
