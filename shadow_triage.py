@@ -518,7 +518,12 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
         subject=subject,
         summary=str(card.get("live_question") or subject)[:300],
         important=bool(card.get("important_client")) or arr > 1500,
-        card=card,
+        # The tickets the matcher named for this one, for incident_of.
+        # Kept empty when nothing matched, so a refresh clears an old match.
+        card={**card, "incident": {
+            "same_as": incident.get("same_as") or [],
+            "sentry_issue": incident.get("sentry_issue") or "",
+            "symptom": incident.get("symptom") or ""}},
         draft=draft["text"],
         draft_status=draft["status"],
         draft_why=draft["why"],

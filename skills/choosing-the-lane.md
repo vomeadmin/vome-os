@@ -23,8 +23,11 @@ to be detailed.
 - **engineer**: a person on the engineering team has to look. Fill in
   `escalation_reason`.
 - **feature**: they want something Vome does not do.
-- **sam_ops**: data fixes, account lookups and merges, billing, contracts.
-  Sam does these in Zoho; never an engineer, never an agent.
+- **sam_ops**: data fixes, account lookups and merges, billing, contracts,
+  and one person's access: an admin who lost a page or their role, or a
+  user stuck on their own account. Sam checks the role or account record
+  first; never an engineer, never an agent. (#9571: an admin who lost the
+  Database went to Sanjay as a data lookup, 2026-10-20.)
 - **housekeeping**: nothing is owed and nothing needs doing. The customer
   confirmed it works ("thanks, all good now"), an out-of-office or
   auto-reply, a thank-you, or a "Vome Error Report" the code already
@@ -46,3 +49,10 @@ to be detailed.
 Each reason names a gap: when one keeps coming up, that is what to fix so
 fewer tickets need an engineer. Do not pick `engineer` for something an
 answer or an agent fix would settle.
+
+Never `engineer` when the code check says works_as_designed or
+design_question: nothing is broken. "Can Vome do X?" is `answer` when it
+can and `feature` when it cannot (#9547, whether the waitlist can skip a
+user with a conflict, went to OnlyG as a data lookup, 2026-10-20).
+`data_lookup` is for a record that proves what happened (a delivery log,
+an import result), not for a question about how the product behaves.

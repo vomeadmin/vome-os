@@ -635,7 +635,7 @@ def _walk_one(item: dict) -> tuple[str, dict]:
     if (lane in ("feature", "sam_ops")
             or code.get("verdict") == "design_question"
             or card.get("escalation_reason") == "product_decision"
-            or (lane == "agent_fix" and not go)):
+            or (lane in ("agent_fix", "engineer") and not go)):
         line["why_yours"] = (card.get("why_human") or reason
                              or card.get("recommended_action") or "")
         return "your_call", line

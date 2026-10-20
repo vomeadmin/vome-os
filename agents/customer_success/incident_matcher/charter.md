@@ -30,6 +30,15 @@ so never use it as evidence that the error came first. An error with a huge
 event count has been firing for a long time and is weak evidence of a new
 problem.
 
+Read where the error fires (the path or task after "in"). If the customer's
+action would not run that code, it is not their error, however broken both
+look. A volunteer's email change does not run the sequence "add volunteer"
+endpoint, and a question about Board sorting runs no notification task.
+On 2026-10-20 one 27k-event sequence error and one 92k-event notification
+task were each matched to tickets about email changes, checklists, imports
+and Board sorting, and every ticket on them read as a multi-account
+incident.
+
 Compare what each customer is waiting on **now**. A ticket's history can
 mention a problem that was already fixed; that old symptom is not a match.
 If the new ticket's customer says it works again, the answer is no match,
