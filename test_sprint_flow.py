@@ -213,6 +213,54 @@ def test_build_goes_to_sam_accepted(monkeypatch, world):
     assert created == [sprint_thread.SAM_ACCEPTED, sprint_thread.RAW_INTAKE]
 
 
+def test_build_is_sams_and_log_is_for_later(monkeypatch, world):
+    import clickup_tasks
+    from mcp_connector import feature_requests
+
+    bodies = {}
+    monkeypatch.setattr(feature_requests, "find_duplicates", lambda t, p: [])
+    monkeypatch.setattr(sprint_thread, "_clickup_create",
+                        lambda list_id, body: bodies.setdefault(list_id, body)
+                        and {"id": "86y"})
+    item = _item(account="Sarasota County Government (very-high, 7000 CAD "
+                         "combined ARR)")
+    sprint_thread._feature(item, "build",
+                           title="Shared settings for sequences",
+                           module="sequences")
+    sprint_thread._feature(item, "log")
+    build = bodies[sprint_thread.SAM_ACCEPTED]
+    later = bodies[sprint_thread.RAW_INTAKE]
+    assert build["name"] == ("[#9415] Sarasota County Government -- Shared "
+                             "settings for sequences")
+    assert build["assignees"] == [clickup_tasks.CLICKUP_USER_SAM]
+    assert build["priority"] == 2
+    fields = {f["id"]: f["value"] for f in build["custom_fields"]}
+    assert fields[clickup_tasks.FIELD_REQUESTING_CLIENTS] == (
+        "Sarasota County Government")
+    assert fields[clickup_tasks.FIELD_COMBINED_ARR] == 7000
+    assert clickup_tasks.FIELD_MODULE in fields
+    # Later is unassigned until Sam triages it; the card's question is the
+    # fallback title.
+    assert "assignees" not in later and "priority" not in later
+    assert later["name"].endswith("Why are boxes highlighted?")
+
+
+def test_build_onto_an_existing_request_moves_it(monkeypatch, world):
+    from mcp_connector import feature_requests
+
+    triaged = []
+    monkeypatch.setattr(feature_requests, "add_plus_one",
+                        lambda **kw: {"url": "u", "name": "Bulk settings"})
+    monkeypatch.setattr(feature_requests, "triage",
+                        lambda **kw: triaged.append(kw) or {})
+    out = sprint_thread._feature(_item(), "build", "868abc123")
+    assert triaged[0]["decision"] == "build_now"
+    assert triaged[0]["priority"] == "high"
+    assert "moved to Sam Accepted" in out
+    sprint_thread._feature(_item(), "log", "868abc123")
+    assert len(triaged) == 1  # log only adds the +1
+
+
 def test_only_sam_can_command(monkeypatch, world):
     out = sprint_thread.handle_command(
         {"user": "U0APZ7JUHRD", "text": "send 1", "thread_ts": "1.1",

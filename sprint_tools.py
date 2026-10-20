@@ -558,10 +558,12 @@ def teach_agents(rule: str, agent: str, sam_said: str, caller: str,
 
 def log_ticket_request(ticket: str, caller: str, build: bool = False,
                        existing_task_id: str = "",
-                       confirm_new: bool = False) -> dict:
+                       confirm_new: bool = False, title: str = "",
+                       module: str = "") -> dict:
     """Log the ticket's feature request: duplicate check first, then Raw
-    Intake (or Sam Accepted when `build`), or +1 an existing task; posted
-    to #vome-feature-requests with the client."""
+    Intake for later, or Sam Accepted (assigned to Sam, high priority) when
+    `build`, or +1 an existing task (moved to Sam Accepted when `build`);
+    posted to #vome-feature-requests with the client."""
     _sam_only(caller, "log requests from the sprint")
     import sprint_thread
 
@@ -570,7 +572,8 @@ def log_ticket_request(ticket: str, caller: str, build: bool = False,
         _refuse("no sprint item for this ticket")
     mode = existing_task_id.strip() or ("new" if confirm_new else "")
     return {"result": sprint_thread._feature(
-        item, "build" if build else "log", mode)}
+        item, "build" if build else "log", mode, title=title,
+        module=module)}
 
 
 # ---------------------------------------------------------------------------

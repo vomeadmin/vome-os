@@ -1637,18 +1637,29 @@ def _fix(item: dict) -> str:
 _TASK_ID = re.compile(r"^[a-z0-9]{6,12}$", re.I)
 
 
-def _feature(item: dict, verb: str, mode: str = "") -> str:
+def _feature(item: dict, verb: str, mode: str = "", title: str = "",
+             module: str = "") -> str:
     """`log N` / `build N`, with a duplicate check first (G10), and every
     decision posted to #vome-feature-requests with the client (G9).
 
+    `build` is Sam building it himself, soon: Sam Accepted (Build Now),
+    assigned to him, high priority. `log` is for later: Raw Intake,
+    unassigned, until he triages it.
+
     mode "" checks for an existing request and stops if one may cover it;
-    "new" logs it anyway; a ClickUp task id adds this client to that one.
+    "new" logs it anyway; a ClickUp task id adds this client to that one
+    (and with `build` moves that task to Sam Accepted).
     """
+    import clickup_tasks
     from mcp_connector import feature_requests
 
     n = item.get("number")
     card = item.get("card") or {}
-    title = card.get("live_question") or item.get("summary") or "request"
+    # The card's question ("Will Vome add ...") is the fallback; the sprint
+    # passes a short capability name so the task reads like a request.
+    title = (" ".join((title or "").split())
+             or card.get("live_question") or item.get("summary")
+             or "request")
     problem = card.get("situation") or title
     org = (item.get("account") or "").split("(")[0].strip()
     mode = (mode or "").strip()
@@ -1668,7 +1679,17 @@ def _feature(item: dict, verb: str, mode: str = "") -> str:
         url = existing.get("url") or f"https://app.clickup.com/t/{mode}"
         where = f"the existing request {existing.get('name') or mode}"
         if verb == "build":
-            where += " (move it to Sam Accepted in ClickUp to build it now)"
+            try:
+                feature_requests.triage(
+                    task_id=mode, decision="build_now", priority="high",
+                    assign_to=clickup_tasks.CLICKUP_USER_SAM,
+                    note=("Build now, from ticket "
+                          f"#{item.get('ticket_number')}"),
+                    triaged_by="Sam (sprint)")
+                where += ", moved to Sam Accepted (Build Now)"
+            except Exception as exc:
+                where += (f" (not moved to Sam Accepted: {exc}; move it in "
+                          "ClickUp)")
     else:
         if mode != "new":
             try:
@@ -1690,12 +1711,8 @@ def _feature(item: dict, verb: str, mode: str = "") -> str:
                              "request.")
                 return "\n".join(lines)
         list_id = SAM_ACCEPTED if verb == "build" else RAW_INTAKE
-        task = _clickup_create(list_id, {
-            "name": f"[#{item.get('ticket_number')}] {title[:110]}",
-            "markdown_description": _task_description(item),
-            "custom_fields": [{"id": FIELD_SOURCE,
-                               "value": SOURCE_ZOHO_TICKET}],
-        })
+        task = _clickup_create(list_id, _feature_task(item, verb, title,
+                                                      org, module))
         url = task.get("url") or f"https://app.clickup.com/t/{task.get('id')}"
         where = ("Sam Accepted (Build Now)" if verb == "build"
                  else "Raw Intake")
@@ -1704,6 +1721,43 @@ def _feature(item: dict, verb: str, mode: str = "") -> str:
     return (f"*{n}.* {'building' if verb == 'build' else 'logged'}: {where}"
             f" {url}. Posted in #vome-feature-requests. The customer has not "
             "been told anything; draft a reply with `edit` if one is owed.")
+
+
+def _feature_task(item: dict, verb: str, title: str, org: str,
+                  module: str = "") -> dict:
+    """The ClickUp body for a new request: the fields Sam sorts by (client,
+    ARR, ticket), and on `build` his name and a high priority so Sam
+    Accepted is his own working list."""
+    import clickup_tasks
+    import ticket_routing
+    import zoho_actions
+
+    fields = [
+        {"id": FIELD_SOURCE, "value": SOURCE_ZOHO_TICKET},
+        {"id": clickup_tasks.FIELD_TYPE, "value": clickup_tasks.TYPE_FEATURE},
+        {"id": FIELD_ZOHO_TICKET_LINK,
+         "value": zoho_actions.ticket_url(item.get("ticket_id"))},
+    ]
+    if org:
+        fields.append({"id": clickup_tasks.FIELD_REQUESTING_CLIENTS,
+                       "value": org})
+    arr = ticket_routing.arr_of(item.get("account") or "")
+    if arr:
+        fields.append({"id": clickup_tasks.FIELD_COMBINED_ARR, "value": arr})
+    module_option = (clickup_tasks._map_module_option(module)
+                     if module else None)
+    if module_option:
+        fields.append({"id": clickup_tasks.FIELD_MODULE,
+                       "value": module_option})
+    name = f"[#{item.get('ticket_number')}] "
+    name += f"{org} -- {title}" if org else title
+    body = {"name": name[:150],
+            "markdown_description": _task_description(item),
+            "custom_fields": fields}
+    if verb == "build":
+        body["assignees"] = [clickup_tasks.CLICKUP_USER_SAM]
+        body["priority"] = 2  # high
+    return body
 
 
 FEATURE_REQUESTS = os.environ.get("SLACK_CHANNEL_FEATURE_REQUESTS",
