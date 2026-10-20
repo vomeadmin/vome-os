@@ -32,6 +32,14 @@ status means shipped. If you found nothing, say you found nothing, plainly.
 "No existing task found" is a useful answer. A vague answer that leaves the
 reader unsure whether you looked is not.
 
+**A release backs a promise.** Release notes name the clients who asked
+("Requesting client: ..., Zoho #9501"). When the search shows a release
+naming this ticket, a promise we made about that work is backed: cite the
+release and do not list the promise as a blocking claim. The same holds
+when the customer says the feature is on their screen and its code is on
+the production branch. A problem they raise with the shipped feature is a
+new question, not proof the promise was false.
+
 **When you find a near miss.** A task covering part of the problem is worth
 naming as a near miss rather than claiming as a match. Say which part it
 covers and which part it does not.

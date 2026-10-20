@@ -58,6 +58,16 @@ LISTS: dict[str, str] = {
     "Declined": "901113389900",
 }
 
+# Release notes (Vome Product > Releases > Active). Shipped work, so they are
+# searched when a card asks "is this already done", never when routing joins
+# open work, and never by the feature-request duplicate check. On #9501 the
+# release's only comment ("Requesting client: ... Zoho #9501") was the record
+# behind a promise Sam had made, and the card called that promise unbacked
+# because nothing here read this list.
+RELEASE_LISTS: dict[str, str] = {
+    "Releases": "901113386518",
+}
+
 # Statuses that mean the work actually shipped. Everything else is in flight.
 SHIPPED = frozenset({"on prod", "closed", "done", "complete"})
 
@@ -123,19 +133,25 @@ def _fetch_list(list_id: str, name: str) -> list[dict]:
 
 
 def search_tasks_by_text(
-    query: str, limit: int = 5, threshold: float = 0.18
+    query: str, limit: int = 5, threshold: float = 0.18,
+    include_releases: bool = False,
 ) -> list[dict]:
     """Candidate tasks covering `query`, best match first.
 
     Raises when ClickUp cannot be read, so a caller can report "we did not
     look" rather than the far more dangerous "nothing found".
+    `include_releases` adds the release notes, for callers asking whether
+    something already shipped.
     """
     wanted = _tokens(query)
     if not wanted:
         return []
 
+    lists = dict(LISTS)
+    if include_releases:
+        lists.update(RELEASE_LISTS)
     scored: list[tuple[float, dict]] = []
-    for name, list_id in LISTS.items():
+    for name, list_id in lists.items():
         for task in _fetch_list(list_id, name):
             have = _tokens(task["name"])
             if not have:
@@ -213,6 +229,67 @@ def linked_tasks(ticket_number: str, zoho_ticket_id: str) -> list[dict]:
         for task in _fetch_list(list_id, name)
         if _ticket_linked(task, ticket_number, zoho_ticket_id)
     ]
+
+
+# A release note's whole text: description plus every comment on the first
+# page. The Releases list is small (six tasks on 2026-10-20), so reading all
+# of it costs a handful of calls per cache window.
+_release_text_cache: dict[str, tuple[float, str]] = {}
+
+
+def _task_text(task_id: str) -> str:
+    """Description and comments of one task, untrimmed. "" when unreadable."""
+    now = time.monotonic()
+    hit = _release_text_cache.get(task_id)
+    if hit and (now - hit[0]) < _CACHE_TTL:
+        return hit[1]
+    headers = {"Authorization": CLICKUP_API_TOKEN}
+    try:
+        task = httpx.get(
+            f"{CLICKUP_BASE}/task/{task_id}",
+            headers=headers,
+            params={"include_markdown_description": "true"},
+            timeout=20,
+        ).json()
+        comments = httpx.get(
+            f"{CLICKUP_BASE}/task/{task_id}/comment", headers=headers, timeout=20,
+        ).json().get("comments") or []
+    except Exception as exc:
+        print(f"[CU SEARCH] could not read task {task_id}: {exc}")
+        return ""
+    from clickup_tasks import extract_comment_text
+
+    parts = [task.get("markdown_description") or task.get("description") or ""]
+    parts.extend(extract_comment_text(comment) for comment in comments)
+    text = "\n".join(p for p in parts if p)
+    _release_text_cache[task_id] = (now, text)
+    return text
+
+
+def _names_ticket(text: str, ticket_number: str, zoho_ticket_id: str) -> bool:
+    if zoho_ticket_id and zoho_ticket_id in text:
+        return True
+    return bool(ticket_number) and bool(
+        re.search(rf"#{re.escape(ticket_number)}\b", text)
+    )
+
+
+def release_tasks_for(ticket_number: str, zoho_ticket_id: str) -> list[dict]:
+    """Release notes that name this ticket anywhere: the Zoho link, the name,
+    the description or a comment ("Requesting client: ..., Zoho #9501").
+    Raises when a list cannot be read, like the other searches."""
+    if not CLICKUP_API_TOKEN:
+        raise RuntimeError("no ClickUp token")
+    if not (ticket_number or zoho_ticket_id):
+        return []
+    found = []
+    for name, list_id in RELEASE_LISTS.items():
+        for task in _fetch_list(list_id, name):
+            if _ticket_linked(task, ticket_number, zoho_ticket_id) or _names_ticket(
+                _task_text(task["id"]), ticket_number, zoho_ticket_id
+            ):
+                found.append(task)
+    return found
 
 
 def _account_tokens(account: str) -> set[str]:
@@ -296,11 +373,21 @@ def describe_existing_work(
             for name, list_id in LISTS.items()
             for task in _fetch_list(list_id, name)
         ]
-        symptom = search_tasks_by_text(query, limit=limit)
+        symptom = search_tasks_by_text(query, limit=limit, include_releases=True)
     except Exception as exc:
         return (
             f"Existing-task search FAILED ({exc}). Treat existing work as "
             "UNKNOWN, not as none."
+        )
+    try:
+        releases = release_tasks_for(ticket_number, zoho_ticket_id)
+        release_note = ""
+    except Exception as exc:
+        releases = []
+        release_note = (
+            f"Release notes could NOT be searched for this ticket ({exc}). A "
+            "promise already made to this client may be backed by a release "
+            "you did not see: do not call it unbacked."
         )
 
     def line(task: dict) -> str:
@@ -334,6 +421,18 @@ def describe_existing_work(
             "Linked to THIS ticket (Zoho link or ticket number in the name):\n"
             + "\n".join(with_brief(t, True) for t in linked)
         )
+
+    releases = [t for t in releases if t["id"] not in seen]
+    if releases:
+        seen.update(t["id"] for t in releases)
+        sections.append(
+            "A RELEASE names THIS ticket (the work this client asked for; "
+            "SHIPPED when its status says so). A promise we made them about "
+            "it is backed by this record:\n"
+            + "\n".join(with_brief(t, True) for t in releases)
+        )
+    if release_note:
+        sections.append(release_note)
 
     wanted = _account_tokens(account)
     if wanted:

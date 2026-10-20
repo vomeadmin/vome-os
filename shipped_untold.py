@@ -19,6 +19,11 @@ leave them untold:
    clients who were never told.)
 2. Sam Accepted (Build Now) feature requests that closed: what the client
    asked for exists now (gap G11).
+3. Release notes (Releases > Active) that name the clients who asked, in a
+   comment such as "Requesting client: Sarasota ..., Zoho #9501. Please make
+   sure she is notified when this ships." #9501's release closed on Oct 19
+   and nothing read that comment, so she was never told. One release can
+   name several tickets; each is prepared once.
 
 WHAT IT DOES, ONCE PER TASK
 ---------------------------
@@ -29,12 +34,16 @@ state in front of the agents, so the draft is a resolution, through every
 outbound guard. A shipped FIX whose draft passed every guard is sent and
 the ticket closes, as the on-prod handler would have done (Sam, 2026-10-19:
 fixed emails go out on their own; RELEASE_AUTO_SEND switches it off). A
-shipped FEATURE, and any draft a guard held, waits under READY TO SEND for
-Sam.
+shipped FEATURE, a RELEASE, and any draft a guard held, wait under READY TO
+SEND for Sam. A release is never sent on its own: the client may have
+written since (on #9501 she had, to say the new delete refused her fields),
+and only Sam can judge whether "it is live" answers them.
 
-`on prod` only, never just "closed": a closed task is not proof of a fix
-(the Oct 9 lesson). Each task is claimed in vomeos_release_resolutions (the
-same ledger the Agent Fixes path uses), so a task is drafted once, retried
+`on prod` only, never just "closed", for Priority Queue: a closed task is
+not proof of a fix (the Oct 9 lesson). A release note is `on prod` once it
+is live and Closed once the newsletter announced it, so for that list both
+are the shipped state. Each task is claimed in vomeos_release_resolutions
+(the same ledger the Agent Fixes path uses), so a task is drafted once, retried
 on an error up to three times, and the batch labels it a resolution.
 
 SWITCH
@@ -50,10 +59,14 @@ from datetime import datetime, timedelta, timezone
 
 PRIORITY_QUEUE = "901113386257"
 SAM_ACCEPTED = "901115573620"
+RELEASES = "901113386518"
 LOOKBACK_DAYS = int(os.environ.get("SHIPPED_UNTOLD_DAYS", "14"))
 PER_RUN = int(os.environ.get("SHIPPED_UNTOLD_PER_RUN", "5"))
 
 _ZOHO_URL = re.compile(r"https?://\S*(?:zoho|support\.vomevolunteer)\S*")
+# How a release note names the client who asked: "Zoho #9501", "Zoho
+# ticket #9501". A bare "#781" is usually a pull request, so it is not read.
+_ZOHO_NUMBER = re.compile(r"Zoho\s+(?:ticket\s+)?#(\d{3,6})\b", re.IGNORECASE)
 
 
 def enabled() -> bool:
@@ -100,7 +113,51 @@ def shipped_tasks() -> list[dict]:
         status = (task.get("status") or {})
         if status.get("type") in ("closed", "done"):
             found.append({"task": task, "kind": "feature"})
+    for task in _tasks(RELEASES, "include_closed=true&subtasks=true"):
+        status = (task.get("status") or {})
+        # Release notes: `on dev` needs testing, `on prod` is live and ready
+        # to announce, Closed went out in a newsletter. Both of the last two
+        # are shipped; the claim keeps it to one draft per client.
+        if (str(status.get("status") or "").lower() != "on prod"
+                and status.get("type") not in ("closed", "done")):
+            continue
+        for ticket_id, number in release_tickets(task):
+            found.append({"task": task, "kind": "release",
+                          "ticket_id": ticket_id, "number": number,
+                          "claim": f"{task.get('id')}:{ticket_id}"})
     return found
+
+
+def release_tickets(task: dict) -> list[tuple[str, str]]:
+    """(Zoho ticket id, ticket number) for every client a release names, in
+    its link field, a Zoho URL, or "Zoho #<number>" in the description or
+    any comment. A number Zoho cannot resolve is skipped, not guessed."""
+    import clickup_search
+    import sprint
+    from zoho_links import parse_zoho_ticket_id
+
+    text = "\n".join([
+        task.get("name") or "",
+        task.get("markdown_description") or task.get("description") or "",
+        clickup_search._task_text(str(task.get("id") or "")),
+    ])
+    found: dict[str, str] = {}
+    linked = ticket_id_for(task)
+    if linked:
+        found[linked] = ""
+    for url in _ZOHO_URL.findall(text):
+        ticket_id = str(parse_zoho_ticket_id(url) or "")
+        if ticket_id:
+            found.setdefault(ticket_id, "")
+    for number in dict.fromkeys(_ZOHO_NUMBER.findall(text)):
+        try:
+            row = sprint.resolve_ticket(number) or {}
+        except Exception as exc:
+            print(f"[UNTOLD] Zoho #{number} unresolved ({exc})")
+            continue
+        if row.get("id"):
+            found[str(row["id"])] = number
+    return list(found.items())
 
 
 def ticket_id_for(task: dict) -> str:
@@ -138,7 +195,13 @@ def already_told(ticket_id: str, since: datetime | None) -> bool:
 
 def _release(task: dict, kind: str) -> dict:
     name = task.get("name") or task.get("id")
-    if kind == "feature":
+    if kind == "release":
+        text = (f"SHIPPED. Release {task.get('id')} ({name}) went out and "
+                "names this client as one who asked for it: the feature is "
+                "live in the product. If they have written since, answer "
+                "that message first; the release backs saying the feature "
+                "exists, not that a problem they raised since is solved.")
+    elif kind == "feature":
         text = (f"SHIPPED. The feature this client asked for is now live in "
                 f"the product (task {task.get('id')}: {name}). A reply "
                 "telling them it is available is backed.")
@@ -170,7 +233,9 @@ def run_shipped_untold() -> dict:
         if len(drafted) >= PER_RUN:
             break
         task, kind = entry["task"], entry["kind"]
-        ticket_id = ticket_id_for(task)
+        ticket_id = entry.get("ticket_id") or ticket_id_for(task)
+        # One claim per task, except a release, which is one per client.
+        claim = entry.get("claim") or task["id"]
         if not ticket_id:
             skipped += 1
             continue
@@ -182,8 +247,8 @@ def run_shipped_untold() -> dict:
             print(f"[UNTOLD] {ticket_id}: Zoho unreadable ({exc})")
             continue
         found = re.search(r"#(\d{3,6})", task.get("name") or "")
-        number = found.group(1) if found else ""
-        if not rr._claim(task["id"], kind, ticket_id, number):
+        number = entry.get("number") or (found.group(1) if found else "")
+        if not rr._claim(claim, kind, ticket_id, number):
             continue
         try:
             outcome = shadow_triage._handle(
@@ -193,7 +258,7 @@ def run_shipped_untold() -> dict:
             outcome = {"status": "error", "error": str(exc)}
         item = sprint_store.by_ticket(ticket_id)
         if outcome.get("status") != "ok" or not item:
-            rr._finish(task["id"], None, "error",
+            rr._finish(claim, None, "error",
                        str(outcome.get("reason") or outcome.get("error")))
             continue
         result = {"ok": "drafted", "blocked": "held"}.get(
@@ -206,7 +271,7 @@ def run_shipped_untold() -> dict:
 
             detail = sprint_thread._send(item)
             result = "sent" if "sent to" in detail else "drafted"
-        rr._finish(task["id"], item.get("number"), result, detail)
+        rr._finish(claim, item.get("number"), result, detail)
         drafted.append(item.get("number"))
     print(f"[UNTOLD] {len(shipped)} shipped, {told} already told, "
           f"{len(drafted)} drafted, {skipped} without a ticket")

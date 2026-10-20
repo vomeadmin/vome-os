@@ -60,6 +60,41 @@ def test_housekeeping_gets_no_draft(monkeypatch):
     assert 'card.get("lane") == "housekeeping"' in src
 
 
+def test_needs_human_gets_a_holding_reply_with_its_own_notes():
+    """#9501 sat five days with no draft because its card said needs_human."""
+    import shadow_triage
+
+    assert "needs_human" in shadow_triage.HOLDING_CATEGORIES
+    assert "needs_human" not in shadow_triage.DRAFT_CATEGORIES
+    notes = shadow_triage.HOLDING_NOTES
+    assert "holding reply only" in notes and "do not promise" in notes
+    src = open(shadow_triage.__file__, encoding="utf-8").read()
+    assert '"holding_reply": True' in src
+
+
+def test_a_holding_reply_stays_with_the_decisions():
+    """`send ready` must never send it: Sam decides the ticket first."""
+    item = _item(1, category="needs_human", draft="Hi Stephanie, thanks.",
+                 draft_status="ok",
+                 card={"live_question": "Why won't they delete?",
+                       "holding_reply": True})
+    assert sprint_batch.section(item, NOW) == sprint_batch.DECIDE
+    text = sprint_batch.detail(item, set(), NOW)
+    assert "Hi Stephanie, thanks." in text
+    assert "`send 1` sends the holding reply" in text
+    picked = {sprint_batch.READY: [], sprint_batch.FIX: [],
+              sprint_batch.DECIDE: [item]}
+    top, _ = sprint_batch.render(7, picked, {}, NOW)
+    assert "READY TO SEND" not in top
+
+
+def test_a_needs_human_card_without_a_draft_is_unchanged():
+    item = _item(2, category="needs_human",
+                 card={"live_question": "q", "holding_reply": True})
+    text = sprint_batch.detail(item, set(), NOW)
+    assert "Holding reply" not in text and "`send 2`" not in text
+
+
 @pytest.fixture
 def closing(monkeypatch):
     import zoho_actions
@@ -292,6 +327,87 @@ def test_feature_release_text_says_shipped():
     text = shipped_untold._release({"id": "868a", "name": "Bulk export"},
                                    "feature")["text"]
     assert text.startswith("SHIPPED.") and "Bulk export" in text
+
+
+def test_a_release_names_its_clients_from_comments(monkeypatch):
+    """#9501: the release named her only in a comment, "Zoho #9501"."""
+    import clickup_search
+    import shipped_untold
+    import sprint
+
+    monkeypatch.setattr(clickup_search, "_task_text", lambda tid: (
+        "Requesting client: Sarasota County Government, Zoho #9501. "
+        "Shipped with PR #781."))
+    monkeypatch.setattr(sprint, "resolve_ticket", lambda n: {
+        "9501": {"id": "569440000043050451"}}.get(n))
+    task = {"id": "868mf74ny", "name": "Delete a sequence field",
+            "custom_fields": []}
+    assert shipped_untold.release_tickets(task) == [
+        ("569440000043050451", "9501")]
+
+
+def test_release_notes_ship_at_on_prod_or_closed(monkeypatch):
+    """Release statuses: on dev needs testing, on prod is live and ready to
+    announce, Closed went out in a newsletter."""
+    import shipped_untold
+
+    notes = [
+        {"id": "r-dev", "status": {"status": "on dev", "type": "custom"}},
+        {"id": "r-prod", "status": {"status": "on prod", "type": "custom"}},
+        {"id": "r-closed", "status": {"status": "Closed", "type": "closed"}},
+    ]
+    monkeypatch.setattr(shipped_untold, "_tasks", lambda list_id, q: (
+        notes if list_id == shipped_untold.RELEASES else []))
+    monkeypatch.setattr(shipped_untold, "release_tickets",
+                        lambda task: [(f"T-{task['id']}", "9501")])
+    found = shipped_untold.shipped_tasks()
+    assert [e["task"]["id"] for e in found] == ["r-prod", "r-closed"]
+    assert {e["kind"] for e in found} == {"release"}
+    assert found[0]["claim"] == "r-prod:T-r-prod"
+
+
+def test_a_shipped_release_always_waits_for_sam(monkeypatch):
+    """Auto-send is on, the draft is clean, and it still waits: the client
+    may have written since about a problem the release did not solve."""
+    sent, finished = _untold(monkeypatch, "release", {
+        "number": 9, "draft_status": "ok", "category": "clear_bug"})
+    assert sent == [] and finished == ["drafted"]
+
+
+def test_each_client_on_a_release_is_claimed_separately(monkeypatch):
+    import release_resolutions as rr
+    import shadow_triage
+    import shipped_untold
+
+    task = {"id": "868rel", "name": "Delete a sequence field",
+            "custom_fields": []}
+    monkeypatch.setattr(sprint_store, "ready", lambda: True)
+    monkeypatch.setattr(shipped_untold, "shipped_tasks", lambda: [
+        {"task": task, "kind": "release", "ticket_id": tid, "number": n,
+         "claim": f"868rel:{tid}"}
+        for tid, n in (("T1", "9501"), ("T2", "9502"))])
+    monkeypatch.setattr(shipped_untold, "already_told", lambda t, s: False)
+    claims = []
+    monkeypatch.setattr(rr, "_claim", lambda c, p, t, n:
+                        claims.append((c, t, n)) or True)
+    monkeypatch.setattr(rr, "_finish", lambda c, i, o, d: None)
+    monkeypatch.setattr(shadow_triage, "_handle",
+                        lambda tid, reason, **k: {"status": "ok"})
+    monkeypatch.setattr(sprint_store, "by_ticket", lambda t: {
+        "number": 9, "draft_status": "ok", "category": "clear_bug"})
+    shipped_untold.run_shipped_untold()
+    assert claims == [("868rel:T1", "T1", "9501"),
+                      ("868rel:T2", "T2", "9502")]
+
+
+def test_release_text_says_answer_their_latest_message():
+    import shipped_untold
+
+    text = shipped_untold._release(
+        {"id": "868mf74ny", "name": "Delete a sequence field"},
+        "release")["text"]
+    assert text.startswith("SHIPPED.")
+    assert "answer that message first" in text
 
 
 # ---------------------------------------------------------------------------

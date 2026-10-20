@@ -371,7 +371,8 @@ def check_existing_work(query: str) -> dict:
             ),
         }
     try:
-        hits = clickup_search.search_tasks_by_text(query, limit=8)
+        hits = clickup_search.search_tasks_by_text(
+            query, limit=8, include_releases=True)
     except Exception as exc:
         return {
             "query": query, "ran": False, "tasks": [],
@@ -396,7 +397,8 @@ def check_existing_work(query: str) -> dict:
             for t in hits
         ],
         "sources": {
-            "clickup": "searched " + ", ".join(clickup_search.LISTS),
+            "clickup": "searched " + ", ".join(
+                [*clickup_search.LISTS, *clickup_search.RELEASE_LISTS]),
         },
         "how_to_use_this": (
             "Matching is on task names, so read each candidate before "

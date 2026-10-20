@@ -63,6 +63,22 @@ DRAFT_CATEGORIES = {
     "misdirected", "email_update", "account_deletion",
 }
 
+# needs_human still waits for Sam's decision, but with a holding reply ready
+# for him to send while he decides. #9501 (Sarasota, 7000 ARR) sat five days
+# with no draft at all because its card said needs_human. The card is
+# flagged `holding_reply`, so the batch keeps it under NEEDS YOUR DECISION
+# and `send ready` never sends it.
+HOLDING_CATEGORIES = {"needs_human"}
+
+HOLDING_NOTES = (
+    "This ticket waits on Sam's decision, so write a holding reply only. "
+    "Thank them, answer a plain question they asked only when the card "
+    "already settles it, and say our team is looking into it and will "
+    "follow up. Do not explain a cause, do not name what the team will "
+    "check, and do not promise a fix, a date or a release. Two or three "
+    "short sentences."
+)
+
 
 def enabled() -> bool:
     value = os.environ.get("SHADOW_TRIAGE_ENABLED", "")
@@ -448,7 +464,8 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
     # category (#9500 was needs_human because of an earlier wrong reply;
     # the resolution is exactly what she is waiting for). Sam still reviews
     # it, and release_resolutions never auto-sends a needs_human ticket.
-    owed = category in DRAFT_CATEGORIES or (
+    holding = category in HOLDING_CATEGORIES and not release.get("live")
+    owed = category in DRAFT_CATEGORIES or holding or (
         release.get("live") and category not in ("misdirected",
                                                  "account_deletion",
                                                  "email_update"))
@@ -465,6 +482,10 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
             # #9436 rehearsal). A resolution is the fix, nothing else.
             resolution_card = {**card, "blocking_claims": ""}
             notes = RESOLUTION_NOTES
+        elif holding:
+            notes = HOLDING_NOTES
+            card = {**card, "holding_reply": True}
+            resolution_card = card
         draft = draft_reply(
             ticket_number, resolution_card, context, rcpt, release,
             language=_language(context.get("thread", "")),

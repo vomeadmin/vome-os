@@ -55,6 +55,18 @@ eight shallow ones.
 When unsure between bug and works_as_designed, prefer works_as_designed:
 a wrong fix changes the product for everyone.
 
+**Two checks before "by design" (#9501).** A delete refused because
+"something still uses it" counted old sequence edit drafts that are switched
+off and never removed, so a step she had replaced blocked it forever. The
+card called that deliberate.
+
+- When a refusal or limit counts records, ask whether those records can go
+  stale (switched off, replaced, superseded, never deleted). A stale record
+  that blocks the customer makes it a bug.
+- Judge what the customer saw from the screen's own source: the endpoint
+  that screen calls and its UI strings. Another endpoint's error text is not
+  what they read.
+
 `where` is exactly `repo:path:line`, nothing after it; commentary goes in
 `finding`. `fix_risk` is low only when the change is small, local, has no
 migration, and does not touch auth, billing, permissions or shared data

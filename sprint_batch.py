@@ -176,6 +176,10 @@ def is_design_question(item: dict) -> bool:
     return isinstance(code, dict) and code.get("verdict") == "design_question"
 
 
+def is_holding(item: dict) -> bool:
+    return bool((item.get("card") or {}).get("holding_reply"))
+
+
 def held_is_due(item: dict, now: datetime | None = None) -> bool:
     """A held item comes back when its wake time passes. A hold from
     before wake times existed comes back the next day."""
@@ -210,6 +214,10 @@ def section(item: dict, now: datetime | None = None) -> str:
     # Works as built, but maybe not as it should: Sam decides whether to
     # change it, log it, or answer it, even when a how-to draft exists.
     if is_design_question(item):
+        return DECIDE
+    # A holding reply on a ticket that needs Sam: he decides the ticket
+    # first, so `send ready` must never send it (shadow_triage, #9501).
+    if is_holding(item):
         return DECIDE
     draft = (item.get("draft") or "").strip()
     if draft and item.get("draft_status") == "ok":
@@ -418,7 +426,15 @@ def detail(item: dict, resolutions: set, now: datetime) -> str:
                                       if draft else "")
                      + f"`edit {n}: <reply>` · `hold {n}`")
         return "\n".join(lines)
-    lines.append(f"`route {n} to onlyg` · `route {n} to sanjay` · "
+    draft = (item.get("draft") or "").strip()
+    holding = is_holding(item) and draft and item.get("draft_status") == "ok"
+    if holding:
+        lines.append("*Holding reply, if you want to answer while you "
+                     "decide:* " + _recipients(item))
+        lines.append("```" + draft + "```")
+    lines.append((f"`send {n}` sends the holding reply · " if holding
+                  else "")
+                 + f"`route {n} to onlyg` · `route {n} to sanjay` · "
                  f"`log {n}` · `build {n}` · `edit {n}: <reply>` · "
                  f"`hold {n}` · `done {n}`")
     return "\n".join(lines)
