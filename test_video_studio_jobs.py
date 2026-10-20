@@ -144,16 +144,41 @@ def test_live_lookup_only_accepts_the_exact_permalink(jobs, monkeypatch):
     assert jobs._live_article("choosing-an-email-format") is None
 
 
-def test_falls_back_to_search_without_a_link(jobs, monkeypatch):
+def test_no_link_is_never_guessed(jobs, monkeypatch):
+    """2026-10-20: a keyword search matched a reminder to an article about
+    sequence steps. With no link there is no article."""
     import database
-    monkeypatch.setattr(database, "get_kb_article_by_permalink",
-                        lambda p: None, raising=False)
-    monkeypatch.setattr(
-        database, "search_kb_articles_db",
-        lambda q, **k: [{"title": "Kiosk", "body": "PIN check-in."}],
-        raising=False)
-    title, body = jobs._faq_text({"feature_name": "Kiosk check-in"}, "")
-    assert title == "Kiosk"
+
+    def search(*a, **k):
+        raise AssertionError("searched for an article")
+    monkeypatch.setattr(database, "search_kb_articles_db", search,
+                        raising=False)
+    assert jobs._faq_text({"feature_name": "Kiosk check-in"}, "") == ("", "")
+
+
+def test_brief_only_reads_no_article(jobs, monkeypatch):
+    import database
+
+    def lookup(*a, **k):
+        raise AssertionError("looked up an article")
+    monkeypatch.setattr(database, "get_kb_article_by_permalink", lookup,
+                        raising=False)
+    title, body = jobs._faq_text(
+        {"brief_only": True, "faq_url": "https://x/kb/articles/y"}, "")
+    assert title == "" and body == jobs.BRIEF_ONLY
+
+
+def test_a_missing_article_asks_again(jobs, monkeypatch):
+    """No article is a question for the person, not the end of the thread."""
+    posts, updates = [], []
+    monkeypatch.setattr(jobs, "run_concepts", lambda *a, **k: {
+        "ok": False, "need_context": True, "error": "I could not find it."})
+    monkeypatch.setattr(jobs, "_post", lambda t, m: posts.append(m))
+    monkeypatch.setattr(jobs.video_threads, "update",
+                        lambda t, **f: updates.append(f))
+    jobs._develop("1.1", "brief", "", {})
+    assert "*continue*" in posts[0]
+    assert updates[-1]["state"] == jobs.video_threads.STATE_AWAITING_CONTEXT
 
 
 def test_no_faq_is_reported_not_guessed(jobs, monkeypatch):

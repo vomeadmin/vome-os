@@ -140,6 +140,17 @@ VAGUE_DISLIKE = re.compile(
     r"|^(?:not (?:good|great|it|loving it)|meh|nope|no|this is bad|"
     r"this isn'?t (?:it|working|good)|it'?s not working)[.!]*$")
 
+# Go ahead with no help centre article, on what the thread already says.
+# The whole message, like a greenlight: "continue with the hook idea" is
+# more detail, not consent.
+CONTINUE = re.compile(
+    r"^(?:<[^>]+>\s*)?(?:ok,?\s+|okay,?\s+|yes,?\s+|yep,?\s+|sure,?\s+)?"
+    r"(?:continue|carry on|go ahead|proceed|yes|yep|"
+    r"go with (?:this|that|what'?s here)|that'?s (?:all|everything))"
+    r"(?:\s+with (?:this|that|what'?s here|only this|"
+    r"(?:only )?the context(?: (?:here|provided))?))?"
+    r"(?:,?\s+please)?[.!]*$")
+
 SLACKBOT_USER = "USLACKBOT"
 
 # A reminder's text, after any leading mentions: "Reminder: ...", "reminder
@@ -166,7 +177,8 @@ FAQ_URL = re.compile(r"https?://[^\s|<>]*(?:kb|support|faq)[^\s|<>]*", re.I)
 def classify(text: str, thread_state: str | None) -> str:
     """What this message is asking for.
 
-    new | pick | direction | busy | pick_first | note | greenlight | forget
+    new | context | context_link | continue | need_context | pick
+    | direction | busy | pick_first | note | greenlight | forget
     | script_pending | scrap | restart | unclear | scrapped | building
     | ignore
 
@@ -202,13 +214,26 @@ def classify(text: str, thread_state: str | None) -> str:
     if SCRAP.match(body):
         return "scrap"
     if RESTART.match(body) and thread_state not in (
-            None, video_threads.STATE_IDEA, video_threads.STATE_CONCEPTING):
+            None, video_threads.STATE_IDEA, video_threads.STATE_CONCEPTING,
+            video_threads.STATE_AWAITING_CONTEXT):
         return "restart"
     if VAGUE_DISLIKE.match(body) and thread_state in (
             video_threads.STATE_AWAITING_REVIEW,
             video_threads.STATE_DELIVERED,
             video_threads.STATE_AWAITING_CONCEPT):
         return "unclear"
+
+    # Waiting for a help centre link. Nothing has been spent: a link starts
+    # the team, "continue" starts it on the thread alone, and anything else
+    # is more detail about the feature.
+    if thread_state == video_threads.STATE_AWAITING_CONTEXT:
+        if FAQ_URL.search(text or ""):
+            return "context_link"
+        if CONTINUE.match(body):
+            return "continue"
+        if is_greenlight(text):
+            return "need_context"
+        return "context"
 
     if thread_state == video_threads.STATE_AWAITING_CONCEPT:
         if video_concepts.match_concept_pick(text) is not None:
@@ -309,17 +334,65 @@ def handle_video_studio_message(event: dict) -> None:
             # A retry in a thread whose first attempt found nothing: the
             # link posted now is the one to read.
             video_threads.update(thread_ts, faq_url=faq.group(0))
+        started_by = (row or {}).get("started_by") or user
+        if not faq and not (row or {}).get("faq_url"):
+            # No article to work from. Ask before any model runs: the team
+            # costs about $2 a round, and guessing the article is how a
+            # reminder became concepts about sequence steps.
+            video_threads.update(
+                thread_ts, state=video_threads.STATE_AWAITING_CONTEXT,
+                brief=_add_to_brief(row, text), started_by=started_by)
+            _ack(thread_ts, _ask_for_context(started_by))
+            return
         video_threads.update(thread_ts, state=video_threads.STATE_CONCEPTING,
                              brief=text if not (row or {}).get("brief")
                              else row["brief"],
-                             started_by=(row or {}).get("started_by")
-                             or user)
+                             started_by=started_by)
         _ack(thread_ts,
              "On it. Reading the FAQ and working out three ways to tell "
              "this one, back shortly with concepts to pick from. Nothing "
              "gets built until you say so.")
         threading.Thread(
             target=_develop_concepts, args=(thread_ts, text), daemon=True
+        ).start()
+        return
+
+    if intent == "context":
+        video_threads.update(thread_ts, brief=_add_to_brief(row, text))
+        _ack(thread_ts,
+             "Added to the brief. Do you want to continue to build a video "
+             "with the context provided so far? Reply *continue*, or keep "
+             "adding detail, or paste the help centre link.")
+        return
+
+    if intent == "need_context":
+        _ack(thread_ts,
+             "Nothing to build yet. Paste the help centre link, tell me more "
+             "about the feature, or reply *continue* to start the concepts "
+             "with only what is in this thread.")
+        return
+
+    if intent in ("context_link", "continue"):
+        if intent == "context_link":
+            brief = _add_to_brief(row, text)
+            video_threads.update(thread_ts,
+                                 faq_url=FAQ_URL.search(text).group(0),
+                                 brief_only=False)
+            lead = "Reading the article and working"
+        else:
+            brief = (row or {}).get("brief") or text
+            video_threads.update(thread_ts, brief_only=True)
+            lead = ("Going ahead with only the context in this thread. "
+                    "Anything the team had to assume will be flagged on the "
+                    "script. Working")
+        video_threads.update(thread_ts, state=video_threads.STATE_CONCEPTING,
+                             brief=brief)
+        _ack(thread_ts,
+             "%s out three ways to tell this one, back shortly with concepts "
+             "to pick from. Nothing gets built until you say so."
+             % lead)
+        threading.Thread(
+            target=_develop_concepts, args=(thread_ts, brief), daemon=True
         ).start()
         return
 
@@ -444,6 +517,27 @@ def handle_video_studio_message(event: dict) -> None:
             target=_build_video, args=(thread_ts,), daemon=True
         ).start()
         return
+
+
+def _add_to_brief(row: dict | None, text: str) -> str:
+    """The thread's brief with one more message on the end."""
+    brief = ((row or {}).get("brief") or "").strip()
+    return (brief + "\n\n" + text.strip()) if brief else text.strip()
+
+
+def _ask_for_context(user: str) -> str:
+    """The question for a thread with no help centre link."""
+    who = "<@%s> " % user if user else ""
+    return (
+        "%sBefore the team starts: a help centre article makes for a much "
+        "stronger video. Paste the link to the article for this feature if "
+        "there is one.\n\n"
+        "If there is no article yet, tell me as much as you can about the "
+        "feature: what it does, who it is for, where it lives in Vome, and "
+        "what is new.\n\n"
+        "Or, do you want to continue to build a video with only the context "
+        "provided here? Reply *continue*. Nothing runs until you answer."
+        % who)
 
 
 def _guess_feature_name(text: str) -> str:

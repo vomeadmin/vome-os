@@ -287,3 +287,92 @@ def test_an_automated_message_starts_nothing(handler, monkeypatch):
         "channel": handler.slack.CHANNEL_VIDEO_STUDIO, "ts": "9.9",
         "user": "USLACKBOT", "text": "Reminder: check the video thread"})
     assert started == []
+
+
+# ------------------------------------------- no help centre link yet
+
+NO_LINK = "awaiting_context"
+LINK = "https://support.vomevolunteer.com/portal/en/kb/articles/x"
+
+
+@pytest.mark.parametrize("text,intent", [
+    ("continue", "continue"),
+    ("Yes, continue with the context provided", "continue"),
+    ("ok go ahead please", "continue"),
+    ("continue with the hook idea", "context"),
+    ("It lets admins send branded volunteer emails", "context"),
+    ("go build it", "need_context"),
+    ("here it is " + LINK, "context_link"),
+    ("scrap this", "scrap"),
+])
+def test_waiting_for_context(handler, text, intent):
+    assert handler.classify(text, NO_LINK) == intent
+
+
+@pytest.fixture
+def recorded(handler, monkeypatch):
+    """The handler with Slack, the database and the agents recorded."""
+    log = {"acks": [], "updates": [], "threads": []}
+    monkeypatch.setattr(handler, "_ack",
+                        lambda t, m: log["acks"].append(m))
+    monkeypatch.setattr(handler.video_threads, "start",
+                        lambda *a, **k: {})
+    monkeypatch.setattr(handler.video_threads, "update",
+                        lambda t, **f: log["updates"].append(f))
+
+    class _Thread:
+        def __init__(self, target, args, daemon):
+            log["threads"].append(args)
+
+        def start(self):
+            pass
+    monkeypatch.setattr(handler.threading, "Thread", _Thread)
+    return log
+
+
+def _say(handler, monkeypatch, text, row=None):
+    monkeypatch.setattr(handler.video_threads, "get", lambda t: row)
+    handler.handle_video_studio_message({
+        "channel": handler.slack.CHANNEL_VIDEO_STUDIO, "ts": "5.5",
+        "thread_ts": "5.5", "user": "U1", "text": text})
+
+
+def test_an_idea_without_a_link_asks_first(handler, monkeypatch, recorded):
+    """Nothing runs, and nothing is spent, until a link or "continue"."""
+    _say(handler, monkeypatch, "Video idea: branded volunteer emails")
+    assert recorded["threads"] == []
+    assert recorded["updates"][-1]["state"] == NO_LINK
+    assert "<@U1>" in recorded["acks"][0]
+    assert "continue to build a video with only the context" in \
+        recorded["acks"][0]
+
+
+def test_an_idea_with_a_link_starts_the_team(handler, monkeypatch,
+                                             recorded):
+    _say(handler, monkeypatch, "Video idea " + LINK)
+    assert recorded["updates"][-1]["state"] == "concepting"
+    assert len(recorded["threads"]) == 1
+
+
+def test_more_detail_is_added_to_the_brief(handler, monkeypatch, recorded):
+    _say(handler, monkeypatch, "It has a mobile preview",
+         row={"state": NO_LINK, "brief": "Branded emails"})
+    assert recorded["updates"][-1]["brief"] == \
+        "Branded emails\n\nIt has a mobile preview"
+    assert recorded["threads"] == []
+    assert "*continue*" in recorded["acks"][0]
+
+
+def test_continue_runs_on_the_brief_alone(handler, monkeypatch, recorded):
+    _say(handler, monkeypatch, "continue",
+         row={"state": NO_LINK, "brief": "Branded emails\n\nMore"})
+    assert {"brief_only": True} in recorded["updates"]
+    assert recorded["threads"] == [("5.5", "Branded emails\n\nMore")]
+
+
+def test_a_link_after_the_question_reads_it(handler, monkeypatch, recorded):
+    _say(handler, monkeypatch, "Found it " + LINK,
+         row={"state": NO_LINK, "brief": "Branded emails"})
+    assert any(u.get("faq_url") == LINK and u.get("brief_only") is False
+               for u in recorded["updates"])
+    assert len(recorded["threads"]) == 1
