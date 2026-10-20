@@ -215,7 +215,11 @@ flowchart TD
 flowchart TD
   P["A person posts an idea + help-centre link<br/>top level of #video-studio"]:::live --> F{"Slackbot, an app, a workflow<br/>or a reminder?"}:::deployed
   F -->|yes| X["Ignored, nothing runs (2026-10-20)"]:::deployed
-  F -->|no| SC["Scout (Sonnet 5.5): the bigger capability,<br/>is it new, what to look up"]:::live
+  F -->|no| LN{"Help centre link?"}:::deployed
+  LN -->|no| AC["Ask the person: the link, more detail,<br/>or 'continue' with only this context"]:::deployed
+  AC -->|more detail| AC
+  AC -->|link or 'continue'| SC
+  LN -->|yes| SC["Scout (Sonnet 5.5): the bigger capability,<br/>is it new, what to look up"]:::live
   SC --> RS["Research: related help articles, website copy,<br/>ClickUp Product Marketing Playbook, product labels"]:::live
   RS --> ST["Strategist (Fable 5.1): audience, one claim,<br/>context first, then what is new"]:::live
   ST --> CD["Creative director (Fable 5.1): three concepts<br/>in formats Studio can draw (Explainer, Reveal)"]:::live
@@ -303,10 +307,10 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 | G39 | featuredesk | Ticket feature requests the sprint posts in #feature-requests are not shaped by the architect | proposed | Bot posts are skipped, so client asks from tickets get no shape analysis | Run the architect on the sprint's feature posts too, reusing the same thread commands | agent |
 | G20 | items 1-5 | Close the loop, code checks, ticket fixes, autonomy report, Sam signature, resolution drafts | deployed | Pushed Oct 17/18 | Prove each on a real ticket | agent |
 | G44 | video | Slackbot, app, workflow and reminder messages ignored in #video-studio; threads record who started them | deployed | A 3:55 AM reminder was taken as a video idea and the full team ran on it (about $1.30) | Prove: the next reminder in the channel starts nothing | agent |
-| G45 | video | A new thread with no help-centre link still keyword-searches for an article | decide | It can draft from a neighbouring article without saying so | Ask for the link instead, or keep the search | Sam |
-| G46 | video | Creative director runs on Fable 5.1 (about $0.63 a round, a third of a round's cost) | decide | Fable is two thirds of a round's cost; the strategist is where it matters most | Try Opus 5.5 for the director on a few rounds and compare | Sam |
+| G45 | video | No link, no spend: a thread with no help-centre link asks for the link, more detail, or "continue" before any agent runs; the keyword search is gone | deployed | It drafted from a neighbouring article without saying so (the 3:58 AM reminder got sequence-step concepts) | Push; prove on a thread posted without a link | agent |
+| G46 | video | Strategist and creative director stay on Fable 5.1 (Sam, 2026-10-20) | live | About $1.25 of a $1.89 round; the concepts decide whether a video is good | None | Sam |
 | G47 | video | No Studio format can draw a dashboard or list screen (sequence progress, database views) | proposed | Concepts for those features fall back to capability cards and large type | Design a dashboard-style scene for the Reveal | Sam |
 | G48 | studio | 16:9 reuses the portrait card | proposed | Looks thin in a wide frame (YouTube, LinkedIn native) | A landscape layout: mock one side, headline the other | agent |
 | G49 | studio | Railway stops reading railway.toml (config as code) on 2026-12-01 | proposed | Studio deploys would lose the Dockerfile builder and restart policy | Migrate to .railway/railway.ts, adding the builder and restart policy the generator drops; never with managed variables | agent |
 | G50 | video | Local test runs of the video team write run logs into production's vomeos_agent_runs | proposed | Cost reports include tests (subject ids starting local.) | Point local runs at a throwaway VOMEOS_DATABASE_URL | agent |
-| G51 | studio | The free draft voice (Kokoro) is not in the Studio image | decide | Every build on Railway is a paid ElevenLabs build | Add Kokoro to the image for draft builds, or keep builds paid only | Sam |
+| G51 | studio | Every video is built with the paid voice, Maya on ElevenLabs (Sam, 2026-10-20); no draft voice in the image | live | A draft voice does not show how a video feels | None | Sam |

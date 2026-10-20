@@ -32,6 +32,9 @@ from database import DATABASE_URL, _get_engine
 # any number of times while a reviewer asks for changes to the script. Both
 # loops are the normal case and not an error.
 STATE_IDEA = "idea"
+# No help centre link yet. The thread waits, spending nothing, for a link,
+# more detail, or a person's "continue" with only what the thread says.
+STATE_AWAITING_CONTEXT = "awaiting_context"
 STATE_CONCEPTING = "concepting"
 STATE_AWAITING_CONCEPT = "awaiting_concept"
 STATE_DRAFTING = "drafting"
@@ -87,6 +90,10 @@ _ADD_COLUMNS = (
     # post this?" can be answered from the data. On 2026-10-20 it could not.
     "ALTER TABLE video_threads ADD COLUMN IF NOT EXISTS "
     "started_by VARCHAR NOT NULL DEFAULT ''",
+    # A person chose to go ahead without a help centre article: the brief is
+    # the only account of the feature, and no article is looked up.
+    "ALTER TABLE video_threads ADD COLUMN IF NOT EXISTS "
+    "brief_only BOOLEAN NOT NULL DEFAULT FALSE",
 )
 
 
@@ -141,7 +148,7 @@ def update(thread_ts: str, **fields) -> None:
     allowed = {"storyboard", "storyboard_json", "feature_name", "faq_url",
                "state", "rounds", "last_runtime", "render_folder",
                "positioning_json", "concepts_json", "chosen_concept",
-               "brief", "started_by"}
+               "brief", "started_by", "brief_only"}
     sets = {k: v for k, v in fields.items() if k in allowed}
     if not sets or not DATABASE_URL:
         return

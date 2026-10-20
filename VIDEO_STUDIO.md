@@ -47,10 +47,22 @@ The more you say about the angle and what Vome offers around the feature,
 the better. What you write about Vome's product counts as a source of fact;
 anything only your message supports is flagged for you to confirm.
 
+**No help centre link?** Nothing runs yet. The bot asks the person who
+posted for the link, or, if there is no article yet, for as much as they can
+say about the feature (what it does, who it is for, where it lives in Vome,
+what is new), and asks: "Do you want to continue to build a video with only
+the context provided here?" Every detail you add goes into the brief and
+the question is asked again, so you decide when there is enough. A link
+that cannot be found (a typo, or an article still in draft) gets the same
+question.
+
 **Then reply in the thread:**
 
 | You reply | What happens |
 |---|---|
+| A help centre link, while the bot is asking for one | The team starts on that article |
+| More about the feature, while it is asking | Added to the brief; asked again |
+| `continue` (also "go ahead", "yes, continue with the context provided"), **as the whole message**, while it is asking | The team starts with only what the thread says; assumptions are flagged on the script |
 | `1`, `2` or `3` (also "go with 2", "the second one") | That concept is written up as a script |
 | Anything else while concepts wait | Direction: three new concepts, and the strategist may re-position |
 | A note on the script ("make the hook say volunteer emails") | The script is revised |
@@ -66,6 +78,9 @@ Rules that protect you:
   is a note, and the bot says "I read this as notes, not approval". This
   exists because a note beginning "make it clear" once built a rejected
   script.
+- **No link, no spend.** A thread without a help centre link never reaches
+  a model until someone posts the link or replies `continue`. The bot never
+  guesses which article a feature is about.
 - **Approving while a script is being rewritten waits** for the new version.
 - **Nothing pulls back a running build**: it is already spending.
 - **Slackbot, apps, workflows and reminders are ignored entirely**, so a
@@ -201,8 +216,14 @@ From production's run records (`vomeos_agent_runs`), a real round on
 Direction re-runs the scout, strategist and director (about $1.25). A script
 note re-runs the copywriter (about $0.35). A lesson check is about $0.04.
 ElevenLabs voice and rendering are billed separately, on build only.
-Moving the creative director to Opus 5.5 would save about $0.45 a round
-(G46).
+
+Decided 2026-10-20 (G46): **the strategist and the creative director stay on
+Fable 5.1.** Opus 5.5 would save about $0.45 a round, and the concepts are
+the step that decides whether a video is any good.
+
+Decided 2026-10-20 (G51): **every video is built with the paid voice
+(Maya, ElevenLabs).** A draft voice does not show how a video feels, so
+there are no free draft builds.
 
 ---
 
@@ -210,13 +231,14 @@ Moving the creative director to Opus 5.5 would save about $0.45 a round
 
 | What | Where |
 |---|---|
-| One row per Slack thread: state, first message (`brief`), who started it (`started_by`), positioning, concepts, pick, storyboard | `video_threads` (Postgres, web service) |
+| One row per Slack thread: state, the brief (the first message plus any detail added while the bot asked for a link), who started it (`started_by`), whether it runs without an article (`brief_only`), positioning, concepts, pick, storyboard | `video_threads` (Postgres, web service) |
 | Lessons | `video_lessons` |
 | Every agent run: agent, model, tokens, time, thread | `vomeos_agent_runs`, `subject_id` = the Slack thread_ts |
 | Finished videos, each render's manifest and storyboard | Cloudflare R2 bucket `vome-studio-renders`, `<feature>/<date>/` |
 
-Thread states: `idea`, `concepting`, `awaiting_concept`, `drafting`,
-`awaiting_review`, `building`, `delivered`, `scrapped`.
+Thread states: `idea`, `awaiting_context` (no link yet, nothing spent),
+`concepting`, `awaiting_concept`, `drafting`, `awaiting_review`,
+`building`, `delivered`, `scrapped`.
 
 ---
 
@@ -274,15 +296,15 @@ or builds. No em dashes. Use VIDEO_STUDIO.md in this repo as the map.
    Slack connector and get its thread_ts.
 2. Read its video_threads row on production (railway ssh --service
    vome-support-agent, write a script to /tmp, run it from /app with
-   PYTHONPATH=/app): brief (the first message), started_by, state,
-   faq_url, created_at.
+   PYTHONPATH=/app): brief (the first message and any detail added),
+   started_by, state, faq_url, brief_only, created_at.
 3. Run classify() and is_automated() from slack_video_studio_handler.py
    locally on that text and the thread's state to show which path it took.
 4. Read vomeos_agent_runs for subject_id = that thread_ts: agents, models,
    time, and cost (Fable 5.1 $10/$50, Opus 5.5 $4/$20, Sonnet 5.5 $2/$10 per
    million input/output tokens).
-5. If no help-centre link was in the brief, say which article _faq_text
-   picked and why.
+5. If there is no faq_url, check whether someone replied "continue"
+   (brief_only true). Without either, no agent should have run at all.
 
 Report: one paragraph on what started it and why the bot responded,
 whether that was intended or a bug (with the code line), what it cost, and
@@ -303,3 +325,4 @@ Railway logs reset on every deploy, so the database is the reliable record.
 | 2026-10-17 | Marketing team (strategist, creative director, brand editor), concepts before scripts, the Reveal format, plain hooks, "volunteer" in every hook, lessons, start over and scrap, approval as the whole message |
 | 2026-10-18 | Playbook and website copy as context; Fable 5.1 and Opus 5.5; phone links; deployed |
 | 2026-10-20 | Slackbot, apps and reminders ignored after a 3:55 AM reminder started a video; threads record who started them |
+| 2026-10-20 | No link, no spend: a thread without a help centre link asks for one, or for detail, or for "continue"; the keyword search for an article is gone. Fable stays for strategy (G46); every build uses Maya (G51) |

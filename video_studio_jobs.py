@@ -206,6 +206,11 @@ def restart_concepts(thread_ts: str, direction: str = "") -> None:
 def _develop(thread_ts: str, brief: str, direction: str, row: dict) -> None:
     had_concepts = bool(video_concepts.load_concepts(row))
     result = run_concepts(brief, row, direction=direction)
+    if result.get("need_context"):
+        _post(thread_ts, "%s\n\n%s" % (result["error"], CONTINUE_OFFER))
+        video_threads.update(thread_ts,
+                             state=video_threads.STATE_AWAITING_CONTEXT)
+        return
     if not result.get("ok"):
         if direction and had_concepts:
             tail = ("The earlier concepts still stand: reply with 1, 2 or 3 "
@@ -321,14 +326,31 @@ def revise_script(thread_ts: str, note: str) -> None:
         capture_lessons(thread_ts, note, "script", row=row)
 
 
+# What the agents get in place of an article when a person chose to go
+# ahead without one.
+BRIEF_ONLY = (
+    "There is no help centre article for this feature. The person who asked "
+    "for this video chose to go ahead with only what they wrote, so the "
+    "brief is the account of the feature. Claim nothing about it that the "
+    "brief, the website copy or the product labels do not support, and put "
+    "anything you had to assume in your notes for the reviewer.")
+
+CONTINUE_OFFER = (
+    "Or, do you want to continue to build a video with only the context "
+    "provided here? Reply *continue*.")
+
+
 def _faq_text(row: dict, brief: str) -> tuple[str, str]:
     """The FAQ this video is about, as (title, body).
 
-    Prefer the article's own permalink from the link someone pasted. Falling
-    back to full-text search is a real fallback, not an equivalent: searching
-    for the feature name can rank a neighbouring article first, and writing a
-    script from the wrong FAQ is an error nobody catches until it is public.
+    Only ever the article at the link someone pasted. There used to be a
+    keyword search when no link was given; on 2026-10-20 it matched a Slack
+    reminder to an article about sequence steps, and the team wrote concepts
+    for it. A thread with no link now asks for one (or for a person's
+    "continue"), so a missing link is never guessed at.
     """
+    if row.get("brief_only"):
+        return "", BRIEF_ONLY
     url = (row.get("faq_url") or "")
     if not url:
         m = FAQ_URL.search(brief or "")
@@ -351,20 +373,7 @@ def _faq_text(row: dict, brief: str) -> tuple[str, str]:
         # search of our copy: that found "How do the Vome API and webhooks
         # work?" for an email format article on the first live run.
         return _live_article(permalink) or ("", "")
-
-    query = (row.get("feature_name") or brief or "").strip()
-    if not query:
-        return "", ""
-    try:
-        from database import search_kb_articles_db
-        hits = search_kb_articles_db(query, language="en", limit=1,
-                                     body_chars=20000)
-    except Exception as exc:
-        print("[VIDEO] KB search failed for %r: %s" % (query, exc))
-        return "", ""
-    if not hits:
-        return "", ""
-    return hits[0].get("title", ""), hits[0].get("body", "")
+    return "", ""
 
 
 def _live_article(permalink: str) -> tuple[str, str] | None:
@@ -578,18 +587,20 @@ def _remember_storyboard(thread_ts: str, sb: dict) -> None:
 
 
 def _no_faq_error(row: dict, message: str) -> dict:
+    """No article to work from. `need_context` sends the thread back to
+    waiting for a link, more detail or "continue", instead of ending it."""
     if row.get("faq_url") or FAQ_URL.search(message or ""):
         return {
-            "ok": False,
+            "ok": False, "need_context": True,
             "error": ("I could not find that article, in my copy of the "
                       "help centre or in Zoho itself. Check the link, "
                       "and that the article is published rather than a "
                       "draft, then post it again in this thread."),
         }
     return {
-        "ok": False,
-        "error": ("I could not find the FAQ for this one. Paste the help "
-                  "centre link and I will read it."),
+        "ok": False, "need_context": True,
+        "error": ("I could not find the help centre article for this one. "
+                  "Paste the link and I will read it."),
     }
 
 
