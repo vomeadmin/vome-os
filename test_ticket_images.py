@@ -223,3 +223,46 @@ def test_a_failed_download_is_named(monkeypatch):
     images, note = ti.fetch_ticket_images("1")
     assert images == []
     assert "Not seen" in note
+
+
+# ---------------------------------------------------------------------------
+# App: support widget uploads (#9596)
+# ---------------------------------------------------------------------------
+
+BUCKET = "https://vomevolunteer-bucket1.s3.amazonaws.com/media/support-attachments"
+WIDGET = (
+    "<div><b>Customer</b><br><span>here is a screen recording</span></div>"
+    f'<p><b>Attachments:</b> <a href="{BUCKET}/24f42f51.png" '
+    'target="_blank">24f42f51.png</a>, '
+    f'<a href="{BUCKET}/9c1d.webm">9c1d.webm</a></p>'
+    '<a href="https://evil.example.com/media/support-attachments/x.png">x</a>'
+)
+
+
+def test_widget_links_are_only_our_bucket():
+    assert ti.widget_links(WIDGET) == [f"{BUCKET}/24f42f51.png",
+                                       f"{BUCKET}/9c1d.webm"]
+
+
+def test_a_widget_screenshot_is_shown_and_a_recording_is_named(monkeypatch):
+    _fake_zoho(
+        monkeypatch,
+        threads=[{"id": "t1", "direction": "in", "createdTime": "2026-10-20",
+                  "author": {"name": "Ia Faye Sison"}}],
+        details={"t1": {"content": WIDGET, "attachments": []}},
+        files={},
+    )
+    fetched = []
+
+    def widget(url):
+        fetched.append(url)
+        return PNG, "image/png"
+
+    monkeypatch.setattr(ti, "_download_widget", widget)
+    images, note = ti.fetch_ticket_images("1")
+    # Fetched without the Zoho token (_download is never asked), and only
+    # the screenshot: a recording cannot be shown, so it is named instead.
+    assert fetched == [f"{BUCKET}/24f42f51.png"]
+    assert [i.label for i in images] == [
+        "screenshot Ia Faye Sison took in the support widget, 2026-10-20"]
+    assert "9c1d.webm" in note and "not viewable" in note

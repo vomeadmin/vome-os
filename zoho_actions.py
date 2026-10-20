@@ -79,8 +79,16 @@ def _ours(address: str) -> bool:
     return any(token in address for token in _OUR_MAILBOXES)
 
 
-def first_name(author: str, email: str = "") -> str:
-    """"Phan, Dalena" -> Dalena. "Stephanie Sielaty" -> Stephanie."""
+def first_name(author: str, email: str = "", given: str = "") -> str:
+    """"Phan, Dalena" -> Dalena. "Stephanie Sielaty" -> Stephanie.
+
+    `given` is the first name Zoho keeps on the author, and wins when set:
+    the display name cannot say where a two-word first name ends ("Ia Faye
+    Sison" was greeted as "Ia", #9596).
+    """
+    given = (given or "").strip()
+    if given and "@" not in given:
+        return given
     author = (author or "").strip().strip('"')
     if "," in author:
         after = author.split(",", 1)[1].strip()
@@ -144,6 +152,7 @@ def recipients(ticket_id: str) -> dict:
               or emails_in((latest.get("author") or {}).get("email")))
     to = sender[0] if sender else ""
     author = (latest.get("author") or {}).get("name") or ""
+    given = (latest.get("author") or {}).get("firstName") or ""
     cc: list[str] = []
     for address in emails_in(latest.get("cc")) + _secondary_emails(ticket_id):
         if address != to and not _ours(address) and address not in cc:
@@ -151,7 +160,7 @@ def recipients(ticket_id: str) -> dict:
     return {
         "to": to,
         "cc": cc,
-        "first_name": first_name(author, to),
+        "first_name": first_name(author, to, given),
         "thread_id": str(latest.get("id") or ""),
         # When the customer last wrote: the age a batch shows.
         "received_at": str(latest.get("createdTime") or ""),
