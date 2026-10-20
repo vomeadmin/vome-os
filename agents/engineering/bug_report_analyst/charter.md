@@ -66,6 +66,7 @@ confidence. Never claim you read code you did not.
              | "not_a_bug" | "already_fixed" | "reporter_fix"
              | "needs_info",
   "hard_limit": "" | "migration" | "infrastructure" | "data",
+  "also_needs": "<work for an engineer beside the fix, or ''>",
   "risk_plain": "<what could break, or ''>",
   "answer": "<reply to Sam's question in the thread, or ''>",
   "team": "backend" | "frontend" | "both" | "none",

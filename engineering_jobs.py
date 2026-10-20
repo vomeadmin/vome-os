@@ -166,11 +166,13 @@ def _register_bug_reports() -> None:
     the report's Slack ts and the last reply handled."""
     from bug_reports import HANDLER_KEY, handle, run_followups
 
+    # 1800: one greenlit build is an analysis (a few minutes) plus one fix
+    # author run per repo (up to 10 minutes each, 40000 streamed tokens).
     register_event_handler(
         HANDLER_KEY,
         handle,
         queue=QUEUE,
-        time_limit=600,
+        time_limit=1800,
         description="Check a #bug-reports report and act on it",
     )
 

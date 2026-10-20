@@ -27,6 +27,15 @@ no idea what it is), or a hard limit applies. Name it in `hard_limit`:
 
 A greenlight never lifts these. Sam's yes cannot build them, so say so.
 
+**A report that asks for a code fix AND a one-off data update** (Ron's
+cancellation policy report, 2026-10-20: a web fix plus "turn every blank
+policy into 12 hours") is two pieces of work. `hard_limit` is only for when
+the code change itself needs a migration, infrastructure or data work. Put
+the other piece in `also_needs` ("one-off update: every blank cancellation
+policy becomes a custom 12-hour window", team backend) and greenlight the
+code fix. Marking the whole report `data` refused the web fix along with
+it.
+
 **Fill in for every greenlight:**
 
 - `code_check.files`: every spot the fix changes, one `repo:path:line` each,

@@ -523,6 +523,30 @@ def test_the_agents_own_small_fix_failing_is_logged(rec):
     assert "Agent Workflows" in rec.posts[-1][2]
 
 
+def test_a_fix_with_a_data_update_beside_it_builds_and_routes_the_rest(
+        rec, monkeypatch):
+    """Ron's cancellation policy report (2026-10-20): a web fix plus a
+    one-off data update. The fix is built; the data part goes to backend."""
+    import sprint_thread
+
+    card = {**GUEST, "also_needs": "one-off update: blank policies become "
+                                   "a 12-hour window"}
+    out = bug_reports.act(TS, _row(), card)
+    assert "*Also needs an engineer:* one-off update" in rec.posts[-1][2]
+    rec.posts.clear()
+    _greenlight_waiting(monkeypatch, card=card)
+    out = bug_reports._on_reply(TS, _sam("yes"))
+    assert out.get("pr_urls")
+    created = [c for c in rec.calls
+               if c[1] == f"/list/{bug_reports.PRIORITY_QUEUE}/task"]
+    assert len(created) == 1 and created[0][2]["assignees"] == [49257687]
+    assert "one-off update" in created[0][2]["name"]
+    assert any(p[0] == sprint_thread.ENG_BACKEND for p in rec.posts)
+    thread = rec.posts[-1][2]
+    assert thread.startswith(":white_check_mark: Fixed by the agent.")
+    assert "Also logged on ClickUp for OnlyG" in thread
+
+
 def test_a_hard_limit_is_a_refusal_not_a_failure(rec, monkeypatch):
     _greenlight_waiting(monkeypatch, card={**GUEST,
                                            "hard_limit": "migration"})

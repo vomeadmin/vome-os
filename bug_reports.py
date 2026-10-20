@@ -577,10 +577,13 @@ def _ask_greenlight(ts: str, row: dict, card: dict, why: str,
         f"*Problem:* {card.get('headline') or ''}",
         f"*Fix:* {code.get('fix') or ''} (in {repos})",
         f"*Risk:* {risk}",
-        "Reply `yes` to build the pull request, "
-        "`route backend|frontend|both` to send it to an engineer, "
-        "or `close`.",
     ]
+    if card.get("also_needs"):
+        lines.append(f"*Also needs an engineer:* {card['also_needs']}. "
+                     "Sent to backend once the pull request is open.")
+    lines.append("Reply `yes` to build the pull request, "
+                 "`route backend|frontend|both` to send it to an engineer, "
+                 "or `close`.")
     if url:
         lines.append(f"Details on ClickUp: <{url}|task>")
     if logged:
@@ -749,6 +752,8 @@ def _build(ts: str, row: dict, card: dict, greenlit: bool,
     lines.append(f"Logged on ClickUp: <{task_url}|Agent Fixes task>"
                  if task_url else
                  f"<@{SAM_SLACK}> the ClickUp task could not be saved.")
+    if card.get("also_needs"):
+        lines.append(_route_extra(ts, row, card))
     if failed:
         rest = "; ".join(f"{a}: {r.rstrip('. ')}" for a, r in failed)
         lines.append(f"Not built: {rest}. Say `route {_team(card)}` to send "
@@ -1240,6 +1245,36 @@ def _field_value(task: dict, field_id: str):
         if field.get("id") == field_id:
             return field.get("value")
     return None
+
+
+def _route_extra(ts: str, row: dict, card: dict) -> str:
+    """The part of a report no agent may do (a one-off data update beside
+    the code fix) goes to the backend engineer as its own Priority Queue
+    task, linked to the reporter's. Data work is backend work. Returns the
+    thread line. The report itself stays on the fix's track."""
+    engineers = _engineers("backend")
+    extra = str(card.get("also_needs") or "").strip()
+    task_id = _create_task(
+        {**card, "headline": f"{card.get('headline') or 'Bug report'}: "
+                             f"{extra}"[:180],
+         "engineer_summary": extra},
+        ts, [e[1] for e in engineers],
+        "this part of a greenlit fix is work agents never do",
+        row.get("text") or "")
+    if row.get("task_id") and task_id:
+        _link(row["task_id"], task_id)
+    url = f"https://app.clickup.com/t/{task_id}" if task_id else ""
+    names = _names(engineers)
+    for _key, _cid, slack_id, label, channel in engineers:
+        _post("\n".join(p for p in (
+            f"<@{slack_id}> New {label} task from #bug-reports, beside an "
+            f"agent fix: *{extra}*",
+            f"ClickUp: {url}" if url else "",
+            f"Report: {_permalink(ts)}",
+        ) if p), channel=channel)
+    channels = " and ".join(f"<#{e[4]}>" for e in engineers)
+    return (f"Also logged on ClickUp for {names} and sent in {channels}: "
+            f"{extra}" + (f" <{url}|task>" if url else ""))
 
 
 def _create_task(card: dict, ts: str, assignees: list, reason: str,
