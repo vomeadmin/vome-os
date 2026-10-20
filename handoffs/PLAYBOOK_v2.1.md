@@ -62,9 +62,18 @@ The tickets have already been triaged and, where it applies, routed or fixed. Th
 | `works_as_designed` | How-to answer from the help centre and UI text, exact page and button names, article link. If the answer came from code with no article, say so and offer `run_faq` |
 | Raw error report, chunk-load error, page crash | Agent hotfix, `close_ticket_quietly`, no reply. If the agent cannot fix it, route to Sanjay silently |
 | Housekeeping ("thanks, it works", out-of-office, an error the code already handles) | `close_ticket_quietly`, no reply |
-| Feature request | Always Sam's to log: `log_ticket_request` (posts to #vome-feature-requests). Sam decides log, build (Sam Accepted, Build Now) or no. Never logged automatically. Nothing promised to the client before that |
+| Feature request | Always Sam's to log: `log_ticket_request` (posts to #vome-feature-requests). Sam decides build now (Sam Accepted), log for later (Raw Intake) or no. Never logged automatically. Nothing promised to the client before that |
 | Data, billing, account operations (lookups under another email, merges, data fixes, contracts) | Flag for Sam, who handles it in Zoho. No action |
 | Notification delay | Draft a Slack DM to OnlyG to check the endpoint logs and the Celery queue, rather than a bug task |
+
+**Logging a feature request: build now or for later.** Sam's words decide where it goes, not the verb "log".
+- **Build now**, `log_ticket_request(ticket, build=true)`: "build", "build now", "I'll take it", "I want to handle this", "put it on my list", or "log it" while saying he will do it himself. It lands in Sam Accepted (Build Now), assigned to Sam, high priority. Sam Accepted is his working list: only what he will build himself, soon.
+- **For later**, `log_ticket_request(ticket)`: "log", "log it", "backlog it", "for the future", "not now". It lands in Raw Intake, unassigned, for him to triage when he chooses.
+- **Unclear:** ask one line, "Build now or log for later?" Never guess.
+- Always pass `title` (a short capability name in product words, never the client's question) and `module`.
+- It checks for duplicates first and logs nothing if any look similar. Show him the candidates and say which, if any, is the same request. On his word, `existing_task_id` adds this client to one (with `build`, that task also moves to Sam Accepted), or `confirm_new=true` logs it new.
+- A backlog task he now wants to build himself: `triage_feature_request(task_id, "build_now", priority="high", assign_to_me=true)`.
+- The client hears nothing until Sam approves a reply, and the reply says "added to our team review" either way.
 
 ## Reply voice
 

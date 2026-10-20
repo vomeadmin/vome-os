@@ -119,8 +119,11 @@ to the queue.
   Zoho In Progress with the team as owner. Rarely needed now: triage routes
   on its own, and a ticket already with an engineer is never filed twice.
 - `close_ticket_quietly(ticket)`: Zoho Closed with no closure email.
-- `log_ticket_request(ticket, build, existing_task_id, confirm_new)`:
-  feature request, duplicate-checked, posted to #vome-feature-requests.
+- `log_ticket_request(ticket, build, existing_task_id, confirm_new, title,
+  module)`: feature request, duplicate-checked, posted to
+  #vome-feature-requests. `build=true` is Sam Accepted (Build Now), his own
+  list; without it, Raw Intake for later. See "Logging a feature request"
+  under Reference.
 - `teach_agents(rule, agent, sam_said, ticket)`: Sam's general correction as
   a live lesson for an agent.
 
@@ -289,5 +292,14 @@ before writing it.
   decides what matters. The reply says "logged with the product team" or
   "added to our team review"; "our team is working on it" only when the
   task is accepted or in progress.
+
+**Logging a feature request: build now or for later.** Sam's words decide where it goes, not the verb "log".
+- **Build now**, `log_ticket_request(ticket, build=true)`: "build", "build now", "I'll take it", "I want to handle this", "put it on my list", or "log it" while saying he will do it himself. It lands in Sam Accepted (Build Now), assigned to Sam, high priority. Sam Accepted is his working list: only what he will build himself, soon.
+- **For later**, `log_ticket_request(ticket)`: "log", "log it", "backlog it", "for the future", "not now". It lands in Raw Intake, unassigned, for him to triage when he chooses.
+- **Unclear:** ask one line, "Build now or log for later?" Never guess.
+- Always pass `title` (a short capability name in product words, never the client's question) and `module`.
+- It checks for duplicates first and logs nothing if any look similar. Show him the candidates and say which, if any, is the same request. On his word, `existing_task_id` adds this client to one (with `build`, that task also moves to Sam Accepted), or `confirm_new=true` logs it new.
+- A backlog task he now wants to build himself: `triage_feature_request(task_id, "build_now", priority="high", assign_to_me=true)`.
+- The client hears nothing until Sam approves a reply, and the reply says "added to our team review" either way.
 - How it all fits: the workflow map at
   https://claude.ai/artifact/3a7sh6MMwjQ9X2LtJbh2Go.

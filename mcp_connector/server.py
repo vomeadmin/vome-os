@@ -336,9 +336,11 @@ def build() -> MCPServer:
     async def triage_feature_request(
         task_id: Annotated[str, Field(description="The ClickUp task id")],
         decision: Annotated[Literal[
-            "priority_queue", "accepted_backlog", "sleeping", "declined",
-            "keep_in_intake",
-        ], Field(description="Where the request goes")],
+            "build_now", "priority_queue", "accepted_backlog", "sleeping",
+            "declined", "keep_in_intake",
+        ], Field(description=(
+            "Where the request goes. build_now is Sam Accepted (Build "
+            "Now): Sam builds it himself, soon"))],
         priority: Annotated[Literal["", "urgent", "high", "normal", "low"],
                             Field(description="Leave empty to not change")
                             ] = "",
@@ -598,21 +600,37 @@ def build() -> MCPServer:
     @server.tool(annotations=WRITE)
     async def log_ticket_request(
         ticket: Annotated[str, Field(description="Ticket number")],
-        build: Annotated[bool, Field(
-            description="True puts it in Sam Accepted (Build Now)")] = False,
+        build: Annotated[bool, Field(description=(
+            "True when Sam will build it himself, soon (build, build now, "
+            "I'll take it, I want to handle this): Sam Accepted (Build "
+            "Now), assigned to Sam, high priority. False when it is for "
+            "later (log, log it, backlog, future, not now): Raw Intake, "
+            "unassigned. Saying log while also saying he will handle it "
+            "himself means True. Unclear: ask 'build now or log for "
+            "later?'"))] = False,
         existing_task_id: Annotated[str, Field(
-            description="Add this client to an existing request instead")
+            description=("Add this client to an existing request instead; "
+                         "with build, that task also moves to Sam Accepted"))
         ] = "",
         confirm_new: Annotated[bool, Field(
             description="Log it even though similar requests exist")] = False,
+        title: Annotated[str, Field(description=(
+            "Short name for the capability in product words, e.g. 'Shared "
+            "and bulk settings for sequences and forms'. Not the client's "
+            "question"))] = "",
+        module: Annotated[str, Field(description=(
+            "Product area, e.g. 'sequences', 'forms', 'admin scheduling'"))
+        ] = "",
     ) -> dict:
-        """Log a ticket's feature request (Sam only): checks for an existing
-        request first, and posts the decision to #vome-feature-requests
-        with the client. Tells the customer nothing."""
+        """Log a ticket's feature request (Sam only), build now or for
+        later: checks for an existing request first, and posts the decision
+        to #vome-feature-requests with the client. Tells the customer
+        nothing."""
         return await _run("log_ticket_request",
                           sprint_tools.log_ticket_request, ticket=ticket,
                           build=build, existing_task_id=existing_task_id,
-                          confirm_new=confirm_new, caller=caller())
+                          confirm_new=confirm_new, title=title,
+                          module=module, caller=caller())
 
     @server.tool(annotations=WRITE)
     async def teach_agents(

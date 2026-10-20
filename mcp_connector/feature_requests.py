@@ -6,7 +6,7 @@ The only writes the connector makes, and all of them are to ClickUp.
 THE FLOW
 --------
 1. A customer asks for something Vome does not do.
-2. Whoever is drafting calls `log_feature_request`. It searches the five
+2. Whoever is drafting calls `log_feature_request`. It searches the
    backlog lists first. If anything plausible exists it creates NOTHING and
    returns the candidates, because the Lessons Log of 2026-09-02 found the
    same person's fifth request for one feature, and five tasks for one
@@ -15,7 +15,8 @@ THE FLOW
    existing task and appends the organization to Requesting Clients.
 4. If it is new, it lands in Raw Intake as Type: Feature with no priority.
 5. Sam (MCP_TRIAGE_EMAILS) calls `triage_feature_request` to set a priority
-   and move it: Priority Queue, Accepted Backlog, Sleeping or Declined.
+   and move it: Sam Accepted (Build Now, he builds it himself), Priority
+   Queue, Accepted Backlog, Sleeping or Declined.
 
 Until (5), a request is a record that someone asked and nothing more. A
 reply to the customer may say "logged with the product team" and must not
@@ -23,7 +24,7 @@ say "on the roadmap", which is what `vomeos/guards/claims.py` exists to stop.
 
 SCOPE OF THE WRITES
 -------------------
-Comments and triage are refused on any task outside the five backlog lists
+Comments and triage are refused on any task outside the backlog lists
 in `clickup_search.LISTS`, so the connector cannot be pointed at an
 arbitrary task elsewhere in the workspace.
 """
@@ -42,6 +43,7 @@ from status_constants import CU_WRITE_QUEUED_LOWER
 BASE = clickup_tasks.CLICKUP_BASE
 
 DECISIONS = {
+    "build_now": clickup_search.LISTS["Sam Accepted (Build Now)"],
     "priority_queue": clickup_search.LISTS["Priority Queue"],
     "accepted_backlog": clickup_search.LISTS["Accepted Backlog"],
     "sleeping": clickup_search.LISTS["Sleeping"],
@@ -82,8 +84,8 @@ def _get_backlog_task(task_id: str) -> dict:
     if list_id not in _BACKLOG_LIST_IDS:
         raise RequestError(
             f"task {task_id} is not in a product backlog list; the "
-            "connector only writes to Raw Intake, Priority Queue, Accepted "
-            "Backlog, Sleeping and Declined"
+            "connector only writes to Raw Intake, Sam Accepted (Build "
+            "Now), Priority Queue, Accepted Backlog, Sleeping and Declined"
         )
     return task
 
