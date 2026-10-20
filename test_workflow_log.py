@@ -113,6 +113,9 @@ def rec(monkeypatch):
     monkeypatch.setattr(wl, "_permalink", lambda c, t: "https://s/thread")
     monkeypatch.setattr(wl, "_post",
                         lambda c, t, text: r.posts.append((c, t, text)))
+    r.marked = []
+    monkeypatch.setattr(wl, "_mark_logged",
+                        lambda c, t: r.marked.append((c, t)))
 
     def clickup(method, path, body=None):
         r.calls.append((method, path, body))
@@ -147,6 +150,8 @@ def test_logs_a_task_in_agent_workflows(rec):
     assert thread == "1.0"
     assert text.startswith(":white_check_mark: Logged on ClickUp in Agent "
                            "Workflows: <https://app.clickup.com/t/T1|")
+    # A clipboard on the thread's first message: visible without opening it.
+    assert rec.marked == [("C0CAJ269RAQ", "1.0")]
 
 
 def test_logged_by_ron_says_so(rec):
@@ -163,13 +168,14 @@ def test_same_thread_again_comments_on_its_task(rec):
     assert not any(c[1] == f"/list/{wl.LIST}/task" for c in rec.calls)
     assert any(c[1] == "/task/T0/comment" for c in rec.calls)
     assert "Added to the existing task" in rec.posts[-1][2]
+    assert rec.marked == [("C0CAJ269RAQ", "1.0")]
 
 
 def test_a_message_already_claimed_is_skipped(rec):
     rec.claimed = False
     assert wl.handle(_event("log this on clickup"))["reason"] == \
         "already logged"
-    assert rec.calls == [] and rec.posts == []
+    assert rec.calls == [] and rec.posts == [] and rec.marked == []
 
 
 def test_logger_failure_still_logs_a_rough_task(rec):
@@ -183,6 +189,62 @@ def test_logger_failure_still_logs_a_rough_task(rec):
 def test_unknown_type_becomes_question(rec):
     rec.card = {**CARD, "type": "complaint"}
     assert wl.handle(_event("log this on clickup"))["type"] == "question"
+
+
+# ---------------------------------------------------------------------------
+# Logged by the agents themselves after a failure (Sam, 2026-10-20)
+# ---------------------------------------------------------------------------
+
+def test_log_issue_files_a_tagged_task_and_marks_the_thread(rec, monkeypatch):
+    monkeypatch.setattr(wl.store, "ensure_table", lambda t: False)
+    url = wl.log_issue("bug reports", "Build failed: cancellation policy",
+                       "The greenlit build failed.", "- Reason: x",
+                       channel="C0CAJ269RAQ", thread_ts="1.0")
+    assert url == "https://app.clickup.com/t/T1"
+    create = [c for c in rec.calls if c[1] == f"/list/{wl.LIST}/task"][0][2]
+    assert create["name"] == "[Bug] Build failed: cancellation policy"
+    assert create["assignees"] == [wl.SAM_CLICKUP]
+    assert "Logged automatically by the bug reports workflow" in \
+        create["markdown_description"]
+    tagged = [c[1] for c in rec.calls if "/tag/" in c[1]]
+    assert tagged == ["/task/T1/tag/bug", "/task/T1/tag/auto%20logged"]
+    assert rec.marked == [("C0CAJ269RAQ", "1.0")]
+    assert rec.posts == []  # the caller says it in its own message
+
+
+def test_a_second_failure_in_the_thread_comments_instead(rec):
+    rec.existing = ("T0", "[Bug] Build failed")
+    url = wl.log_issue("bug reports", "t", "again", "- Reason: y",
+                       channel="C1", thread_ts="1.0")
+    assert url == "https://app.clickup.com/t/T0"
+    assert not any(c[1] == f"/list/{wl.LIST}/task" for c in rec.calls)
+    assert any(c[1] == "/task/T0/comment" for c in rec.calls)
+
+
+def test_log_issue_never_raises(rec, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("clickup down")
+
+    monkeypatch.setattr(wl, "_clickup", boom)
+    assert wl.log_issue("bug reports", "t", "s", "d") == ""
+
+
+def test_github_writes_count_the_alias_token(monkeypatch):
+    """Every GitHub agent PR was refused before it was sent: the token lives
+    under its alias and the guard ignored aliases (2026-10-20)."""
+    from vomeos.integrations import code_write
+
+    for name in list(__import__("os").environ):
+        if name.startswith("VOMEOS_GITHUB_WRITE_TOKEN") or \
+                name == "VOMEOS_GITHUB_OWNER":
+            monkeypatch.delenv(name, raising=False)
+    writer = code_write.GitHubWriter()
+    alias = code_write.OWNER_TOKEN_ALIASES["VOMEADMIN"][0]
+    monkeypatch.delenv(alias, raising=False)
+    assert not writer.configured()
+    monkeypatch.setenv(alias, "token")
+    assert writer.configured()
+    assert writer.configured(owner="vomeadmin")
 
 
 def test_top_level_message_threads_its_reply_under_itself(rec):

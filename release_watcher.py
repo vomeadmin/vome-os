@@ -953,6 +953,16 @@ def run_release_watcher(
                 _message(state, task, checks, children, errors, dry_run,
                          resolutions)
             )
+            if state == FIX_LIVE:
+                # A #feature-requests build tells its thread it shipped.
+                # Once per item, whatever the ledger does.
+                try:
+                    import feature_desk
+
+                    feature_desk.fix_live(task["id"])
+                except Exception as exc:
+                    print(f"[RELEASE] feature desk not told for "
+                          f"{task['id']}: {exc}")
         elif resolutions:
             import release_resolutions
 

@@ -48,6 +48,10 @@ def desk(monkeypatch):
                         calls["comments"].append((task, text)))
     monkeypatch.setattr(fd, "_set_source", lambda task: None)
     monkeypatch.setattr(fd, "_permalink", lambda ts: "")
+    calls["reactions"] = []
+    monkeypatch.setattr(fd, "_react", lambda ts:
+                        calls["reactions"].append(ts))
+    monkeypatch.setattr(fd, "_row", lambda ts: {})
     monkeypatch.setattr(fd, "_name", lambda user: "Ron")
     monkeypatch.setattr(fd, "_create_task", lambda item, ts, row:
                         calls["tasks"].append(item["n"]) or "T-NEW")
@@ -210,6 +214,35 @@ def test_log_with_a_linked_task_goes_on_that_task(desk):
     assert items["1"]["state"] == fd.LOGGED
     assert desk["comments"][0][0] == "T1"
     assert desk["tasks"] == []
+
+
+def test_a_settled_thread_gets_a_check_mark_and_one_line(desk):
+    """Sam, 2026-10-19: mark what is handled and on ClickUp."""
+    items = {"1": {"n": "1", "state": fd.PR_OPEN, "recorded": True,
+                   "fix_task": "AF1"},
+             "2": {"n": "2", "state": fd.LOGGED}}
+    fd._record("1.1", {"task_id": "T1"}, items)
+    assert desk["reactions"] == ["1.1"]
+    assert desk["comments"][0][0] == "T1"
+    line = desk["posts"][-1]
+    assert line.startswith(":white_check_mark: Handled: 1 PR open")
+    assert "2 logged" in line
+    assert "app.clickup.com/t/T1" in line and "t/AF1" in line
+    assert {"status": fd.SETTLED} in desk["saves"]
+
+
+def test_no_check_mark_while_anything_is_open(desk):
+    items = {"1": {"n": "1", "state": fd.LOGGED},
+             "2": {"n": "2", "state": fd.WAITING_SAM}}
+    fd._record("1.1", {"task_id": "T1"}, items)
+    assert desk["reactions"] == [] and desk["comments"] == []
+
+
+def test_the_check_mark_is_given_once(monkeypatch, desk):
+    monkeypatch.setattr(fd, "_row", lambda ts: {"status": fd.SETTLED})
+    fd._record("1.1", {"task_id": "T1"},
+               {"1": {"n": "1", "state": fd.LOGGED, "recorded": True}})
+    assert desk["reactions"] == [] and desk["posts"] == []
 
 
 def test_log_without_a_task_waits_for_sam(desk):
@@ -538,7 +571,7 @@ def test_the_outcome_goes_on_the_task_once_it_settles(monkeypatch, desk):
     assert len(desk["comments"]) == 1
     task, text = desk["comments"][0]
     assert task == "T1" and "Bulk" in text and "Trial" in text
-    saved = json.loads(desk["saves"][-1]["items"])
+    saved = json.loads([s for s in desk["saves"] if "items" in s][-1]["items"])
     assert all(item["recorded"] for item in saved.values())
     fd._record("1.1", {"task_id": "T1"}, saved)
     assert len(desk["comments"]) == 1
@@ -551,7 +584,7 @@ def test_sams_log_goes_on_the_task_straight_away(monkeypatch, desk):
     monkeypatch.setattr(fd, "_row", lambda ts: _row(items, task_id="T1"))
     fd._on_reply("1.1", {"ts": "2", "user": SAM, "text": "log 1"})
     assert [task for task, _ in desk["comments"]] == ["T1"]
-    saved = json.loads(desk["saves"][-1]["items"])
+    saved = json.loads([s for s in desk["saves"] if "items" in s][-1]["items"])
     assert saved["1"]["recorded"] is True
     assert not saved["2"].get("recorded")
 
@@ -564,3 +597,67 @@ def test_compare_reads_into_lists():
     actual = {"items": [{"verdict": "log"}, {"verdict": "decision"}]}
     assert compare({"items.1.verdict": "decision"}, actual) == []
     assert compare({"items.2.verdict": "log"}, actual) != []
+
+
+# ---------------------------------------------------------------------------
+# After the PR: merged, live, closed (Sam, 2026-10-19)
+# ---------------------------------------------------------------------------
+
+PR = ("https://bitbucket.org/vomedjango/vomedjango-restored-core-app/"
+      "pull-requests/7")
+
+
+def _built(monkeypatch, **over):
+    items = {"1": {**_build_item(), "state": fd.PR_OPEN, "pr_url": PR,
+                   "fix_task": "AF1", "recorded": True, **over}}
+    monkeypatch.setattr(fd, "_items_with", lambda value: [
+        ("1.1", {"ts": "1.1", "task_id": "T1"}, items)])
+    monkeypatch.setattr(fd, "_read_post", lambda ts: {"requester_id": RON})
+    return items
+
+
+def test_merged_tells_the_requester_to_test_on_dev(monkeypatch, desk):
+    items = _built(monkeypatch)
+    fd.pr_merged(PR, "core@abc123")
+    assert items["1"]["merged"] == "core@abc123"
+    assert "Merged into development" in desk["posts"][0]
+    assert f"<@{RON}>" in desk["posts"][0]
+    assert "core@abc123" in desk["posts"][0]
+    fd.pr_merged(PR, "core@abc123")
+    assert len(desk["posts"]) == 1
+
+
+def test_live_is_said_once(monkeypatch, desk):
+    items = _built(monkeypatch, merged="core@abc123")
+    fd.fix_live("AF1")
+    fd.fix_live("AF1")
+    assert len(desk["posts"]) == 1
+    assert "Live in production" in desk["posts"][0]
+    assert items["1"]["live"] is True
+
+
+def test_a_pr_closed_unmerged_reopens_the_item(monkeypatch, desk):
+    removed = []
+    monkeypatch.setattr(fd, "_unreact", lambda ts: removed.append(ts))
+    items = _built(monkeypatch)
+    fd.pr_closed(PR)
+    assert items["1"]["state"] == fd.HELD and items["1"]["pr_url"] == ""
+    assert removed == ["1.1"]
+    assert "`go 1` builds it again" in desk["posts"][0]
+    assert desk["saves"][-1]["status"] == fd.OPEN
+
+
+def test_the_release_watcher_promotion_tells_the_thread(monkeypatch):
+    import ticket_fix
+
+    told = []
+    monkeypatch.setattr(ticket_fix, "_pr_state",
+                        lambda url: ("merged", "core", "abc123"))
+    monkeypatch.setattr(ticket_fix, "_clickup", lambda *a, **k: {})
+    monkeypatch.setattr(ticket_fix, "_sprint_note", lambda *a: None)
+    monkeypatch.setattr(fd, "pr_merged",
+                        lambda url, commit: told.append((url, commit)) or [])
+    ticket_fix.promote_merged([{"id": "AF1", "status": "in progress",
+                                "custom_fields": [],
+                                "description": f"Fix PR: {PR}"}])
+    assert told == [(PR, "core@abc123")]

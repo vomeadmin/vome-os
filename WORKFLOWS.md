@@ -185,6 +185,9 @@ flowchart TD
   ACK --> FA["Feature architect (premium) reads the code<br/>and the 14 extension patterns; one verdict per request"]:::built
   FA -->|agent_build: additive, no schema, core/database, 3 files| FX["Fix author + patch safety<br/>PR into development (cap 3/day)"]:::built
   FX --> AF["Agent Fixes task, linked to the requester's task<br/>Sam merges; release watcher takes it"]:::built
+  AF --> MD["Release watcher: merged into development<br/>-> thread tags the requester to test on dev"]:::built
+  MD --> LV["Proven live in production<br/>-> thread says it shipped"]:::built
+  AF -->|PR closed unmerged| RO["Item reopens for go N / log N,<br/>check mark removed"]:::built
   FX -->|declined or refused| LOG
   FA -->|decision: shapes, plans, privacy| SAM["Options + recommendation<br/>Sam asked in the thread"]:::built
   FA -->|log: bigger than the envelope| LOG["Analysis on the requester's task<br/>(no task: Sam says log N for Raw Intake)"]:::built
