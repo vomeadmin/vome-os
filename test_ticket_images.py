@@ -213,6 +213,115 @@ def test_a_failed_listing_is_a_note_not_a_crash(monkeypatch):
     assert images == [] and "could not be read" in note
 
 
+FORM_LOG = (
+    b"2026-10-15T16:23:14Z form load ok\n"
+    b"2026-10-15T16:23:16Z POST /api/v1/forms/submit 500\n"
+    b"TypeError: Cannot read properties of undefined (reading 'id')\n"
+)
+
+
+def test_an_attached_error_log_is_read_into_the_note(monkeypatch):
+    # #9533: the form's exported error log was listed as unviewable, so the
+    # code check never saw the error it held.
+    _fake_zoho(
+        monkeypatch,
+        threads=[{"id": "t1", "direction": "in",
+                  "createdTime": "2026-10-15T16:30",
+                  "author": {"name": "Elsa"}}],
+        details={"t1": {"content": "", "attachments": [
+            {"name": "vome-form-error-logs-2026-10-15.txt",
+             "href": "https://desk/att/log"},
+            {"name": "Recording.webm", "href": "https://desk/att/rec"},
+        ]}},
+        files={"https://desk/att/log": (FORM_LOG, "text/plain")},
+    )
+    images, note = ti.fetch_ticket_images("1")
+    assert images == []
+    assert "1 attached text file(s)" in note
+    assert "POST /api/v1/forms/submit 500" in note
+    assert "vome-form-error-logs-2026-10-15.txt from Elsa, 2026-10-15" in note
+    # The recording still cannot be opened and is still named.
+    assert "Recording.webm" in note and "not viewable" in note
+    assert "vome-form-error-logs" not in note.split("Contents of")[0]
+
+
+def test_a_long_log_keeps_its_start_and_end():
+    data = b"START\n" + b"x" * 20_000 + b"\nTHE ERROR AT THE END"
+    out = ti.text_excerpt(data, limit=1_000)
+    assert out.startswith("START")
+    assert out.endswith("THE ERROR AT THE END")
+    assert "characters in all, trimmed" in out
+    assert len(out) < 1_100
+
+
+def test_an_error_in_the_middle_of_a_huge_log_survives_the_trim():
+    # The shape of #9533's real export: a header, the form definition dumped
+    # again and again, the error, then the submitted fields.
+    dump = "sFormData {\n" + '  "label": "Question",\n' * 800 + "}"
+    entries = ["SYSTEM INFORMATION:\nurl: https://example/form"]
+    entries += [f"[{n}] [2026-10-15T16:22:{n:02d}Z] [LOG]\n{dump}"
+                for n in range(10, 25)]
+    entries += [
+        "[47] [2026-10-15T16:23:16Z] [LOG]\nError Type: submitFormError",
+        '[48] [2026-10-15T16:23:16Z] [LOG]\nlogError {\n  "submitted_for_user"'
+        ': ["This endpoint requires submitted_for_user when submitting as an'
+        ' admin"]\n}',
+    ]
+    entries += [f"[{n}] [2026-10-15T16:23:16Z] [LOG]\nanswer {n}"
+                for n in range(49, 120)]
+    data = "\n\n".join(entries).encode()
+    assert len(data) > 200_000
+
+    out = ti.text_excerpt(data)
+    assert "submitFormError" in out
+    assert "requires submitted_for_user when submitting as an admin" in out
+    assert out.startswith("SYSTEM INFORMATION")
+    assert "answer 119" in out
+    assert len(out) <= ti.MAX_TEXT_CHARS + 300
+
+
+def test_a_repeated_error_is_kept_once():
+    entries = [f"[{n}] [2026-10-15T16:{n:02d}Z] [ERROR]\nTimeout talking to "
+               "the API" for n in range(40)]
+    entries += ["filler line " * 40 for _ in range(60)]
+    out = ti.text_excerpt("\n\n".join(entries).encode(), limit=3_000)
+    middle = out.split("look like errors follow ...]")[1]
+    middle = middle.split("[... trimmed, the end")[0]
+    assert middle.count("Timeout talking to the API") == 1
+
+
+def test_text_files_past_the_cap_are_named_not_read(monkeypatch):
+    attachments = [
+        {"name": f"log{i}.txt", "href": f"https://desk/att/{i}"}
+        for i in range(ti.MAX_TEXT_FILES + 1)
+    ]
+    _fake_zoho(
+        monkeypatch,
+        threads=[{"id": "t1", "direction": "in", "createdTime": "2026"}],
+        details={"t1": {"content": "", "attachments": attachments}},
+        files={f"https://desk/att/{i}": (f"log {i}".encode(), "text/plain")
+               for i in range(ti.MAX_TEXT_FILES + 1)},
+    )
+    _, note = ti.fetch_ticket_images("1")
+    assert f"{ti.MAX_TEXT_FILES} attached text file(s)" in note
+    last = f"log{ti.MAX_TEXT_FILES}.txt"
+    assert last in note.split("Contents of")[0]
+
+
+def test_a_failed_log_download_is_named(monkeypatch):
+    _fake_zoho(
+        monkeypatch,
+        threads=[{"id": "t1", "direction": "in", "createdTime": "2026"}],
+        details={"t1": {"content": "", "attachments": [
+            {"name": "errors.log", "href": "https://desk/att/gone"},
+        ]}},
+        files={},
+    )
+    _, note = ti.fetch_ticket_images("1")
+    assert "attachment errors.log failed" in note
+    assert "Contents of" not in note
+
+
 def test_a_failed_download_is_named(monkeypatch):
     _fake_zoho(
         monkeypatch,

@@ -287,6 +287,7 @@ def build_context(ticket_row: dict) -> dict | None:
 
     # The pictures themselves, inline and attached. #9415 was triaged as
     # "screenshot missing" because the screenshot was pasted, not attached.
+    # Attached text files (an exported error log, #9533) come in the note.
     images, image_note = [], ""
     try:
         from ticket_images import fetch_ticket_images
