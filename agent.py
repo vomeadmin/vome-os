@@ -783,50 +783,62 @@ ZOHO_AGENT_SAM = "569440000000139001"
 # Auth bypass detection (email channel)
 # ---------------------------------------------------------------------------
 
-# A forwarded ticket is about someone else's account, never the sender's.
+# A forwarded ticket passes on someone else's message, so it is never the
+# sender's own sign-in problem.
 _FORWARDED_SUBJECT_RE = re.compile(r"^\s*(?:re\s*:\s*)*(?:fw|fwd|tr)\s*:", re.IGNORECASE)
 
+AUTH_TICKET_SELF = "self"
+AUTH_TICKET_OTHER = "other"
 
-def _detect_auth_bypass_issue(subject: str, body: str) -> bool:
-    """Use Claude to detect if the sender has an email authentication problem.
 
-    The check and the activation run on the ticket contact's email, so a
-    ticket about someone else's account must answer NO (#9549: an admin
-    forwarded a volunteer's missing invite and got told her own account was
-    active).
+def _classify_auth_ticket(subject: str, body: str) -> str | None:
+    """Who has the sign-in problem: the sender, someone else, or nobody.
+
+    AUTH_TICKET_SELF: the sender cannot get into their own account; the auth
+    check and activation run on their email.
+    AUTH_TICKET_OTHER: the sender (usually an admin) writes about a volunteer
+    who cannot sign in or never got the invitation. Checking the sender's
+    account answers the wrong question (#9549).
+    None: not a sign-in problem.
     """
-    if _FORWARDED_SUBJECT_RE.match(subject or ""):
-        print("[AUTH BYPASS] Forwarded ticket, skipping auth fast path")
-        return False
     text = f"Subject: {subject}\n\nBody: {body or ''}".strip()
     if not text:
-        return False
+        return None
     try:
         response = client.messages.create(
             model=SUPPORT_MODEL_FAST,
             max_tokens=5,
             system=(
-                "You determine whether the person who wrote a support "
-                "ticket has an email authentication problem with their "
-                "own account, for example: not receiving a verification "
-                "or activation code, can't authenticate or verify their "
-                "email address, account not yet activated, or similar "
-                "sign-up/login blockers. Reply NO when they write about "
-                "someone else's account (an admin or coordinator asking "
-                "about a volunteer, a forwarded message) or about an "
-                "invitation email that did not arrive. "
-                "Reply with only YES or NO."
+                "You read a support ticket and decide who has a sign-in "
+                "problem. Sign-in problems include: not receiving a "
+                "verification, activation or invitation email, can't "
+                "authenticate or verify an email address, account not "
+                "yet activated, or similar sign-up/login blockers.\n"
+                "Reply SELF when the person who wrote the ticket has the "
+                "problem with their own account.\n"
+                "Reply OTHER when they write about someone else who has "
+                "it, for example an admin or coordinator reporting that a "
+                "volunteer can't log in or never received their invitation, "
+                "or a forwarded message from that person.\n"
+                "Reply NO for anything else.\n"
+                "Reply with only SELF, OTHER or NO."
             ),
             messages=[{"role": "user", "content": text}],
         )
         answer = response.content[0].text.strip().upper()
-        is_auth = answer.startswith("YES")
-        if is_auth:
-            print("[AUTH BYPASS] Claude detected auth issue")
-        return is_auth
     except Exception as e:
         print(f"[AUTH BYPASS] Detection failed: {e}")
-        return False
+        return None
+    if answer.startswith("OTHER"):
+        print("[AUTH BYPASS] Claude detected a sign-in problem for someone else")
+        return AUTH_TICKET_OTHER
+    if answer.startswith("SELF"):
+        if _FORWARDED_SUBJECT_RE.match(subject or ""):
+            print("[AUTH BYPASS] Forwarded ticket read as the sender's own, leaving for triage")
+            return None
+        print("[AUTH BYPASS] Claude detected auth issue")
+        return AUTH_TICKET_SELF
+    return None
 
 
 def _run_auth_check(email: str) -> dict | None:
@@ -937,11 +949,11 @@ def _handle_auth_bypass_email_ticket(
     contact_name: str,
     detected_lang: str | None,
 ) -> bool:
-    """Activate a blocked account and tell the client, for an auth code ticket.
+    """Run auth check and send the appropriate reply for an auth code ticket.
 
-    Returns True if the account was activated (reply sent) and normal
-    processing should be skipped. Returns False when there was nothing to
-    activate or the check failed, and the ticket falls through to triage.
+    Returns True if the ticket was handled (reply sent) and normal processing
+    should be skipped. Returns False if the check failed and the ticket should
+    fall through to the standard pipeline.
 
     VOICE: these replies are signed "Vome Support" / "Equipe Vome", so the
     copy speaks as the team ("we checked", "nous avons"), never as one
@@ -954,43 +966,224 @@ def _handle_auth_bypass_email_ticket(
     is_french = detected_lang == "French"
     name = _auth_bypass_first_name(contact_name)
 
-    # Only an activation fixes anything, so only it may email the client
-    # without Sam (comms gate, 2026-10-19). "Already active", "offline
-    # profile" and "not found" are answers, and on #9549 the check ran on an
-    # admin writing about a volunteer, so the answer described the wrong
-    # account. Those go to triage, which drafts for Sam.
-    if not auth_result.get("is_bypassable"):
+    if auth_result.get("is_bypassable"):
+        bypass_result = _run_auth_bypass(contact_email)
+        if not (bypass_result and bypass_result.get("bypassed")):
+            return False
+        if is_french:
+            reply = (
+                f"Bonjour {name},\n\n"
+                "Bonne nouvelle, nous avons activé votre compte. "
+                "Vous devriez maintenant pouvoir vous connecter.\n\n"
+                "Si vous avez encore des difficultés, vous pouvez "
+                "réinitialiser votre mot de passe ici :\n"
+                "https://www.vomevolunteer.com/forgot\n\n"
+                "Cordialement,\nÉquipe Vome"
+            )
+        else:
+            reply = (
+                f"Hi {name},\n\n"
+                "Good news, we were able to activate your account. "
+                "You should be able to log in now.\n\n"
+                "If you still have trouble signing in, you can "
+                "reset your password here:\n"
+                "https://www.vomevolunteer.com/forgot\n\n"
+                "Best,\nVome Support"
+            )
+        _send_auth_reply(ticket_id, contact_email, reply)
+        print(f"[AUTH BYPASS] Account activated, reply sent — ticket {ticket_id}")
+        return True
+
+    if auth_result.get("is_active"):
+        if is_french:
+            reply = (
+                f"Bonjour {name},\n\n"
+                "Nous avons vérifié votre compte et il est déjà actif. "
+                "Il semble que votre autorisation par e-mail ait "
+                "déjà été traitée.\n\n"
+                "Si vous avez du mal à vous connecter, essayez de "
+                "réinitialiser votre mot de passe ici :\n"
+                "https://www.vomevolunteer.com/forgot\n\n"
+                "Cordialement,\nÉquipe Vome"
+            )
+        else:
+            reply = (
+                f"Hi {name},\n\n"
+                "We checked your account and it's already active. "
+                "It looks like your email authorization may have "
+                "already gone through.\n\n"
+                "If you're having trouble signing in, try resetting "
+                "your password here:\n"
+                "https://www.vomevolunteer.com/forgot\n\n"
+                "Best,\nVome Support"
+            )
+        _send_auth_reply(ticket_id, contact_email, reply)
+        print(f"[AUTH BYPASS] Already active, reply sent — ticket {ticket_id}")
+        return True
+
+    # Offline/created profile — the account exists (address on alternate_email,
+    # UUID username, unusable password) but isn't claimed. Can't auto-activate;
+    # tell them to claim it by registering with this same email so the merge
+    # flow links their existing profile.
+    if auth_result.get("is_offline_profile"):
+        if is_french:
+            reply = (
+                f"Bonjour {name},\n\n"
+                "Bonne nouvelle, votre profil bénévole existe déjà dans "
+                "notre système. Il a été créé par votre organisation, il "
+                "vous suffit donc de l'activer en créant vos identifiants "
+                "de connexion.\n\n"
+                f"Veuillez vous inscrire avec cette même adresse e-mail "
+                f"({contact_email}) ici :\n"
+                "https://www.vomevolunteer.com/register-volunteer\n\n"
+                "Une fois inscrit avec cette adresse, votre profil et votre "
+                "historique existants seront automatiquement liés.\n\n"
+                "Si vous rencontrez le moindre problème, répondez simplement "
+                "à ce message et nous vous aiderons.\n\n"
+                "Cordialement,\nÉquipe Vome"
+            )
+        else:
+            reply = (
+                f"Hi {name},\n\n"
+                "Good news, your volunteer profile already exists in our "
+                "system. It was set up by your organization, so you just "
+                "need to claim it by creating your login.\n\n"
+                f"Please register using this same email address "
+                f"({contact_email}) here:\n"
+                "https://www.vomevolunteer.com/register-volunteer\n\n"
+                "Once you sign up with this email, your existing profile and "
+                "activity will be linked automatically.\n\n"
+                "If you run into any trouble, just reply here and we'll "
+                "help.\n\n"
+                "Best,\nVome Support"
+            )
+        _send_auth_reply(ticket_id, contact_email, reply)
+        print(f"[AUTH BYPASS] Offline profile, claim reply sent — ticket {ticket_id}")
+        return True
+
+    # Account not found — only send the definitive "no account" reply when the
+    # backend explicitly told us found=False. Any other state (found=True but no
+    # branch matched, or a malformed result) is ambiguous: fall through to the
+    # normal pipeline rather than tell a real user their account doesn't exist.
+    if auth_result.get("found") is not False:
         print(
-            f"[AUTH BYPASS] Nothing to activate, leaving for triage "
-            f"-- ticket {ticket_id}: {str(auth_result)[:200]}"
+            f"[AUTH BYPASS] Ambiguous auth result, not sending not-found "
+            f"reply — ticket {ticket_id}: {str(auth_result)[:200]}"
         )
         return False
 
-    bypass_result = _run_auth_bypass(contact_email)
-    if not (bypass_result and bypass_result.get("bypassed")):
-        return False
+    # Account not found — reply and return True so we skip the generic ack/ClickUp
     if is_french:
         reply = (
             f"Bonjour {name},\n\n"
-            "Bonne nouvelle, nous avons activé votre compte. "
-            "Vous devriez maintenant pouvoir vous connecter.\n\n"
-            "Si vous avez encore des difficultés, vous pouvez "
-            "réinitialiser votre mot de passe ici :\n"
-            "https://www.vomevolunteer.com/forgot\n\n"
+            "Nous n'avons pas trouvé de compte associé à cette adresse "
+            "e-mail. Il est possible que vous ayez utilisé une "
+            "adresse différente lors de votre inscription.\n\n"
+            "Si vous n'êtes pas encore inscrit, vous pouvez le "
+            "faire ici :\n"
+            "https://www.vomevolunteer.com/register-volunteer\n\n"
+            "Si vous pensez qu'il y a une erreur, répondez avec "
+            "l'adresse e-mail que vous avez utilisée lors de votre "
+            "inscription et nous vérifierons.\n\n"
             "Cordialement,\nÉquipe Vome"
         )
     else:
         reply = (
             f"Hi {name},\n\n"
-            "Good news, we were able to activate your account. "
-            "You should be able to log in now.\n\n"
-            "If you still have trouble signing in, you can "
-            "reset your password here:\n"
-            "https://www.vomevolunteer.com/forgot\n\n"
+            "We weren't able to find an account registered with "
+            "this email address. It's possible you signed up "
+            "with a different email.\n\n"
+            "If you haven't registered yet, you can do so here:\n"
+            "https://www.vomevolunteer.com/register-volunteer\n\n"
+            "If you think this is a mistake, please reply with "
+            "the email address you used to sign up and we'll "
+            "look into it.\n\n"
             "Best,\nVome Support"
         )
     _send_auth_reply(ticket_id, contact_email, reply)
-    print(f"[AUTH BYPASS] Account activated, reply sent — ticket {ticket_id}")
+    print(f"[AUTH BYPASS] Account not found, reply sent — ticket {ticket_id}")
+    return True
+
+
+# Accounts that manage an organization's volunteers and can resend invites.
+_ADMIN_USER_TYPES = {"organization_admin", "school_admin", "school_board_admin"}
+
+_INVITE_FAQ_URL = {
+    "en": "https://support.vomevolunteer.com/portal/en/kb/articles/what-happens-when-i-invite-volunteers-to-claim-their-profile-on-vome",
+    "fr": "https://support.vomevolunteer.com/portal/fr/kb/articles/que-se-passe-t-il-lorsque-j-invite-des-b%C3%A9n%C3%A9voles-%C3%A0-r%C3%A9clamer-leur-profil-sur-vome",
+}
+_LOGIN_HELP_FAQ_URL = {
+    "en": "https://support.vomevolunteer.com/portal/en/kb/articles/my-volunteer-is-having-trouble-logging-into-their-account-how-can-i-help-them",
+    "fr": "https://support.vomevolunteer.com/portal/fr/kb/articles/un-b%C3%A9n%C3%A9vole-a-des-difficult%C3%A9s-%C3%A0-se-connecter-%C3%A0-son-compte-comment-puis-je-l-aider",
+}
+
+
+def _handle_admin_signin_help_ticket(
+    ticket_id: str,
+    contact_email: str,
+    contact_name: str,
+    detected_lang: str | None,
+) -> bool:
+    """Send the invitation FAQ to an admin writing about a volunteer's sign-in.
+
+    Only when the sender's own account is an active admin: a volunteer
+    writing about a friend, or an unknown sender, gets no admin instructions
+    and falls through to triage. Wording is Sam's standard reply (#9549).
+    """
+    auth_result = _run_auth_check(contact_email)
+    if not (
+        auth_result
+        and auth_result.get("is_active")
+        and auth_result.get("user_type") in _ADMIN_USER_TYPES
+    ):
+        print(
+            f"[AUTH BYPASS] Sign-in problem for someone else, but sender is "
+            f"not an active admin, leaving for triage -- ticket {ticket_id}: "
+            f"{str(auth_result)[:200]}"
+        )
+        return False
+
+    name = _auth_bypass_first_name(contact_name)
+    if detected_lang == "French":
+        reply = (
+            f"Bonjour {name},\n\n"
+            "Si une personne ne reçoit pas le courriel d'invitation pour "
+            "une raison quelconque, vous pouvez simplement lui envoyer un "
+            "lien d'inscription. L'important est qu'elle s'inscrive avec la "
+            "même adresse courriel que celle à laquelle vous l'avez "
+            "invitée.\n\n"
+            "Que se passe-t-il lorsque j'invite des bénévoles à réclamer "
+            "leur profil sur Vome ?\n"
+            f"{_INVITE_FAQ_URL['fr']}\n\n"
+            "Si elle s'inscrit et a de la difficulté à se connecter pour "
+            "une raison quelconque :\n"
+            "Un bénévole a des difficultés à se connecter à son compte. "
+            "Comment puis-je l'aider ?\n"
+            f"{_LOGIN_HELP_FAQ_URL['fr']}\n\n"
+            "N'hésitez pas à nous écrire si vous rencontrez d'autres "
+            "difficultés !\n\n"
+            "Cordialement,\nÉquipe Vome"
+        )
+    else:
+        reply = (
+            f"Hi {name},\n\n"
+            "If a user does not receive the email invitation for any "
+            "reason, you can simply send a signup link to them. All that "
+            "matters is that they sign up with the same email address that "
+            "you invited them from.\n\n"
+            "What happens when I invite volunteers to claim their profile "
+            "on Vome?\n"
+            f"{_INVITE_FAQ_URL['en']}\n\n"
+            "If they do sign up and have any trouble logging in for any "
+            "reason:\n"
+            "A volunteer is having trouble logging into their account. How "
+            "can I help them?\n"
+            f"{_LOGIN_HELP_FAQ_URL['en']}\n\n"
+            "Let us know if there is any additional difficulty here!\n\n"
+            "Best,\nVome Support"
+        )
+    _send_auth_reply(ticket_id, contact_email, reply)
+    print(f"[AUTH BYPASS] Admin asked about a volunteer, invitation FAQ sent -- ticket {ticket_id}")
     return True
 
 
@@ -1132,12 +1325,22 @@ def process_ticket(ticket_data: dict) -> str | None:
             print(f"Vome Error Report detected in ticket {ticket_id} -- leaving as New for Sam")
             return None
 
-        # Auth bypass fast-path: if the ticket is clearly about not receiving
-        # an auth/activation code, check + act immediately.
-        if not _detect_auth_bypass_issue(subject, body):
+        # Auth fast path: a sender who can't get into their own account is
+        # checked and activated now; an admin writing about a volunteer's
+        # sign-in gets the invitation FAQ instead.
+        auth_kind = _classify_auth_ticket(subject, body)
+        if auth_kind is None:
             return None
         thread_text = _format_conversations(conversations_result)
         detected_lang = _detect_language(body) or _detect_language(thread_text)
+        if auth_kind == AUTH_TICKET_OTHER:
+            handled = _handle_admin_signin_help_ticket(
+                ticket_id=ticket_id,
+                contact_email=contact_email,
+                contact_name=contact_name,
+                detected_lang=detected_lang,
+            )
+            return "admin_signin_help_sent" if handled else None
         handled = _handle_auth_bypass_email_ticket(
             ticket_id=ticket_id,
             contact_email=contact_email,
