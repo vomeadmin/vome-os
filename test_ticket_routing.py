@@ -473,3 +473,27 @@ def test_route_queue_is_sams_and_routes_only_what_was_shown(queue,
     out = queue.route_queue("sam", tickets="9578")
     assert routed == [("9578", 3900.0)]
     assert out["routed"][0]["result"].startswith("created for onlyg")
+
+
+def test_an_important_client_is_filed_high_with_its_fields(world):
+    # #9596: an important client's task was filed with no priority, no
+    # Type or Platform, and a title cut mid-word.
+    question = ("Why Jeremy Secaida's profile crashes the Database page "
+                "while every other profile opens, and when it will open "
+                "again.")
+    item = _item(account="Candlelighters NV (high, 1980 CAD)",
+                 important=True)
+    card = _card(live_question=question,
+                 code_check={"verdict": "unclear", "where": "web:src/x:1"})
+    tr.route(item, card, {}, {}, 1980)
+    body = world.created[0][1]
+    assert body["priority"] == 2
+    fields = {f["id"]: f["value"] for f in body["custom_fields"]}
+    assert fields[tr.FIELD_TYPE] == tr.TYPE_BUG
+    assert fields[tr.FIELD_PLATFORM] == tr.PLATFORMS["web"]
+    assert fields[tr.FIELD_COMBINED_ARR] == 1980
+    assert body["name"].endswith("every other profile opens...")
+
+
+def test_a_short_title_is_kept_whole():
+    assert tr._title("Form renames  do not save") == "Form renames do not save"

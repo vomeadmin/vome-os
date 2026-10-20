@@ -15,6 +15,8 @@ Customers paste far more often than they attach, so both have to be read:
   * inline images live in the thread HTML as
     `<img src="/api/v1/threads/<thread>/inlineImages/...">`
   * attachments are listed on the thread with a download `href`
+  * support widget uploads are only a link to our S3 bucket in the body
+    (#9596), fetched without the Zoho token
 
 Both download with the Desk OAuth token and an `orgId` header. Zoho returns
 `Image/png` with a capital I; `vomeos.images` normalises that.
@@ -130,6 +132,17 @@ def text_excerpt(data: bytes, limit: int = MAX_TEXT_CHARS) -> str:
     )
 
 
+# The support widget uploads to our own bucket and only links the file in the
+# ticket body: no Zoho attachment and no inline image, so #9596's screenshot
+# was never shown to triage (2026-10-20). Screenshots are .png, recordings
+# .webm (vome-react SupportWidget). Only this bucket path is fetched.
+_WIDGET_LINK = re.compile(
+    r'href="(https://vomevolunteer-bucket\d*\.s3\.amazonaws\.com/media/'
+    r'support-attachments/[^"/]+)"',
+    re.IGNORECASE,
+)
+
+
 def _attrs(tag: str) -> dict[str, str]:
     return {k.lower(): html.unescape(v) for k, v in _ATTR.findall(tag)}
 
@@ -179,6 +192,16 @@ def inline_sources(content: str) -> list[tuple[str, int, int]]:
     return found
 
 
+def widget_links(content: str) -> list[str]:
+    """Files the support widget uploaded, as linked in the ticket body."""
+    found = []
+    for url in _WIDGET_LINK.findall(content or ""):
+        url = html.unescape(url)
+        if url not in found:
+            found.append(url)
+    return found
+
+
 def _headers() -> dict[str, str]:
     from zoho_desk_api import ZOHO_ORG_ID, _get_token
 
@@ -202,6 +225,13 @@ def _download(url: str) -> tuple[bytes, str]:
         url = ZOHO_BASE + url
     resp = httpx.get(url, headers=_headers(), timeout=30,
                      follow_redirects=True)
+    resp.raise_for_status()
+    return resp.content, resp.headers.get("content-type", "")
+
+
+def _download_widget(url: str) -> tuple[bytes, str]:
+    # Our bucket, not Zoho: the Desk token must never leave Zoho.
+    resp = httpx.get(url, timeout=30)
     resp.raise_for_status()
     return resp.content, resp.headers.get("content-type", "")
 
@@ -322,6 +352,26 @@ def fetch_ticket_images(ticket_id: str) -> tuple[list[Image], str]:
             if len(data) < MIN_BYTES:
                 continue
             keep(data, media, f"attachment {name} from {who}, {when}")
+
+        for url in widget_links(detail.get("content", "")):
+            if len(images) >= MAX_IMAGES:
+                break
+            name = url.rsplit("/", 1)[-1]
+            if not _IMAGE_NAME.search(name):
+                unviewable.append(
+                    f"{name} (support widget upload, open the link in the "
+                    f"ticket) from {who}, {when}")
+                continue
+            try:
+                data, media = _download_widget(url)
+            except Exception as exc:
+                problems.append(f"widget upload {name} failed "
+                                f"({type(exc).__name__})")
+                continue
+            if len(data) < MIN_BYTES:
+                continue
+            keep(data, media,
+                 f"screenshot {who} took in the support widget, {when}")
 
     parts = []
     if images:
