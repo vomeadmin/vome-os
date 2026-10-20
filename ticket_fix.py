@@ -592,6 +592,11 @@ def promote_merged(tasks: list[dict]) -> list[str]:
         if state == "closed":
             changed += _abandon(task, pr_url, tasks)
             continue
+        if state == "unknown":
+            # Said out loud: a token without the pull request scope kept
+            # #3541 and #3542 at in progress for a day with nothing logged.
+            changed.append(f"{task['id']} PR state unreadable: {pr_url}")
+            continue
         if state != "merged" or not sha:
             continue
         value = f"{alias}@{sha}"
@@ -678,6 +683,7 @@ def run_promotion() -> dict:
     try:
         changed = promote_merged(list_in_progress())
     except Exception as exc:
+        print(f"[TICKET FIX] promotion failed: {exc}")
         return {"status": "error", "error": str(exc)}
     if changed:
         print("[TICKET FIX] " + "; ".join(changed))

@@ -84,9 +84,13 @@ flowchart TD
   BF["Daily backfill 08:15<br/>(regressions, missed issues)"]:::deployed --> G
   G --> TR["Sentry triage (cheap)<br/>noise or actionable"]:::live
   TR --> AN["Bug analyst reads the code<br/>frames, or the logged message"]:::deployed
-  AN --> FX["Fix author + patch safety<br/>(SENTRY_AUTO_PR_ENABLED on)"]:::deployed
-  FX --> PRS["PR into dev branch"]:::deployed
-  AN --> AFS["Agent Fixes task,<br/>one per root cause (cap 5/day)"]:::deployed
+  AN --> LAD["Sentry ladder, one lane per root cause<br/>(sentry_ladder.py, Sam 2026-10-20)"]:::built
+  LAD -->|"confidence medium/high,<br/>risk low/medium"| FX["Fix author + patch safety<br/>(cap 3 PRs/day)"]:::built
+  FX --> PRS["PR into dev branch, Agent Fixes<br/>task in progress, Sam merges"]:::built
+  LAD -->|"risk high, or the build failed"| GL["Sam asked in the thread:<br/>yes / route / close"]:::built
+  LAD -->|"migration, infra,<br/>or no concrete fix"| ENG["Priority Queue task,<br/>OnlyG (backend) / Sanjay (web)"]:::built
+  LAD -->|"confidence low"| RPT["Reported to Sam, no task"]:::built
+  PK["Parked queued tasks 08:20<br/>re-run through the ladder"]:::built --> LAD
   AN --> SL["Slack thread per issue,<br/>daily report 09:00"]:::live
   AN --> INC["Feeds the incident matcher<br/>(ticket <-> Sentry)"]:::deployed
 ```

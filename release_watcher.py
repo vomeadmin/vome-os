@@ -42,9 +42,11 @@ Every 15 minutes, for each Agent Fixes parent at `on dev` with Fix Commit set:
     still not deployed
   * otherwise                 -> nothing (Waiting)
 
-It NEVER moves a task's status. `on prod` fires the on-prod handler, which
-writes and sends a client email with no person in the loop, and these fixes
-were written by an agent. Resolution replies go through Sam in the sprint.
+It never moves a task to `on prod`. That status fires the on-prod handler,
+which writes and sends a client email with no person in the loop, and these
+fixes were written by an agent. Resolution replies go through Sam in the
+sprint. The one status it does set: a live fix with no client ticket under
+it moves to `Closed`, since nobody is owed a reply (`_close_untold`).
 It never touches Zoho and never emails anyone.
 
 A failed API call is not "not merged". When GitHub, Bitbucket or ClickUp does
@@ -851,6 +853,24 @@ def evaluate_task(
     return _fix_state(checks, errors), checks, errors
 
 
+def _close_untold(task: dict) -> bool:
+    """A live fix with no client ticket under it is finished.
+
+    A fix with clients closes when Sam's resolution reply goes out
+    (`_after_send`). One with none (a Sentry fix, a #bug-reports fix, an
+    automated error report) had nothing to close it, so it sat at `on dev`
+    with Release Check Live forever (the kiosk fix, 2026-10-20). `Closed`,
+    never `on prod`: on prod fires the on-prod handler's client email.
+    """
+    try:
+        _clickup(f"/task/{task['id']}", "PUT", {"status": "Closed"})
+    except Exception as exc:
+        print(f"[RELEASE] could not close {task['id']}: {exc}")
+        return False
+    print(f"[RELEASE] {task['id']} live with no client ticket, closed")
+    return True
+
+
 def run_release_watcher(
     dry_run: bool = False,
     *,
@@ -979,6 +999,11 @@ def run_release_watcher(
                 state, alerted=alerted, dry_run=dry_run,
             )
 
+        closed = False
+        if (state == FIX_LIVE and post and not dry_run and not children
+                and (alerted or not changed)):
+            closed = _close_untold(task)
+
         results.append({
             "task_id": task["id"],
             "name": task.get("name"),
@@ -986,6 +1011,7 @@ def run_release_watcher(
             "release_check": current,
             "set_to": wanted if field_changed else "",
             "alerted": alerted,
+            "closed": closed,
             "children": [c["id"] for c in children],
             "pairs": [
                 {"repo": c.alias, "sha": c.sha, "state": c.state,

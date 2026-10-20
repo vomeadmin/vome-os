@@ -49,8 +49,14 @@ def auto_pr_enabled() -> bool:
     return os.environ.get("SENTRY_AUTO_PR_ENABLED", "").lower() == "true"
 
 
-def should_attempt(analysis: dict | None) -> tuple[bool, str]:
-    """Whether this diagnosis is a candidate for an automated fix."""
+def should_attempt(analysis: dict | None,
+                   allow_risk: tuple[str, ...] = ("low",)) -> tuple[bool, str]:
+    """Whether this diagnosis is a candidate for an automated fix.
+
+    `allow_risk` widens the risk bar for a caller whose policy says so: the
+    Sentry ladder builds medium risk fixes too (Sam, 2026-10-20), because a
+    person still reviews and merges every PR.
+    """
     if not analysis:
         return False, "no analysis"
     if analysis.get("needs_migration"):
@@ -59,21 +65,23 @@ def should_attempt(analysis: dict | None) -> tuple[bool, str]:
             "written by hand"
         )
     risk = str(analysis.get("risk") or "").lower()
-    if risk != "low":
-        return False, f"risk is {risk or 'unknown'}, not low"
+    if risk not in allow_risk:
+        return False, (f"risk is {risk or 'unknown'}, not "
+                       + " or ".join(allow_risk))
     confidence = str(analysis.get("confidence") or "").lower()
     if confidence == "low":
         return False, "the analyst's own confidence is low"
-    return True, "low risk, no migration"
+    return True, f"{risk} risk, no migration"
 
 
-def propose(analysis: dict, context: dict) -> dict:
+def propose(analysis: dict, context: dict,
+            allow_risk: tuple[str, ...] = ("low",)) -> dict:
     """Ask `engineering.fix_author` for a diff, then check it hard.
 
     Returns a dict the caller can report verbatim. `diff` is only ever
     populated when every check passed.
     """
-    ok, reason = should_attempt(analysis)
+    ok, reason = should_attempt(analysis, allow_risk)
     if not ok:
         return {"attempted": False, "reason": reason, "diff": ""}
 

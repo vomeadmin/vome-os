@@ -62,6 +62,10 @@ ENVIRONMENT
                                The hyphenated name is the Railway one; some
                                shells drop hyphenated names, which is what the
                                underscore spelling is for.
+    VOMEOS_BITBUCKET_WRITE_TOKEN
+                               code_write's token. Read here only by
+                               Bitbucket.pull_request(), which needs
+                               read:pullrequest:bitbucket.
     VOMEOS_BITBUCKET_WORKSPACE workspace slug (e.g. "vomedjango")
     VOMEOS_BITBUCKET_EMAIL     LEAVE UNSET. Only for app passwords and
                                unscoped tokens, which need Basic. See
@@ -94,6 +98,9 @@ MAX_FILE_BYTES = int(os.environ.get("VOMEOS_CODE_MAX_FILE_BYTES", "60000"))
 
 # The Bitbucket token that may read pipelines, first match wins.
 PIPELINES_TOKEN_VARS = ("VOMEOS-PIPELINES", "VOMEOS_BITBUCKET_PIPELINES_TOKEN")
+
+# Tokens that may read pull requests, tried in order before the main token.
+PULL_REQUEST_TOKEN_VARS = ("VOMEOS_BITBUCKET_WRITE_TOKEN",)
 
 # The one GitHub token per account, under the name it was created with in
 # Railway. Every GitHub repo (vome-react, vome-landing-page, VomeApp) is under
@@ -286,14 +293,29 @@ class Bitbucket(Connector):
 
         How an agent-opened fix PR is noticed reaching the dev branch, so the
         release watcher can take over from there.
+
+        Needs read:pullrequest:bitbucket, which the code-search token was
+        never given: every read 403'd, so no merged agent fix ever moved to
+        `on dev` (found 2026-10-20, PRs #3541 and #3542 sat merged for a
+        day). The write token opens these PRs, so it is tried first
+        (PULL_REQUEST_TOKEN_VARS), then the main token.
         """
         if not _repo_permitted(repo, self.allowlist):
             return self._denied("pull_request", repo)
-        return self._call(
-            "pull_request",
-            "GET",
-            f"/repositories/{self.workspace}/{repo}/pullrequests/{number}",
-        )
+        tokens = [os.environ[n] for n in PULL_REQUEST_TOKEN_VARS
+                  if os.environ.get(n)]
+        tokens.append(os.environ.get("VOMEOS_BITBUCKET_TOKEN", ""))
+        result = None
+        for token in dict.fromkeys(tokens):
+            result = self._call(
+                "pull_request",
+                "GET",
+                f"/repositories/{self.workspace}/{repo}/pullrequests/{number}",
+                headers=self._auth(token),
+            )
+            if result.ok:
+                break
+        return result
 
     def pipelines(
         self, repo: str, branch: str, limit: int = 10

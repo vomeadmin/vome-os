@@ -47,12 +47,45 @@ def _register_sentry() -> None:
     # Event handler. Runs when the webhook queues an issue that survived the
     # gate. Its idempotency is the ledger claim on the Sentry issue id, which
     # is what makes an at-least-once broker safe here.
+    # 1800: the ladder may build a fix in the same run (an analysis plus one
+    # fix author run, up to 10 minutes), as a #bug-reports build does.
     register_event_handler(
         HANDLER_KEY,
         handle_sentry_issue,
         queue=QUEUE,
-        time_limit=600,
+        time_limit=1800,
         description="Triage one Sentry issue",
+    )
+
+    # Sam's replies in an issue's #sentry-automations thread: yes, route,
+    # close. A yes builds the fix, hence the same limit.
+    import sentry_ladder
+
+    register_event_handler(
+        sentry_ladder.HANDLER_KEY,
+        sentry_ladder.handle_reply,
+        queue=QUEUE,
+        time_limit=1800,
+        description="Act on Sam's reply to a Sentry issue",
+    )
+
+    # 08:20, after the backfill: Sentry tasks parked at queued before the
+    # ladder existed are queued one job each, analysed again and placed.
+    register_event_handler(
+        sentry_ladder.PARKED_KEY,
+        sentry_ladder.place_parked,
+        queue=QUEUE,
+        time_limit=1800,
+        description="Fix, route or report one parked Sentry task",
+    )
+    register_job(
+        "engineering.sentry_parked_sweep",
+        sentry_ladder.sweep_parked,
+        cron="20 8 * * *",
+        queue=QUEUE,
+        claim=CLAIM_DAILY,
+        time_limit=300,
+        description="Queue parked Sentry tasks for the ladder",
     )
 
     # Re-decide issues gated for a reason that has since changed, 08:30.

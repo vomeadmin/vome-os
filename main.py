@@ -53,6 +53,7 @@ from release_watcher import run_release_watcher
 import bug_reports
 import workflow_log
 import feature_desk
+import sentry_ladder
 import shadow_triage
 import sprint_batch
 import sprint_thread
@@ -678,6 +679,16 @@ async def slack_events_webhook(request: Request):
             # reply is Sam's command, or read by the desk, which chimes in
             # only when it has something to add.
             feature_desk.handle_message({
+                "user": user,
+                "text": text,
+                "ts": event.get("ts", ""),
+                "thread_ts": thread_ts,
+            })
+
+        elif sentry_ladder.CHANNEL and channel == sentry_ladder.CHANNEL:
+            # #sentry-automations. Sam's reply in an issue's thread: yes
+            # builds the fix, route sends it to an engineer, close ends it.
+            sentry_ladder.handle_message({
                 "user": user,
                 "text": text,
                 "ts": event.get("ts", ""),

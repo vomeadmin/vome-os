@@ -27,9 +27,9 @@ def _item(**over):
     item = {
         "id": 58, "number": 58, "ticket_id": "569440000043239739",
         "ticket_number": "9582", "status": sprint_store.FIXING,
-        "category": "clear_bug", "account": "CHU de Québec (high, 3900 CAD)",
+        "category": "clear_bug", "account": "CHU de QuÃ©bec (high, 3900 CAD)",
         "important": True, "summary": "Vues",
-        "draft": "Bonjour Isabelle,\n\nMerci pour les détails.",
+        "draft": "Bonjour Isabelle,\n\nMerci pour les dÃ©tails.",
         "draft_status": "ok", "draft_why": "", "last_thread_id": "T-LATEST",
         "recipients": {"to": "isabelle.is.savard@chudequebec.ca",
                        "first_name": "Isabelle",
@@ -276,6 +276,58 @@ def test_an_open_pr_changes_nothing(monkeypatch, tracked):
                         lambda url: ("open", "web", ""))
     assert ticket_fix.promote_merged(_tasks()) == []
     assert tracked.clickup == [] and tracked.abandoned == []
+
+
+def test_an_unreadable_pr_is_said_out_loud(monkeypatch, tracked):
+    """2026-10-20: a token without the pull request scope kept two merged
+    fixes at in progress for a day, and the log said nothing."""
+    monkeypatch.setattr(ticket_fix, "_pr_state",
+                        lambda url: ("unknown", "", ""))
+    changed = ticket_fix.promote_merged(_tasks())
+    assert changed == [f"P1 PR state unreadable: {PR}"]
+    assert tracked.clickup == []
+
+
+def test_pull_request_reads_try_the_write_token_first(monkeypatch):
+    from vomeos.integrations import code_search
+    from vomeos.integrations.base import IntegrationResult
+
+    monkeypatch.setenv("VOMEOS_BITBUCKET_TOKEN", "read-only")
+    monkeypatch.setenv("VOMEOS_BITBUCKET_WRITE_TOKEN", "write")
+    monkeypatch.setenv("VOMEOS_BITBUCKET_WORKSPACE", "vomedjango")
+    monkeypatch.delenv("VOMEOS_BITBUCKET_EMAIL", raising=False)
+    used = []
+
+    def call(self, op, method, path, headers=None, **kw):
+        token = headers["Authorization"].split()[-1]
+        used.append(token)
+        return IntegrationResult("bitbucket", op, token == "read-only",
+                                 data={"state": "MERGED"},
+                                 error="" if token == "read-only" else "403")
+
+    monkeypatch.setattr(code_search.Bitbucket, "_call", call)
+    result = code_search.Bitbucket().pull_request("vomedjango-restored-core-app", "3541")
+    # The write token failed here, so the read token was tried after it.
+    assert used == ["write", "read-only"] and result.ok
+
+
+def test_pull_request_reads_stop_at_the_first_token_that_works(monkeypatch):
+    from vomeos.integrations import code_search
+    from vomeos.integrations.base import IntegrationResult
+
+    monkeypatch.setenv("VOMEOS_BITBUCKET_TOKEN", "read-only")
+    monkeypatch.setenv("VOMEOS_BITBUCKET_WRITE_TOKEN", "write")
+    monkeypatch.setenv("VOMEOS_BITBUCKET_WORKSPACE", "vomedjango")
+    monkeypatch.delenv("VOMEOS_BITBUCKET_EMAIL", raising=False)
+    used = []
+
+    def call(self, op, method, path, headers=None, **kw):
+        used.append(headers["Authorization"].split()[-1])
+        return IntegrationResult("bitbucket", op, True, data={})
+
+    monkeypatch.setattr(code_search.Bitbucket, "_call", call)
+    code_search.Bitbucket().pull_request("vomedjango-restored-core-app", "3541")
+    assert used == ["write"]
 
 
 # ---------------------------------------------------------------------------

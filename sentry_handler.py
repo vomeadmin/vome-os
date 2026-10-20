@@ -311,12 +311,15 @@ def handle_sentry_issue(message: dict) -> dict:
     return outcome
 
 
-def _investigate(signal, message: dict, triage: dict) -> dict:
+def _investigate(signal, message: dict, triage: dict,
+                 parked_task: str = "") -> dict:
     """Phases 3 to 5 for one actionable issue.
 
     Analyse against the real code, check whether ClickUp already has it,
-    report to Slack, and propose a patch when the analyst says the fix is
-    small and certain.
+    report to Slack, then hand it to `sentry_ladder`, which fixes it, asks
+    Sam, routes it to an engineer or tells Sam (2026-10-20). Before the
+    ladder an issue below the low-risk bar was filed at `queued` with no
+    owner, and nobody ever worked it.
 
     Every step degrades rather than raising. An issue that reaches here has
     already been claimed, so an exception would lose it permanently, and a
@@ -326,7 +329,7 @@ def _investigate(signal, message: dict, triage: dict) -> dict:
     issue_id = signal.issue_id
     repo = message.get("repo", "")
     ref = message.get("repo_ref", "")
-    host = message.get("repo_host", "bitbucket")
+    host = message.get("repo_host") or "bitbucket"
     owner = message.get("repo_owner", "")
 
     trace = sentry_event.fetch_trace(issue_id)
@@ -349,54 +352,73 @@ def _investigate(signal, message: dict, triage: dict) -> dict:
         "infrastructure": triage.get("infrastructure", False),
         "repo": repo,
         "ref": ref,
+        "host": host,
+        "owner": owner,
         "stack": message.get("stack", ""),
     }
 
+    # A re-run issue keeps its thread rather than starting a second one.
+    issue.update(posted_thread(issue, {}))
     posted = sentry_slack.report_issue(issue, analysis)
+    issue.update(posted_thread(issue, posted))
 
-    proposal = {"attempted": False, "reason": "no analysis"}
-    pull_request = {"opened": False, "reason": "no patch"}
+    placed = {"lane": "", "reason": "no analysis"}
     if analysis:
-        proposal = sentry_fix.propose(analysis, {
-            "source": code.get("files", ""),
-            "repo": repo, "branch": ref, "issue_id": issue_id,
-        })
-        if proposal.get("diff"):
-            issue.update(posted_thread(issue, posted))
-            pull_request = sentry_fix.open_pull_request(issue, proposal, {
-                "repo": repo, "branch": ref, "host": host, "owner": owner,
-                "root_cause": analysis.get("root_cause", ""),
-            })
-        # Stored whatever happened. An issue below the interrupt bar never
-        # reaches Slack in the moment, so without this the diff would be
-        # paid for and then thrown away.
-        sentry_ledger.update(
-            issue_id,
-            fix_diff=(proposal.get("diff") or "")[:12000] or None,
-            fix_reason=(proposal.get("reason") or "")[:500] or None,
+        import sentry_ladder
+
+        placed = sentry_ladder.place(
+            issue, analysis, source=code.get("files", ""),
+            parked_task=parked_task,
         )
-        _report_proposal(issue, posted, proposal, pull_request)
-
-    # Where a person will actually see it. One task per root cause.
-    filed = {"action": "skipped", "reason": "no analysis"}
-    if analysis:
-        from sentry_agent_fixes import file_issue
-
-        filed = file_issue(issue, analysis, pull_request, proposal)
-        print(f"[SENTRY] Agent Fixes for {issue_id}: {filed.get('action')} "
-              f"{filed.get('task_id') or filed.get('reason') or ''}")
 
     return {
         "status": "analysed",
-        "agent_fixes": filed,
         "analysed": bool(analysis),
         "risk": (analysis or {}).get("risk", ""),
         "duplicate_of": (analysis or {}).get("duplicate_of", ""),
         "slack": posted,
-        "fix": {"attempted": proposal.get("attempted"),
-                "reason": proposal.get("reason")},
-        "pull_request": pull_request,
+        "lane": placed.get("lane", ""),
+        "ladder": placed,
     }
+
+
+def reinvestigate(row: dict, parked_task: str = "") -> dict:
+    """Analyse a ledger row again and put it through the ladder. Used by
+    `sentry_ladder.sweep_parked` for tasks filed before the ladder existed.
+    Never raises."""
+    try:
+        signal = sentry_api.IssueSignal(
+            issue_id=str(row.get("issue_id") or ""),
+            project=row.get("project") or "",
+            title=row.get("title") or "",
+            culprit=row.get("culprit") or "",
+            level=row.get("level") or "",
+            environment=row.get("environment") or "",
+            platform=row.get("platform") or "",
+            exception_type=row.get("exception_type") or "",
+            times_seen=int(row.get("times_seen") or 0),
+            users_affected=int(row.get("users_affected") or 0),
+            permalink=row.get("permalink") or "",
+            reason="parked",
+        )
+        project = sentry_projects.route(signal.project)
+        message = {
+            "repo": row.get("repo") or (project.repo if project else ""),
+            "repo_owner": project.owner if project else "",
+            "repo_host": project.host if project else "",
+            "repo_ref": project.ref if project else "",
+            "stack": row.get("stack") or (project.stack if project else ""),
+        }
+        triage = {
+            "severity": row.get("severity") or "",
+            "summary": row.get("triage_summary") or "",
+            "infrastructure": bool(row.get("infrastructure")),
+        }
+        return _investigate(signal, message, triage, parked_task=parked_task)
+    except Exception as exc:
+        print(f"[SENTRY] reinvestigate failed for {row.get('issue_id')}: "
+              f"{exc}")
+        return {"status": "error", "error": str(exc)}
 
 
 def posted_thread(issue: dict, posted: dict) -> dict:
@@ -488,37 +510,6 @@ def _analyse(signal, triage: dict, trace: str, code: dict, existing: str,
         f"migration={analysis['needs_migration']}"
     )
     return analysis
-
-
-def _report_proposal(issue: dict, posted: dict, proposal: dict,
-                     pull_request: dict) -> None:
-    """Put the diff, or the reason there is not one, in the issue's thread.
-
-    In the thread rather than as a new message, because a proposed fix is an
-    update about an issue somebody has already been told about. Without a
-    thread it says nothing at all rather than starting a second alert.
-    """
-    if not issue.get("slack_ts"):
-        return
-
-    if pull_request.get("opened"):
-        text = (
-            f"Pull request opened: {pull_request['url']}\n"
-            f"_Not reviewed by a person. Branch `{pull_request['branch']}`._"
-        )
-    elif proposal.get("diff"):
-        why = pull_request.get("reason", "")
-        text = (
-            "A fix was written but not pushed"
-            + (f" ({why})" if why else "")
-            + f".\n\n*Why* {proposal.get('rationale', '')}\n"
-            + f"*Unsure about* {proposal.get('risks', '')}\n"
-            + "```\n" + proposal["diff"][:2500] + "\n```"
-        )
-    else:
-        text = f"No automated fix attempted: {proposal.get('reason', '')}"
-
-    sentry_slack.reply_in_thread(issue, text)
 
 
 def _triage(signal, repo: str) -> dict | None:

@@ -1,8 +1,9 @@
 """
 sentry_agent_fixes.py
 
-File an actionable Sentry issue into the Agent Fixes list, once per root
-cause.
+The ClickUp side of the Sentry pipeline: one task per root cause, in Agent
+Fixes (an agent fix, or Sam's decision) or in Priority Queue (an engineer's).
+Which one is `sentry_ladder`'s call, not this module's.
 
 WHY THIS EXISTS
 ---------------
@@ -34,13 +35,18 @@ part of the key and different call sites stay different tasks.
 
 WHAT IT DOES NOT DO
 -------------------
-It never assigns an engineer, never moves a task to `on prod` (the on-prod
-handler would email a client), and never touches Zoho. When the analyst named
-an existing task as the same fault, it comments there instead of creating one.
+It never moves a task to `on prod` (the on-prod handler would email a
+client) and never touches Zoho. When the analyst named an existing task as
+the same fault, the ladder comments there instead of creating one.
 
-SWITCHES
---------
-    SENTRY_AGENT_FIXES_ENABLED    default on. "false" files nothing.
+Until 2026-10-20 this module also decided, and it filed every issue below
+the low-risk bar at `queued` with nobody assigned. Eleven sat there with a
+diagnosis and no owner. See sentry_ladder.py.
+
+SWITCHES (read by sentry_ladder)
+--------------------------------
+    SENTRY_AGENT_FIXES_ENABLED    default on. "false" files nothing; every
+                                  issue is reported to Sam instead.
     SENTRY_AGENT_FIXES_DAILY_CAP  new tasks per day, default 5. Comments on an
                                   existing task do not count.
 """
@@ -179,11 +185,11 @@ def _sentry_line(issue: dict) -> str:
 
 
 def _description(issue: dict, analysis: dict, pull_request: dict,
-                 proposal: dict) -> str:
+                 proposal: dict, note: str = "") -> str:
     pr_url = pull_request.get("url") or ""
     lines = [
-        "**Filed by the Sentry pipeline.** Agent-owned until a person "
-        "reassigns it. Not in the engineers' Priority Queue.",
+        note or "**Filed by the Sentry pipeline.** Agent-owned until a "
+                "person reassigns it. Not in the engineers' Priority Queue.",
         "",
         f"**Issue:** {issue.get('title')}",
         f"**Where:** `{issue.get('culprit') or '?'}` in "
@@ -204,8 +210,12 @@ def _description(issue: dict, analysis: dict, pull_request: dict,
         lines.append("**Files:** " + ", ".join(f"`{f}`" for f in files[:6]))
     lines += ["", "## Fix"]
     if pr_url:
-        lines.append(f"Draft pull request: {pr_url} (into `development`, "
-                     "needs a person to review and merge).")
+        # "Fix PR:" is what ticket_fix.promote_merged follows to move the
+        # task to on dev when the PR merges. Without it a merged Sentry fix
+        # stayed at in progress forever.
+        lines.append(f"Fix PR: {pr_url}")
+        lines.append("Into the dev branch. Sam reviews and merges it; "
+                     "the release watcher takes it from there.")
     else:
         lines.append(
             "No automatic fix: "
@@ -221,14 +231,16 @@ def _description(issue: dict, analysis: dict, pull_request: dict,
 
 
 def _create(issue: dict, analysis: dict, pull_request: dict,
-            proposal: dict) -> str:
+            proposal: dict, *, list_id: str = AGENT_FIXES_LIST,
+            assignees: list | None = None, note: str = "") -> str:
     title = (issue.get("title") or "Sentry issue").strip()
     severity = (issue.get("severity") or "").lower()
     custom_fields = [
         {"id": FIELD_TYPE, "value": TYPE_BUG},
         {"id": FIELD_SOURCE, "value": SOURCE_INTERNAL},
-        {"id": FIELD_TAGS, "value": [TAG_AGENT]},
     ]
+    if list_id == AGENT_FIXES_LIST:
+        custom_fields.append({"id": FIELD_TAGS, "value": [TAG_AGENT]})
     if pull_request.get("opened"):
         owner = CLICKUP_USER_SAM
         custom_fields.append(
@@ -237,72 +249,61 @@ def _create(issue: dict, analysis: dict, pull_request: dict,
     body = {
         "name": f"[Sentry] {title[:110]} -- {severity.upper() or 'S?'}",
         "markdown_description": _description(
-            issue, analysis, pull_request, proposal
+            issue, analysis, pull_request, proposal, note
         ),
         "status": "in progress" if pull_request.get("opened") else "queued",
         "priority": PRIORITY.get(severity, 3),
         "custom_fields": custom_fields,
     }
-    data = _clickup(f"/list/{AGENT_FIXES_LIST}/task", body)
+    if assignees:
+        body["assignees"] = assignees
+    data = _clickup(f"/list/{list_id}/task", body)
     return str(data.get("id") or "")
 
 
-def _comment(task_id: str, issue: dict, analysis: dict) -> None:
-    text = (
-        f"Another Sentry issue with the same cause: {issue.get('title')}\n"
-        f"{issue.get('permalink') or issue.get('issue_id')}\n"
-        f"Severity {issue.get('severity') or '?'}, "
-        f"risk {analysis.get('risk') or '?'}."
-    )
-    _clickup(f"/task/{task_id}/comment",
-             {"comment_text": text, "notify_all": False})
+def create_task(issue: dict, analysis: dict, pull_request: dict,
+                proposal: dict, *, list_id: str = AGENT_FIXES_LIST,
+                assignees: list | None = None, note: str = "") -> str:
+    """One task for one analysed issue, for sentry_ladder. Records it on the
+    ledger so later issues with the same cause comment on it. "" on any
+    ClickUp failure, never raises."""
+    issue_id = str(issue.get("issue_id") or "")
+    try:
+        task_id = _create(issue, analysis, pull_request, proposal,
+                          list_id=list_id, assignees=assignees, note=note)
+    except Exception as exc:
+        print(f"[SENTRY] task not created for {issue_id}: {exc}")
+        return ""
+    if task_id:
+        sentry_ledger.update(
+            issue_id, clickup_task_id=task_id,
+            filed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        )
+    return task_id
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-def file_issue(issue: dict, analysis: dict | None, pull_request: dict,
-               proposal: dict) -> dict:
-    """Create or extend the Agent Fixes task for one analysed issue.
-
-    Returns {"action": "created" | "commented" | "skipped", "task_id",
-    "reason"}. Never raises: the issue is already claimed, and a ClickUp
-    hiccup must not lose its diagnosis, which is in the ledger regardless.
-    """
-    if not enabled():
-        return {"action": "skipped", "reason": "disabled"}
-    if not analysis:
-        return {"action": "skipped", "reason": "no analysis"}
-    if not _token():
-        return {"action": "skipped", "reason": "CLICKUP_API_TOKEN not set"}
-
+def existing_task(issue: dict, analysis: dict) -> str:
+    """The task this issue's root cause already has, if any: the analyst's
+    named duplicate, or the task filed for an earlier issue with the same
+    group key. Records the key either way."""
     issue_id = str(issue.get("issue_id") or "")
     key = group_key(issue.get("repo", ""), issue.get("title", ""),
                     issue.get("culprit", ""))
     sentry_ledger.update(issue_id, group_key=key)
-
     target = (analysis.get("duplicate_of") or "").strip()
     target = target if re.fullmatch(r"[0-9a-z]{6,12}", target) else ""
-    target = target or _group_task(key, issue_id)
+    return target or _group_task(key, issue_id)
 
+
+def comment(task_id: str, text: str) -> bool:
     try:
-        if target:
-            _comment(target, issue, analysis)
-            sentry_ledger.update(issue_id, clickup_task_id=target)
-            return {"action": "commented", "task_id": target}
-
-        if _filed_today() >= daily_cap():
-            return {"action": "skipped",
-                    "reason": f"daily cap of {daily_cap()} reached"}
-
-        task_id = _create(issue, analysis, pull_request, proposal)
-        if task_id:
-            sentry_ledger.update(
-                issue_id, clickup_task_id=task_id,
-                filed_at=datetime.now(timezone.utc).replace(tzinfo=None),
-            )
-        return {"action": "created", "task_id": task_id}
+        _clickup(f"/task/{task_id}/comment",
+                 {"comment_text": text, "notify_all": False})
+        return True
     except Exception as exc:
-        print(f"[SENTRY] Agent Fixes filing failed for {issue_id}: {exc}")
-        return {"action": "skipped", "reason": f"ClickUp failed: {exc}"}
+        print(f"[SENTRY] could not comment on {task_id}: {exc}")
+        return False
+
+
+def filed_today() -> int:
+    return _filed_today()

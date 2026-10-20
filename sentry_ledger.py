@@ -128,7 +128,12 @@ store.register_table(
         rearm_count         INTEGER NOT NULL DEFAULT 0,
         rearm_reason        VARCHAR,
         suppressed_until    TIMESTAMP,
-        run_ids             JSONB DEFAULT '[]'::jsonb
+        run_ids             JSONB DEFAULT '[]'::jsonb,
+        -- Where sentry_ladder put the issue (fix, greenlight, engineer,
+        -- report, closed), and the analysis it decided on, kept whole so
+        -- Sam's `yes` in the thread can build without analysing again.
+        lane                VARCHAR,
+        analysis            JSONB
     )
     """,
     (
@@ -447,7 +452,7 @@ def update(issue_id: str, **fields) -> bool:
         "repo", "clickup_task_id", "slack_channel", "slack_ts", "pr_url",
         "group_key", "filed_at",
         "analysed_at", "analysed_sha", "analysed_times_seen",
-        "suppressed_until", "run_ids",
+        "suppressed_until", "run_ids", "lane", "analysis",
     }
     unknown = set(fields) - writable
     if unknown:
@@ -455,10 +460,16 @@ def update(issue_id: str, **fields) -> bool:
     if not fields or not _ready():
         return False
 
-    if "run_ids" in fields and not isinstance(fields["run_ids"], str):
-        fields["run_ids"] = json.dumps(fields["run_ids"])
+    json_columns = ("run_ids", "analysis")
+    for name in json_columns:
+        if name in fields and not isinstance(fields[name], (str, type(None))):
+            fields[name] = json.dumps(fields[name])
 
-    assignments = ", ".join(f"{name} = :{name}" for name in fields)
+    assignments = ", ".join(
+        f"{name} = CAST(:{name} AS JSONB)" if name in json_columns
+        else f"{name} = :{name}"
+        for name in fields
+    )
     params = dict(fields)
     params["issue_id"] = issue_id
     return store.execute(
