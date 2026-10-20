@@ -219,6 +219,55 @@ def _account_tokens(account: str) -> set[str]:
     return {t for t in _tokens(account) if t not in _ACCOUNT_NOISE}
 
 
+# How much of a matched task the agent reads. Names alone were not enough:
+# on #9560 the matching task's description already named the skipping line,
+# and triage, seeing only the title, called the ticket vague.
+_BRIEF_CHARS = 2500
+_BRIEF_COMMENT_CHARS = 400
+_BRIEFS_PER_SEARCH = 6
+_brief_cache: dict[str, tuple[float, str]] = {}
+
+
+def _task_brief(task_id: str) -> str:
+    """The task's description and its two latest comments, trimmed. "" when
+    ClickUp cannot be read, so a failed read never blocks the search."""
+    now = time.monotonic()
+    hit = _brief_cache.get(task_id)
+    if hit and (now - hit[0]) < _CACHE_TTL:
+        return hit[1]
+    headers = {"Authorization": CLICKUP_API_TOKEN}
+    try:
+        task = httpx.get(
+            f"{CLICKUP_BASE}/task/{task_id}",
+            headers=headers,
+            params={"include_markdown_description": "true"},
+            timeout=20,
+        ).json()
+        body = task.get("markdown_description") or task.get("description") or ""
+        comments = httpx.get(
+            f"{CLICKUP_BASE}/task/{task_id}/comment", headers=headers, timeout=20,
+        ).json().get("comments") or []
+    except Exception as exc:
+        print(f"[CU SEARCH] could not read task {task_id}: {exc}")
+        return ""
+    from clickup_tasks import extract_comment_text
+
+    body = " ".join(body.split())[:_BRIEF_CHARS]
+    latest = []
+    for comment in comments[:2]:  # ClickUp returns newest first
+        text = " ".join(extract_comment_text(comment).split())
+        if text:
+            latest.append(text[:_BRIEF_COMMENT_CHARS])
+    parts = []
+    if body:
+        parts.append(f"    Description: {body}")
+    for text in latest:
+        parts.append(f"    Comment: {text}")
+    brief = "\n".join(parts)
+    _brief_cache[task_id] = (now, brief)
+    return brief
+
+
 def describe_existing_work(
     query: str,
     ticket_number: str = "",
@@ -264,13 +313,26 @@ def describe_existing_work(
 
     seen: set[str] = set()
     sections: list[str] = []
+    briefed: list[str] = []
+    wanted_words = _tokens(query)
+
+    def with_brief(task: dict, eligible: bool) -> str:
+        # The strongest candidates come with their description and latest
+        # comments, so an existing diagnosis is read, not just a title.
+        text = line(task)
+        if eligible and len(briefed) < _BRIEFS_PER_SEARCH:
+            brief = _task_brief(task["id"])
+            if brief:
+                briefed.append(task["id"])
+                text = f"{text}\n{brief}"
+        return text
 
     linked = [t for t in all_tasks if _ticket_linked(t, ticket_number, zoho_ticket_id)]
     if linked:
         seen.update(t["id"] for t in linked)
         sections.append(
             "Linked to THIS ticket (Zoho link or ticket number in the name):\n"
-            + "\n".join(line(t) for t in linked)
+            + "\n".join(with_brief(t, True) for t in linked)
         )
 
     wanted = _account_tokens(account)
@@ -281,12 +343,20 @@ def describe_existing_work(
             and wanted <= _tokens(t["name"])
             and t["status"].lower() not in SHIPPED
         ]
+        # Closest wording first, but every one of them is eligible for a
+        # description: on #9560 the right task said "alerts" where the
+        # client said "notification", so title words alone ranked it out.
+        same_account.sort(
+            key=lambda t: len(wanted_words & _tokens(t["name"])), reverse=True
+        )
         if same_account:
             seen.update(t["id"] for t in same_account)
             sections.append(
                 "Other OPEN tasks for this same customer (check whether one "
                 "of these is already the work, e.g. a reopened earlier "
-                "ticket):\n" + "\n".join(line(t) for t in same_account[:10])
+                "ticket):\n" + "\n".join(
+                    with_brief(t, True)
+                    for t in same_account[:10])
             )
 
     symptom = [t for t in symptom if t["id"] not in seen]
@@ -298,4 +368,10 @@ def describe_existing_work(
 
     if not sections:
         return "No existing task found for this ticket, customer or symptom (search ran cleanly)."
+    if briefed:
+        sections.append(
+            "Descriptions are shown for the strongest candidates. If one "
+            "already names a cause (a file and line), verify it on the live "
+            "branch and build on it."
+        )
     return "\n\n".join(sections)

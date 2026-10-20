@@ -127,9 +127,28 @@ def view(item: dict) -> dict:
     code = card.get("code_check") if isinstance(
         card.get("code_check"), dict) else {}
     updated = item.get("updated_at")
+    recipients = item.get("recipients") or {}
+    client = (item.get("account") or "").split("(")[0].strip()
+    contact = " ".join(p for p in (
+        recipients.get("first_name") or "",
+        f"<{recipients['to']}>" if recipients.get("to") else "",
+    ) if p)
+    # One line Sam reads first on every card, so he always knows which
+    # client and which person an item is before judging how hard to check it.
+    header = " | ".join(p for p in (
+        f"Item {item.get('number')}",
+        f"#{item.get('ticket_number')}",
+        item.get("account") or "",
+        contact,
+        f"waiting {sprint_batch.age(item)}",
+        "IMPORTANT" if item.get("important") else "",
+    ) if p)
     return {
         "item": item.get("number"),
         "ticket": f"#{item.get('ticket_number')}",
+        "header": header,
+        "client": client,
+        "contact": contact,
         "zoho_url": zoho_actions.ticket_url(item.get("ticket_id")),
         "account": item.get("account"),
         "important": bool(item.get("important")),

@@ -156,7 +156,11 @@ When Sam says "let's run a sprint" (or similar):
    Ultimate, or over $1,500 CAD combined ARR), then longest waiting. Group
    one account's tickets together.
 3. **For each ticket**, show a compact card:
-   - ticket number, account, IMPORTANT flag, how long they have waited
+   - **first line, always: the item's `header` exactly as given**
+     (`Item N | #ticket | client (tier, ARR) | contact <email> | waiting |
+     IMPORTANT`). Sam decides how hard to check an item by who it is for,
+     so never drop or shorten the client or the person. If the client
+     reads as an email or "unknown account", say so in the card.
    - the live question, and two or three lines of situation
    - the agents' first pass: lane, code check verdict and finding, any fix
      PR, the recommendation

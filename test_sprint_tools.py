@@ -377,3 +377,23 @@ def test_teach_agents_refuses_vague_or_unknown(sam):
     with pytest.raises(RequestError, match="Only Sam"):
         sprint_tools.teach_agents("Never mention an earlier reply.",
                                   "drafter", "x", "ron@vome.co")
+
+
+def test_view_names_the_client_and_person_on_every_card():
+    # Sam (2026-10-20): reading item 3, 4, 5 he could not tell who an item
+    # was for, and he decides how hard to check by who the client is.
+    view = sprint_tools.view(_item(account="Sarasota County Government "
+                                           "(very-high, 7000 CAD combined ARR)",
+                                   important=True))
+    assert view["client"] == "Sarasota County Government"
+    assert view["contact"] == "Ana <ana@ms.org>"
+    assert view["header"].startswith("Item 4 | #9604 | Sarasota County "
+                                     "Government (very-high")
+    assert "Ana <ana@ms.org>" in view["header"]
+    assert view["header"].endswith("IMPORTANT")
+
+
+def test_view_header_without_recipient_still_names_the_client():
+    view = sprint_tools.view(_item(recipients={}))
+    assert view["contact"] == ""
+    assert "Mustard Seed (Pro)" in view["header"]

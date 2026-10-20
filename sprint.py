@@ -264,8 +264,20 @@ def build_context(ticket_row: dict) -> dict | None:
     except Exception:
         pass
 
+    # The CRM misses some contacts (10 of 64 open items read "unknown
+    # account" on 2026-10-20), and Sam cannot judge importance without a
+    # name, so fall back to the organisation Zoho has on the ticket, then to
+    # who wrote in.
+    if not account_name:
+        desk_account = (raw.get("contact") or {}).get("account") or {}
+        account_name = (
+            (desk_account.get("accountName") if isinstance(desk_account, dict)
+             else "")
+            or fields.get("contact_email", "")
+            or ticket_row.get("email", "")
+        )
     account = (
-        f"{account_name or ticket_row.get('email', 'unknown account')} "
+        f"{account_name or 'unknown account'} "
         f"({tier}, {arr} CAD combined ARR)"
     )
 
