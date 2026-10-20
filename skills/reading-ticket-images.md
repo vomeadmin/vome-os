@@ -24,6 +24,16 @@ picture she had already pasted into her email. If the attachments line says
 a file exists but cannot be viewed here (a screen recording, a PDF), it is
 not missing either: say it needs opening in Zoho.
 
+**An attached log is the error itself.** When the attachments line carries
+the contents of a text file (a form's exported error log, a console dump, a
+CSV the customer exported), read it before anything else. It usually names
+the failing request, the status code and the message the customer saw. Quote
+the decisive line in the code check and look up the code it points to. On
+#9533 the log was never read, the code check came back unclear, and no fix was
+tried. Never say a file "needs opening in Zoho" when its contents are in front
+of you. A long file is trimmed to its start and end, so if the decisive part
+was cut, say so.
+
 **Do not over-read.** A picture shows one moment. It does not show what the
 customer clicked before, which account they used, or whether it happens every
 time. If the image raises a question the thread does not answer, that is

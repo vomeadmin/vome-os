@@ -83,7 +83,7 @@ sprint_thread.py   the daily #support-sprints thread: cards, 10/1/4/7 updates,
                    Sam's conversation with the sprint partner, send/route/log
 sprint_store.py    numbered items, carry-forward, draft measurement
 zoho_actions.py    recipients, sendReply, silent status changes
-ticket_images.py   inline screenshots + attachments for the agents
+ticket_images.py   inline screenshots + attachments (images, text logs) for the agents
 ticket_fix.py      code-check bug -> fix PR -> Agent Fixes -> on dev on merge
 release_watcher.py proves an Agent Fix live, posts "Fix live, N clients"
 release_resolutions.py  a live fix -> one resolution draft per client, as a
