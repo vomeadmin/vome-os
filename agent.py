@@ -783,33 +783,62 @@ ZOHO_AGENT_SAM = "569440000000139001"
 # Auth bypass detection (email channel)
 # ---------------------------------------------------------------------------
 
-def _detect_auth_bypass_issue(subject: str, body: str) -> bool:
-    """Use Claude to detect if the ticket is about an email authentication problem."""
+# A forwarded ticket passes on someone else's message, so it is never the
+# sender's own sign-in problem.
+_FORWARDED_SUBJECT_RE = re.compile(r"^\s*(?:re\s*:\s*)*(?:fw|fwd|tr)\s*:", re.IGNORECASE)
+
+AUTH_TICKET_SELF = "self"
+AUTH_TICKET_OTHER = "other"
+
+
+def _classify_auth_ticket(subject: str, body: str) -> str | None:
+    """Who has the sign-in problem: the sender, someone else, or nobody.
+
+    AUTH_TICKET_SELF: the sender cannot get into their own account; the auth
+    check and activation run on their email.
+    AUTH_TICKET_OTHER: the sender (usually an admin) writes about a volunteer
+    who cannot sign in or never got the invitation. Checking the sender's
+    account answers the wrong question (#9549).
+    None: not a sign-in problem.
+    """
     text = f"Subject: {subject}\n\nBody: {body or ''}".strip()
     if not text:
-        return False
+        return None
     try:
         response = client.messages.create(
             model=SUPPORT_MODEL_FAST,
             max_tokens=5,
             system=(
-                "You determine whether a support ticket is about an "
-                "email authentication problem — for example: not "
-                "receiving a verification or activation code, can't "
-                "authenticate or verify their email address, account "
-                "not yet activated, or similar sign-up/login blockers. "
-                "Reply with only YES or NO."
+                "You read a support ticket and decide who has a sign-in "
+                "problem. Sign-in problems include: not receiving a "
+                "verification, activation or invitation email, can't "
+                "authenticate or verify an email address, account not "
+                "yet activated, or similar sign-up/login blockers.\n"
+                "Reply SELF when the person who wrote the ticket has the "
+                "problem with their own account.\n"
+                "Reply OTHER when they write about someone else who has "
+                "it, for example an admin or coordinator reporting that a "
+                "volunteer can't log in or never received their invitation, "
+                "or a forwarded message from that person.\n"
+                "Reply NO for anything else.\n"
+                "Reply with only SELF, OTHER or NO."
             ),
             messages=[{"role": "user", "content": text}],
         )
         answer = response.content[0].text.strip().upper()
-        is_auth = answer.startswith("YES")
-        if is_auth:
-            print("[AUTH BYPASS] Claude detected auth issue")
-        return is_auth
     except Exception as e:
         print(f"[AUTH BYPASS] Detection failed: {e}")
-        return False
+        return None
+    if answer.startswith("OTHER"):
+        print("[AUTH BYPASS] Claude detected a sign-in problem for someone else")
+        return AUTH_TICKET_OTHER
+    if answer.startswith("SELF"):
+        if _FORWARDED_SUBJECT_RE.match(subject or ""):
+            print("[AUTH BYPASS] Forwarded ticket read as the sender's own, leaving for triage")
+            return None
+        print("[AUTH BYPASS] Claude detected auth issue")
+        return AUTH_TICKET_SELF
+    return None
 
 
 def _run_auth_check(email: str) -> dict | None:
@@ -1076,6 +1105,88 @@ def _handle_auth_bypass_email_ticket(
     return True
 
 
+# Accounts that manage an organization's volunteers and can resend invites.
+_ADMIN_USER_TYPES = {"organization_admin", "school_admin", "school_board_admin"}
+
+_INVITE_FAQ_URL = {
+    "en": "https://support.vomevolunteer.com/portal/en/kb/articles/what-happens-when-i-invite-volunteers-to-claim-their-profile-on-vome",
+    "fr": "https://support.vomevolunteer.com/portal/fr/kb/articles/que-se-passe-t-il-lorsque-j-invite-des-b%C3%A9n%C3%A9voles-%C3%A0-r%C3%A9clamer-leur-profil-sur-vome",
+}
+_LOGIN_HELP_FAQ_URL = {
+    "en": "https://support.vomevolunteer.com/portal/en/kb/articles/my-volunteer-is-having-trouble-logging-into-their-account-how-can-i-help-them",
+    "fr": "https://support.vomevolunteer.com/portal/fr/kb/articles/un-b%C3%A9n%C3%A9vole-a-des-difficult%C3%A9s-%C3%A0-se-connecter-%C3%A0-son-compte-comment-puis-je-l-aider",
+}
+
+
+def _handle_admin_signin_help_ticket(
+    ticket_id: str,
+    contact_email: str,
+    contact_name: str,
+    detected_lang: str | None,
+) -> bool:
+    """Send the invitation FAQ to an admin writing about a volunteer's sign-in.
+
+    Only when the sender's own account is an active admin: a volunteer
+    writing about a friend, or an unknown sender, gets no admin instructions
+    and falls through to triage. Wording is Sam's standard reply (#9549).
+    """
+    auth_result = _run_auth_check(contact_email)
+    if not (
+        auth_result
+        and auth_result.get("is_active")
+        and auth_result.get("user_type") in _ADMIN_USER_TYPES
+    ):
+        print(
+            f"[AUTH BYPASS] Sign-in problem for someone else, but sender is "
+            f"not an active admin, leaving for triage -- ticket {ticket_id}: "
+            f"{str(auth_result)[:200]}"
+        )
+        return False
+
+    name = _auth_bypass_first_name(contact_name)
+    if detected_lang == "French":
+        reply = (
+            f"Bonjour {name},\n\n"
+            "Si une personne ne reçoit pas le courriel d'invitation pour "
+            "une raison quelconque, vous pouvez simplement lui envoyer un "
+            "lien d'inscription. L'important est qu'elle s'inscrive avec la "
+            "même adresse courriel que celle à laquelle vous l'avez "
+            "invitée.\n\n"
+            "Que se passe-t-il lorsque j'invite des bénévoles à réclamer "
+            "leur profil sur Vome ?\n"
+            f"{_INVITE_FAQ_URL['fr']}\n\n"
+            "Si elle s'inscrit et a de la difficulté à se connecter pour "
+            "une raison quelconque :\n"
+            "Un bénévole a des difficultés à se connecter à son compte. "
+            "Comment puis-je l'aider ?\n"
+            f"{_LOGIN_HELP_FAQ_URL['fr']}\n\n"
+            "N'hésitez pas à nous écrire si vous rencontrez d'autres "
+            "difficultés !\n\n"
+            "Cordialement,\nÉquipe Vome"
+        )
+    else:
+        reply = (
+            f"Hi {name},\n\n"
+            "If a user does not receive the email invitation for any "
+            "reason, you can simply send a signup link to them. All that "
+            "matters is that they sign up with the same email address that "
+            "you invited them from.\n\n"
+            "What happens when I invite volunteers to claim their profile "
+            "on Vome?\n"
+            f"{_INVITE_FAQ_URL['en']}\n\n"
+            "If they do sign up and have any trouble logging in for any "
+            "reason:\n"
+            "A volunteer is having trouble logging into their account. How "
+            "can I help them?\n"
+            f"{_LOGIN_HELP_FAQ_URL['en']}\n\n"
+            "Let us know if there is any additional difficulty here!\n\n"
+            "Best,\nVome Support"
+        )
+    _send_auth_reply(ticket_id, contact_email, reply)
+    print(f"[AUTH BYPASS] Admin asked about a volunteer, invitation FAQ sent -- ticket {ticket_id}")
+    return True
+
+
 def _get_latest_client_reply(conversations_result, contact_email: str) -> str:
     """Return the most recent client message text (HTML stripped, max 200 chars).
 
@@ -1214,12 +1325,22 @@ def process_ticket(ticket_data: dict) -> str | None:
             print(f"Vome Error Report detected in ticket {ticket_id} -- leaving as New for Sam")
             return None
 
-        # Auth bypass fast-path: if the ticket is clearly about not receiving
-        # an auth/activation code, check + act immediately.
-        if not _detect_auth_bypass_issue(subject, body):
+        # Auth fast path: a sender who can't get into their own account is
+        # checked and activated now; an admin writing about a volunteer's
+        # sign-in gets the invitation FAQ instead.
+        auth_kind = _classify_auth_ticket(subject, body)
+        if auth_kind is None:
             return None
         thread_text = _format_conversations(conversations_result)
         detected_lang = _detect_language(body) or _detect_language(thread_text)
+        if auth_kind == AUTH_TICKET_OTHER:
+            handled = _handle_admin_signin_help_ticket(
+                ticket_id=ticket_id,
+                contact_email=contact_email,
+                contact_name=contact_name,
+                detected_lang=detected_lang,
+            )
+            return "admin_signin_help_sent" if handled else None
         handled = _handle_auth_bypass_email_ticket(
             ticket_id=ticket_id,
             contact_email=contact_email,
