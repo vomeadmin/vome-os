@@ -251,3 +251,39 @@ def test_a_scrapped_thread_only_answers_start_over(handler):
     assert handler.classify("change the hook", "scrapped") == "scrapped"
     assert handler.classify("go build the video", "scrapped") == "scrapped"
     assert handler.classify("start over", "scrapped") == "restart"
+
+
+# ------------------------------------------------ slackbot and reminders
+
+@pytest.mark.parametrize("event", [
+    {"user": "USLACKBOT", "text": "Reminder: post the email video."},
+    {"user": "U1", "app_id": "A1", "text": "Weekly content check-in"},
+    {"user": "U1", "bot_profile": {"name": "Workflow"}, "text": "Idea"},
+    {"user": "U1", "text": "<@U01B9FQNSBU> reminder to let me know how to "
+                           "get on this"},
+    {"user": "U1", "text": "Reminder: send the newsletter video"},
+])
+def test_slackbot_and_reminders_are_never_a_video(handler, event):
+    """2026-10-20: a reminder at the top level of the channel was taken as
+    a new idea and the whole team ran on it at 3:58 AM."""
+    assert handler.is_automated(event)
+
+
+@pytest.mark.parametrize("text", [
+    "New video idea: reminders that send themselves "
+    "https://support.vomevolunteer.com/portal/en/kb/articles/x",
+    "<@U2> can we make a video about shift reminders?",
+])
+def test_a_person_asking_about_reminders_is_still_a_person(handler, text):
+    assert not handler.is_automated({"user": "U1", "text": text})
+
+
+def test_an_automated_message_starts_nothing(handler, monkeypatch):
+    started = []
+    monkeypatch.setattr(handler.video_threads, "get", lambda t: None)
+    monkeypatch.setattr(handler.video_threads, "start",
+                        lambda *a, **k: started.append(a))
+    handler.handle_video_studio_message({
+        "channel": handler.slack.CHANNEL_VIDEO_STUDIO, "ts": "9.9",
+        "user": "USLACKBOT", "text": "Reminder: check the video thread"})
+    assert started == []

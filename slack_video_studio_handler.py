@@ -140,6 +140,24 @@ VAGUE_DISLIKE = re.compile(
     r"|^(?:not (?:good|great|it|loving it)|meh|nope|no|this is bad|"
     r"this isn'?t (?:it|working|good)|it'?s not working)[.!]*$")
 
+SLACKBOT_USER = "USLACKBOT"
+
+# A reminder's text, after any leading mentions: "Reminder: ...", "reminder
+# to ...". Slack's own reminders, and anyone's "reminder for @x" nudges,
+# are about people, not videos.
+REMINDER = re.compile(r"^(?:<[^>]+>[\s,:]*)*reminder\b", re.I)
+
+
+def is_automated(event: dict) -> bool:
+    """True for anything that is not a person asking for a video."""
+    if (event.get("user") or "") == SLACKBOT_USER:
+        return True
+    # Workflow Builder steps and app posts can arrive without a bot_id.
+    if event.get("bot_profile") or event.get("app_id"):
+        return True
+    return bool(REMINDER.match((event.get("text") or "").strip()))
+
+
 # Stops at "|" and ">": Slack sends a pasted link as <url|label>, and
 # matching to the next space captured the label and a ">" with it.
 FAQ_URL = re.compile(r"https?://[^\s|<>]*(?:kb|support|faq)[^\s|<>]*", re.I)
@@ -241,6 +259,14 @@ def handle_video_studio_message(event: dict) -> None:
         return
     if event.get("bot_id") or event.get("subtype"):
         return
+    # Slackbot and reminders are never a video request. On 2026-10-20 a
+    # reminder ("@Sammy reminder to let me know how to get on this") arrived
+    # at the top level, carried no bot_id, was taken as a new idea, and the
+    # whole team ran on it at 3:58 AM.
+    if is_automated(event):
+        print("[VIDEO] ignoring automated message: %s"
+              % (event.get("text") or "")[:80])
+        return
 
     text = event.get("text", "") or ""
     ts = event.get("ts", "")
@@ -285,7 +311,9 @@ def handle_video_studio_message(event: dict) -> None:
             video_threads.update(thread_ts, faq_url=faq.group(0))
         video_threads.update(thread_ts, state=video_threads.STATE_CONCEPTING,
                              brief=text if not (row or {}).get("brief")
-                             else row["brief"])
+                             else row["brief"],
+                             started_by=(row or {}).get("started_by")
+                             or user)
         _ack(thread_ts,
              "On it. Reading the FAQ and working out three ways to tell "
              "this one, back shortly with concepts to pick from. Nothing "

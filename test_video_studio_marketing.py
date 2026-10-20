@@ -796,7 +796,8 @@ def test_a_new_idea_goes_to_concepts(handler, routed, monkeypatch):
         "5.5", "Video idea https://support.vomevolunteer.com/kb/x"))]
     # The first message is kept as the brief, so "start over" can reuse it.
     assert {"state": "concepting", "brief": "Video idea "
-            "https://support.vomevolunteer.com/kb/x"} in routed.updates
+            "https://support.vomevolunteer.com/kb/x",
+            "started_by": ""} in routed.updates
     assert "three ways" in routed.acks[0]
 
 
