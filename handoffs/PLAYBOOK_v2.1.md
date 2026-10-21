@@ -111,7 +111,7 @@ An engineer's fix follows the same end: when the engineer moves the Priority Que
 
 | Action | Zoho status | Zoho owner | ClickUp |
 | ---| ---| ---| --- |
-| Route to an engineer (no reply yet) | unchanged (New or Processing: the client is still owed a reply) | unchanged | `queued`, one assignee, private Zoho note |
+| Route to an engineer (no reply yet) | unchanged (New or Processing: the client is still owed a reply) | unchanged, unless it is still the other team from an earlier round: then the routed team (#9501) | `queued`, one assignee, private Zoho note |
 | Acknowledgment sent on routed work | In Progress | Frontend Team or Backend Team, never Support Agent | `in progress` |
 | Question sent to the client | Awaiting Client Response | unchanged | `awaiting client` |
 | Answer or resolution sent | Closed | unchanged | closed |
