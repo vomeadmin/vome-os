@@ -95,7 +95,9 @@ backlog_sweep.py   one-off: triage what reached OnlyG/Sanjay before triage
                    plates, only the items Sam names (see its docstring)
 feature_desk.py    #feature-requests: engineering.feature_architect shapes each
                    request (skill shaping-a-backend-change), additive ones
-                   become fix_author PRs; Sam answers go N / log N / no N.
+                   become fix_author PRs; Sam answers go N / no N, or
+                   places it: build N (Sam Build Now), log N (Raw Intake),
+                   route N onlyg, leave N (moves Ron's task, never copies).
                    Always on; FEATURE_DESK_PR_ENABLED (off) gates the PRs
 WORKFLOWS.md       the workflow map + gap register (source of truth)
 VIDEO_STUDIO.md    marketing videos from #video-studio: the team, replies,

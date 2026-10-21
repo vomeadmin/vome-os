@@ -35,8 +35,13 @@ FLOW
          already_exists, frontend_only -> the finding, nothing built
          needs_info     -> the requester is asked one question
 
-Replies in the thread, from Sam: `go N` / `go NB` (build item N, or option
-B of it), `log N`, `no N`, `close`. Every other reply, from anyone, is read
+Replies in the thread, from Sam: `go N` / `go NB` (an agent builds item N,
+or option B of it), `build N` (Sam Build Now: he builds it himself), `log N`
+(Raw Intake, for later), `route N onlyg|sanjay`, `leave N` (stays in his
+Priority Queue), `no N`, `close`. He can also say it in his own words
+("move Ron's task into Sam Build Now"); the requester's existing task is
+moved, never copied, and build now adds no analysis (Sam, 2026-10-21).
+Every other reply, from anyone, is read
 against the whole thread (Sam's is also direction on shape), and the agent
 chimes in only when it is asked something, a verdict changes, or a reply
 contradicts the code. Then it posts a line or two and the items that
@@ -88,6 +93,8 @@ AGENT = "engineering.feature_architect"
 SAM_SLACK = "U01B9FQNSBU"
 SAM_CLICKUP = 3691763
 RAW_INTAKE = "901113386484"
+PRIORITY_QUEUE = "901113386257"
+SAM_ACCEPTED = "901115573620"
 FIELD_SOURCE = "857e1262-cb5c-4c22-b8da-770a8fcfa82e"
 SOURCE_SLACK = "e62588d7-4b72-45a8-a9ab-a2c20a860903"
 
@@ -101,8 +108,30 @@ MAX_ROUNDS = 4
 MAX_ITEMS = 6
 
 _TASK_LINK = re.compile(r"app\.clickup\.com/t/(?:\d+/)?([a-z0-9]+)")
-_COMMAND = re.compile(r"^(go|log|no)\b\s*(.*)$", re.I)
+_COMMAND = re.compile(r"^(go|build|mine|log|leave|route|no)\b\s*(.*)$",
+                      re.I)
 _TARGET = re.compile(r"(\d+)\s*([a-z])?\b", re.I)
+_ENGINEER = re.compile(r"\b(?:to\s+)?(onlyg|onlygod|sanjay|backend|frontend)"
+                       r"\b", re.I)
+_TASK_ID = re.compile(r"\b(86[a-z0-9]{7})\b")
+# Sam placing a request in his own words ("Move Ron's task into Sam Build
+# Now"). Build now is read first: "log this, I want to personally handle
+# it" is his build list, not the backlog (Sam, 2026-10-20).
+_SAYS = (
+    ("build", re.compile(
+        r"\bbuild[ -]?now\b|\bsam accepted\b|\bpersonally handle\b"
+        r"|\bi(?:'ll| will) (?:handle|build|take|do) (?:it|this)\b"
+        r"|\bi(?:'m| am) (?:building|handling|taking) (?:it|this)\b", re.I)),
+    ("route", re.compile(
+        r"\b(?:route|send|assign|give|hand)\b.*\b(?:onlyg|onlygod|sanjay)\b"
+        r"|\broute\b.*\b(?:backend|frontend)\b", re.I)),
+    ("leave", re.compile(
+        r"\b(?:leave|keep|park)\b.*\bpriority queue\b"
+        r"|\bleave (?:it|this|them)(?: (?:there|for now|as is))?\W*$", re.I)),
+    ("log", re.compile(
+        r"\braw intake\b|\bbacklog\b|\bfor later\b|\blog the request\b",
+        re.I)),
+)
 # A thank-you is not direction, and must not cost a re-analysis.
 _CHAT = re.compile(r"^(thanks?( you)?|ty|ok(ay)?|great|nice|cool|perfect|"
                    r"got it|sounds good|:[a-z0-9_+-]+:)\W*$", re.I)
@@ -112,7 +141,18 @@ BUILDING, PR_OPEN, WAITING_SAM, NEEDS_INFO = (
     "building", "pr_open", "waiting_sam", "needs_info")
 LOGGED, DECLINED, EXISTS, FRONTEND, HELD = (
     "logged", "declined", "exists", "frontend", "held")
-FINAL = (PR_OPEN, LOGGED, DECLINED, EXISTS, FRONTEND)
+# Where Sam placed it (2026-10-21): his Build Now list, left in his
+# Priority Queue, or with an engineer. LOGGED doubles as Raw Intake.
+BUILD_NOW, LEFT, ROUTED = "build_now", "left", "routed"
+FINAL = (PR_OPEN, LOGGED, DECLINED, EXISTS, FRONTEND, BUILD_NOW, LEFT,
+         ROUTED)
+# Sam can still move these: an architect's `log` only left the task where
+# it was, and a placed item can be placed again.
+PLACEABLE = ("", WAITING_SAM, HELD, NEEDS_INFO, LOGGED, LEFT, BUILD_NOW,
+             ROUTED)
+PLACES = {"build": "Sam Build Now", "log": "Raw Intake",
+          "leave": "Sam's Priority Queue"}
+ENGINEER_OPEN = ("queued", "in progress", "escalated")
 
 # Post states.
 ANALYSING, OPEN, CLOSED, ERROR = "analysing", "open", "closed", "error"
@@ -243,7 +283,7 @@ def _on_reply(ts: str, reply: dict) -> dict:
             _post("Closed. Nothing more will be built or filed from this "
                   "thread.", thread_ts=ts)
             return {"status": "ok", "action": "closed"}
-        command = parse_command(text, items)
+        command = parse_command(text, items) or parse_placement(text, items)
         if command:
             return _command(ts, row, items, command)
     if _CHAT.match(text):
@@ -257,13 +297,20 @@ def _on_reply(ts: str, reply: dict) -> dict:
 
 
 def parse_command(text: str, items: dict) -> dict | None:
-    """`go 2`, `go 2B`, `go 1 3`, `log 3`, `no 4`, or a bare verb meaning
-    every open item. None when the message is not exactly a command, so
-    "go with B but keep it on the role" reads as direction, not as `go`."""
+    """`go 2`, `go 2B`, `go 1 3`, `build 1`, `log 3`, `leave 1`,
+    `route 1 onlyg`, `no 4`, or a bare verb meaning every open item. None
+    when the message is not exactly a command, so "go with B but keep it on
+    the role" reads as direction, not as `go`."""
     match = _COMMAND.match(text.strip().strip("`*_").rstrip(".!"))
     if not match:
         return None
     verb, rest = match.group(1).lower(), match.group(2).strip()
+    verb = "build" if verb == "mine" else verb
+    engineer = ""
+    if verb == "route":
+        found = _ENGINEER.search(rest)
+        engineer = found.group(1).lower() if found else ""
+        rest = _ENGINEER.sub(" ", rest).strip()
     targets = []
     if rest:
         cleaned = re.sub(r"\b(and|item|items)\b|[,&]", " ", rest, flags=re.I)
@@ -272,11 +319,51 @@ def parse_command(text: str, items: dict) -> dict | None:
         targets = [(n, (opt or "").upper())
                    for n, opt in _TARGET.findall(cleaned)]
     else:
-        targets = [(n, "") for n, item in items.items()
-                   if item.get("state") not in FINAL]
+        targets = _open_targets(verb, items)
     if not targets:
         return None
-    return {"verb": verb, "targets": targets}
+    command = {"verb": verb, "targets": targets}
+    if verb == "route":
+        command["engineer"] = engineer
+    return command
+
+
+def parse_placement(text: str, items: dict) -> dict | None:
+    """Sam saying where a request goes in his own words: "Move Ron's task
+    into Sam Build Now", "send it to OnlyG", "leave it in my priority
+    queue", "backlog it". A question is not an instruction. Item numbers
+    in the message narrow it; otherwise it is every open item. A ClickUp
+    task named in the message is the one to move (the work already has a
+    task, so nothing new is created)."""
+    clean = text.strip()
+    if not clean or clean.rstrip("`*_ ").endswith("?"):
+        return None
+    for verb, said in _SAYS:
+        if not said.search(clean):
+            continue
+        stripped = _TASK_LINK.sub(" ", clean)
+        numbers = [n for n in re.findall(r"\b(\d)\b", stripped) if n in items]
+        targets = ([(n, "") for n in numbers] if numbers
+                   else _open_targets(verb, items))
+        if not targets:
+            return None
+        command = {"verb": verb, "targets": targets}
+        task = _TASK_LINK.search(clean) or _TASK_ID.search(stripped)
+        if task:
+            command["task"] = task.group(1)
+        if verb == "route":
+            found = _ENGINEER.search(clean)
+            command["engineer"] = found.group(1).lower() if found else ""
+        return command
+    return None
+
+
+def _open_targets(verb: str, items: dict) -> list[tuple[str, str]]:
+    if verb in ("build", "log", "leave", "route"):
+        return [(n, "") for n, item in items.items()
+                if item.get("state") in PLACEABLE]
+    return [(n, "") for n, item in items.items()
+            if item.get("state") not in FINAL]
 
 
 def _command(ts: str, row: dict, items: dict, command: dict) -> dict:
@@ -296,13 +383,8 @@ def _command(ts: str, row: dict, items: dict, command: dict) -> dict:
         _record(ts, row, items)
         return {"status": "ok", "action": "declined"}
 
-    if verb == "log":
-        lines = [_log(ts, row, items, n, sam_said=True)
-                 for n, _ in command["targets"]]
-        _save(ts, items=json.dumps(items))
-        _post("\n".join(lines), thread_ts=ts)
-        _record(ts, row, items)
-        return {"status": "ok", "action": "logged"}
+    if verb in ("build", "log", "leave", "route"):
+        return _place(ts, row, items, command)
 
     # go: an item already planned for an agent builds now; anything else
     # is re-decided with Sam's choice as direction, because the build plan
@@ -487,9 +569,11 @@ def act(ts: str, row: dict, card: dict, items: dict,
         f"*{card.get('summary') or 'Request'}*"
     footer = []
     if asks_sam:
-        footer.append(f"<@{SAM_SLACK}> reply `go N` (or `go NB` for "
-                      "option B), `log N`, `no N`, or tell me how you'd "
-                      "shape it.")
+        footer.append(f"<@{SAM_SLACK}> reply `go N` (agent builds it, "
+                      "`go NB` for option B), `build N` (Sam Build Now), "
+                      "`log N` (Raw Intake), `route N onlyg` or `sanjay`, "
+                      "`leave N` (stays in your Priority Queue), `no N`, or "
+                      "tell me how you'd shape it.")
     if any(i.get("state") == NEEDS_INFO for n, i in items.items()
            if only is None or n in only):
         who = row.get("requester_id") or ""
@@ -536,10 +620,10 @@ def _item_text(item: dict, row: dict) -> str:
         lines.append(f"Ready to build. `go {item['n']}` opens the pull "
                      "request.")
     if verdict == "log" and item.get("state") == LOGGED:
-        lines.append("Logged for Sam. It goes on the linked ClickUp task "
-                     "once nothing in this thread is open.")
+        lines.append("Stays on the linked task in your Priority Queue. "
+                     + _place_hint(item["n"]))
     elif verdict == "log":
-        lines.append(f"`log {item['n']}` adds it to Raw Intake.")
+        lines.append(_place_hint(item["n"]))
     return "\n".join(line for line in lines if line)
 
 
@@ -643,7 +727,7 @@ def _fell_through(ts: str, row: dict, items: dict, n: str,
     item = items[n]
     item["analysis"] = f"{item.get('analysis') or ''} Build stopped: " \
                        f"{why}.".strip()
-    line = _log(ts, row, items, n, sam_said=False)
+    line = _log(ts, row, items, n)
     _save(ts, items=json.dumps(items))
     _post(f"*{n}* didn't build ({why}). {line}", thread_ts=ts)
     return {"n": n, "built": False, "reason": why}
@@ -845,33 +929,209 @@ def _today() -> str:
 # Logging for Sam
 # ---------------------------------------------------------------------------
 
-def _log(ts: str, row: dict, items: dict, n: str, sam_said: bool) -> str:
-    """The linked task gets the analysis (it is already in Sam's queue):
-    now on Sam's word, otherwise with the rest of the outcome once the
-    thread settles (_record). With no linked task, a Raw Intake task, but
-    only on Sam's word: a client ask is his to prioritise, and an unasked
-    task is noise."""
+def _log(ts: str, row: dict, items: dict, n: str) -> str:
+    """A build that fell through, with no word from Sam. A linked task
+    stays where it is (Sam's Priority Queue) and gets the analysis once the
+    thread settles (_record). With no linked task nothing is created: a
+    client ask is Sam's to place, and an unasked task is noise."""
     item = items[n]
-    task_id = row.get("task_id") or ""
-    if task_id:
+    if row.get("task_id"):
         item["state"] = LOGGED
-        if not sam_said:
-            return (f"*{n}* is logged for Sam. It goes on the linked ClickUp "
-                    "task once nothing in this thread is open.")
-        _comment(task_id, _item_comment(item, ts))
-        item["recorded"] = True
-        return f"*{n}* logged on the linked ClickUp task."
-    if not sam_said:
-        item["state"] = WAITING_SAM
-        return f"<@{SAM_SLACK}> `log {n}` adds it to Raw Intake."
-    created = _create_task(item, ts, row)
-    item["state"] = LOGGED
-    item["clickup"] = created
-    if not created:
-        return f"*{n}*: the Raw Intake task could not be created. " \
-               "Logged here only."
-    return (f"*{n}* logged in Raw Intake: "
-            f"<https://app.clickup.com/t/{created}|task>.")
+        return (f"*{n}* stays on the linked task in your Priority Queue. "
+                f"{_place_hint(n)}")
+    item["state"] = WAITING_SAM
+    return f"<@{SAM_SLACK}> {_place_hint(n)}"
+
+
+def _place_hint(n: str) -> str:
+    return (f"`build {n}` moves it to Sam Build Now, `log {n}` to Raw "
+            f"Intake, `route {n} onlyg` to an engineer.")
+
+
+# ---------------------------------------------------------------------------
+# Placing it: Sam says where the request goes (2026-10-21)
+# ---------------------------------------------------------------------------
+#
+# Sam Build Now   Sam builds it himself, from the requester's own spec. The
+#                 task moves there, assigned to him, high priority. No
+#                 analysis is added: he works from Ron's prompt.
+# Raw Intake      logged for later: the task moves there, Sam unassigned,
+#                 the analysis on it for whoever picks it up.
+# Priority Queue  left where it is, nothing written.
+# An engineer     the task moves to the Priority Queue, assigned to the
+#                 engineer alone (Sam removed), a ping in their channel.
+#
+# Ron has usually filed a task already, so it is moved, never copied. A task
+# is created only when the post links none.
+
+class PlacementError(RuntimeError):
+    """Nothing was moved. The message is safe to post."""
+
+
+def _place(ts: str, row: dict, items: dict, command: dict) -> dict:
+    verb = command["verb"]
+    targets = [n for n, _ in command["targets"]]
+    built = [n for n in targets
+             if items[n].get("state") in (BUILDING, PR_OPEN)]
+    targets = [n for n in targets if n not in built]
+    notes = [f"{', '.join(built)} already has a pull request, so it stays "
+             "as built."] if built else []
+    engineer = {}
+    if verb == "route":
+        engineer = _engineer(command.get("engineer") or "")
+        if not engineer:
+            _post("Route it to whom? `route N onlyg` or `route N sanjay`.",
+                  thread_ts=ts)
+            return {"status": "ok", "action": "asked which engineer"}
+    if not targets:
+        _post(" ".join(notes), thread_ts=ts)
+        return {"status": "ok", "action": "nothing to place"}
+
+    task_id = command.get("task") or row.get("task_id") or ""
+    try:
+        where, created = _put(ts, row, items, targets, verb, engineer,
+                              task_id)
+    except PlacementError as exc:
+        _post(f":warning: Nothing moved: {exc}", thread_ts=ts)
+        return {"status": "error", "reason": str(exc)}
+
+    state = {"build": BUILD_NOW, "log": LOGGED, "leave": LEFT,
+             "route": ROUTED}[verb]
+    for n in targets:
+        items[n].update(state=state, placed=where, recorded=True)
+        if created.get(n):
+            items[n]["clickup"] = created[n]
+        elif task_id and task_id != row.get("task_id"):
+            items[n]["clickup"] = task_id
+    _save(ts, items=json.dumps(items))
+    settles = (all(i.get("state") in FINAL for i in items.values())
+               and row.get("status") != SETTLED)
+    if not settles or notes:
+        _post(" ".join([*([] if settles else
+                          [f"{_list(command['targets'])}: {where}."]),
+                        *notes]), thread_ts=ts)
+    _record(ts, row, items)
+    return {"status": "ok", "action": verb, "where": where}
+
+
+def _put(ts: str, row: dict, items: dict, targets: list, verb: str,
+         engineer: dict, task_id: str) -> tuple[str, dict]:
+    """The ClickUp half: where it landed, and any task created per item."""
+    import clickup_search
+
+    if task_id:
+        try:
+            task = _clickup("GET", f"/task/{task_id}")
+        except Exception as exc:
+            raise PlacementError(f"I couldn't read task {task_id} ({exc})")
+        home = str((task.get("list") or {}).get("id") or "")
+        names = {v: k for k, v in clickup_search.LISTS.items()}
+        if home not in names:
+            raise PlacementError(
+                f"task {task_id} is in {(task.get('list') or {}).get('name')}"
+                ", not a product list, so I left it alone")
+        if verb == "leave":
+            return f"left in {names[home]}", {}
+        url = f"<https://app.clickup.com/t/{task_id}|task>"
+        if verb == "build":
+            _move(task_id, home, SAM_ACCEPTED, "Sam Build Now")
+            _update(task_id, {"assignees": {"add": [SAM_CLICKUP], "rem": []},
+                              "priority": 2})
+            link = _permalink(ts)
+            _comment(task_id, "Sam is building this himself (Sam Build Now"
+                              f", from #feature-requests). {link}".strip())
+            where = f"moved to Sam Build Now, assigned to you, high ({url})"
+        elif verb == "log":
+            _move(task_id, home, RAW_INTAKE, "Raw Intake")
+            _update(task_id, {"assignees": {"add": [],
+                                            "rem": [SAM_CLICKUP]}})
+            for n in targets:
+                if items[n].get("analysis"):
+                    _comment(task_id, _item_comment(items[n], ts))
+            where = f"moved to Raw Intake for later ({url})"
+        else:
+            _move(task_id, home, PRIORITY_QUEUE, "the Priority Queue")
+            status = str((task.get("status") or {}).get("status") or "")
+            body = {"assignees": {"add": [engineer["clickup"]],
+                                  "rem": [SAM_CLICKUP]}}
+            if status.lower() not in ENGINEER_OPEN:
+                body["status"] = "queued"
+            _update(task_id, body)
+            for n in targets:
+                if items[n].get("analysis"):
+                    _comment(task_id, _item_comment(items[n], ts))
+            _tell_engineer(ts, row, items[targets[0]], engineer, task_id)
+            where = (f"routed to {engineer['name']} in the Priority Queue "
+                     f"and posted in <#{engineer['channel']}> ({url})")
+        _set_source(task_id)
+        return where, {}
+
+    if verb == "leave":
+        return "left here, nothing filed", {}
+    created = {}
+    for n in targets:
+        if verb == "build":
+            new = _create_task(items[n], ts, row, list_id=SAM_ACCEPTED,
+                               assignees=[SAM_CLICKUP], priority=2)
+        elif verb == "log":
+            new = _create_task(items[n], ts, row)
+        else:
+            new = _create_task(items[n], ts, row, list_id=PRIORITY_QUEUE,
+                               assignees=[engineer["clickup"]],
+                               status="queued")
+            if new:
+                _tell_engineer(ts, row, items[n], engineer, new)
+        if not new:
+            raise PlacementError("the ClickUp task could not be created")
+        created[n] = new
+    where = {"build": "added to Sam Build Now, assigned to you, high",
+             "log": "added to Raw Intake for later",
+             "route": f"routed to {engineer.get('name')} in the Priority "
+                      f"Queue and posted in <#{engineer.get('channel')}>"
+             }[verb]
+    links = ", ".join(f"<https://app.clickup.com/t/{t}|task>"
+                      for t in created.values())
+    return f"{where} ({links})", created
+
+
+def _move(task_id: str, home: str, list_id: str, name: str) -> None:
+    import clickup_tasks
+
+    if home != list_id and not clickup_tasks.move_clickup_task(task_id,
+                                                               list_id):
+        raise PlacementError(f"ClickUp refused the move to {name}. Move "
+                             f"task {task_id} by hand")
+
+
+def _update(task_id: str, body: dict) -> None:
+    try:
+        _clickup("PUT", f"/task/{task_id}", body)
+    except Exception as exc:
+        print(f"[FEATURE DESK] update of {task_id} failed: {exc}")
+
+
+def _engineer(name: str) -> dict:
+    import sprint_thread
+
+    key = sprint_thread.ENGINEER_ALIASES.get(name, name)
+    if key not in sprint_thread.ENGINEERS:
+        return {}
+    clickup_id, slack_id, _team, channel = sprint_thread.ENGINEERS[key]
+    return {"key": key, "clickup": clickup_id, "slack": slack_id,
+            "channel": channel,
+            "name": {"onlyg": "OnlyG", "sanjay": "Sanjay"}.get(key, key)}
+
+
+def _tell_engineer(ts: str, row: dict, item: dict, engineer: dict,
+                   task_id: str) -> None:
+    link = _permalink(ts)
+    _post("\n".join(part for part in (
+        f"<@{engineer['slack']}> Routed to you from #feature-requests "
+        f"({row.get('requester') or 'a teammate'}): "
+        f"*{item.get('title') or 'Request'}*",
+        f"Spec and analysis on ClickUp: https://app.clickup.com/t/{task_id}",
+        f"Thread: {link}" if link else "",
+    ) if part), channel=engineer["channel"])
 
 
 def _record(ts: str, row: dict, items: dict, summary: str = "") -> None:
@@ -902,19 +1162,31 @@ def _settle(ts: str, row: dict, items: dict) -> None:
     _post(_settled_line(row, items), thread_ts=ts)
 
 
-_LANDED = {PR_OPEN: "PR open for Sam to merge", LOGGED: "logged",
-           DECLINED: "not building", EXISTS: "already there",
-           FRONTEND: "frontend only"}
+_LANDED = {PR_OPEN: "PR open for Sam to merge",
+           LOGGED: "left in your Priority Queue", DECLINED: "not building",
+           EXISTS: "already there", FRONTEND: "frontend only"}
+
+
+def _landed(item: dict) -> str:
+    state = str(item.get("state"))
+    if state in (BUILD_NOW, LEFT, ROUTED) or (state == LOGGED
+                                              and item.get("placed")):
+        # "moved to Sam Build Now, assigned to you, high (<link|task>)":
+        # the link is already in the closing line.
+        return str(item.get("placed") or "").split(" (<")[0]
+    if state == LOGGED and item.get("clickup"):
+        return "logged in Raw Intake"
+    return _LANDED.get(state, state)
 
 
 def _settled_line(row: dict, items: dict) -> str:
     landed = ", ".join(
-        f"{n} {_LANDED.get(str(i.get('state')), str(i.get('state')))}"
+        f"{n} {_landed(i)}"
         for n, i in sorted(items.items(), key=lambda kv: int(kv[0])))
     links = []
     if row.get("task_id"):
         links.append(f"<https://app.clickup.com/t/{row['task_id']}|task>")
-    links += [f"<https://app.clickup.com/t/{i['clickup']}|Raw Intake>"
+    links += [f"<https://app.clickup.com/t/{i['clickup']}|task>"
               for i in items.values() if i.get("clickup")]
     links += [f"<https://app.clickup.com/t/{i['fix_task']}|Agent Fixes>"
               for i in items.values() if i.get("fix_task")]
@@ -932,16 +1204,26 @@ def _react(ts: str) -> None:
             print(f"[FEATURE DESK] check mark not added on {ts}: {exc}")
 
 
-def _create_task(item: dict, ts: str, row: dict) -> str:
+def _create_task(item: dict, ts: str, row: dict, list_id: str = RAW_INTAKE,
+                 **extra) -> str:
+    """Only for a post that links no task. Build now carries the request
+    as written, since Sam works from the requester's words."""
+    if list_id == SAM_ACCEPTED:
+        link = _permalink(ts)
+        body = f"{_read_post(ts).get('text') or ''}\n\nSlack: {link}"
+    else:
+        body = _item_comment(item, ts)
     try:
-        task = _clickup("POST", f"/list/{RAW_INTAKE}/task", {
+        task = _clickup("POST", f"/list/{list_id}/task", {
             "name": str(item.get("title") or "Feature request")[:180],
-            "markdown_description": _item_comment(item, ts),
+            "markdown_description": body,
             "custom_fields": [{"id": FIELD_SOURCE, "value": SOURCE_SLACK}],
+            **extra,
         })
         return str(task.get("id") or "")
     except Exception as exc:
-        print(f"[FEATURE DESK] Raw Intake task not created for {ts}: {exc}")
+        print(f"[FEATURE DESK] task not created in {list_id} for {ts}: "
+              f"{exc}")
         return ""
 
 

@@ -53,8 +53,21 @@ def desk(monkeypatch):
                         calls["reactions"].append(ts))
     monkeypatch.setattr(fd, "_row", lambda ts: {})
     monkeypatch.setattr(fd, "_name", lambda user: "Ron")
-    monkeypatch.setattr(fd, "_create_task", lambda item, ts, row:
-                        calls["tasks"].append(item["n"]) or "T-NEW")
+    monkeypatch.setattr(fd, "_create_task", lambda item, ts, row, **k:
+                        calls["tasks"].append((item["n"], k)) or "T-NEW")
+    calls["moves"], calls["updates"] = [], []
+    calls["task_list"] = fd.PRIORITY_QUEUE
+
+    def clickup(method, path, body=None):
+        if method == "GET":
+            return {"id": path.split("/")[-1], "status": {"status": "queued"},
+                    "list": {"id": calls["task_list"], "name": "x"}}
+        calls["updates"].append((path, body))
+        return {}
+
+    monkeypatch.setattr(fd, "_clickup", clickup)
+    monkeypatch.setattr("clickup_tasks.move_clickup_task", lambda task, to:
+                        calls["moves"].append((task, to)) or True)
     return calls
 
 
@@ -226,7 +239,7 @@ def test_a_settled_thread_gets_a_check_mark_and_one_line(desk):
     assert desk["comments"][0][0] == "T1"
     line = desk["posts"][-1]
     assert line.startswith(":white_check_mark: Handled: 1 PR open")
-    assert "2 logged" in line
+    assert "2 left in your Priority Queue" in line
     assert "app.clickup.com/t/T1" in line and "t/AF1" in line
     assert {"status": fd.SETTLED} in desk["saves"]
 
@@ -577,16 +590,164 @@ def test_the_outcome_goes_on_the_task_once_it_settles(monkeypatch, desk):
     assert len(desk["comments"]) == 1
 
 
-def test_sams_log_goes_on_the_task_straight_away(monkeypatch, desk):
+def test_sams_log_moves_the_task_to_raw_intake(monkeypatch, desk):
     items = {"1": {"n": "1", "title": "Bulk", "verdict": "log",
-                   "state": fd.WAITING_SAM},
+                   "analysis": "New endpoints.", "state": fd.WAITING_SAM},
              "2": {**WAITING, "n": "2"}}
     monkeypatch.setattr(fd, "_row", lambda ts: _row(items, task_id="T1"))
     fd._on_reply("1.1", {"ts": "2", "user": SAM, "text": "log 1"})
+    assert desk["moves"] == [("T1", fd.RAW_INTAKE)]
+    assert ("/task/T1", {"assignees": {"add": [],
+                                       "rem": [fd.SAM_CLICKUP]}}) \
+        in desk["updates"]
     assert [task for task, _ in desk["comments"]] == ["T1"]
+    assert desk["tasks"] == []
     saved = json.loads([s for s in desk["saves"] if "items" in s][-1]["items"])
+    assert saved["1"]["state"] == fd.LOGGED
     assert saved["1"]["recorded"] is True
     assert not saved["2"].get("recorded")
+    assert "Raw Intake" in desk["posts"][-1]
+
+
+# ---------------------------------------------------------------------------
+# Sam places the request (2026-10-21): Build Now, Raw Intake, his Priority
+# Queue, an engineer. Ron's task is moved, never copied.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text,verb", [
+    ("Move Ron's existing clickup task into Sam Build Now", "build"),
+    ("build now", "build"),
+    ("I'll handle this one", "build"),
+    ("log this, I want to personally handle it", "build"),
+    ("send it to OnlyG", "route"),
+    ("route to backend", "route"),
+    ("leave it in my priority queue for now", "leave"),
+    ("leave it", "leave"),
+    ("put it in the backlog", "log"),
+    ("move it to Raw Intake", "log"),
+])
+def test_sam_places_it_in_his_own_words(text, verb):
+    items = {"1": {"n": "1", "state": fd.WAITING_SAM}}
+    assert fd.parse_placement(text, items)["verb"] == verb
+
+
+@pytest.mark.parametrize("text", [
+    "should this go in build now?",
+    "Make it an option on the form step",
+    "log it under the forms epic",
+])
+def test_a_question_or_shape_is_not_a_placement(text):
+    assert fd.parse_placement(text, {"1": {"state": fd.WAITING_SAM}}) is None
+
+
+def test_placement_commands_parse():
+    items = {"1": {"state": fd.LOGGED}, "2": {"state": fd.PR_OPEN}}
+    assert fd.parse_command("route 1 onlyg", items) == {
+        "verb": "route", "targets": [("1", "")], "engineer": "onlyg"}
+    assert fd.parse_command("mine", items) == {
+        "verb": "build", "targets": [("1", "")]}
+    assert fd.parse_command("leave 1", items)["verb"] == "leave"
+
+
+def test_build_now_moves_rons_task_without_analysis(monkeypatch, desk):
+    """Sam, 2026-10-21: "Move Ron's existing clickup task into Sam Build
+    Now" was answered with "the task still needs moving" and the open
+    question repeated. Nothing moved."""
+    items = {"1": {**WAITING, "analysis": "Report qualifier."}}
+    monkeypatch.setattr(fd, "_row", lambda ts: _row(items, task_id="868mkqh95"))
+    monkeypatch.setattr(fd, "analyse", lambda *a, **k: pytest.fail("ran"))
+    fd._on_reply("1.1", {"ts": "2", "user": SAM, "text":
+                         "Move Ron's existing clickup task into Sam Build Now"})
+    assert desk["moves"] == [("868mkqh95", fd.SAM_ACCEPTED)]
+    assert ("/task/868mkqh95", {"assignees": {"add": [fd.SAM_CLICKUP],
+                                              "rem": []}, "priority": 2}) \
+        in desk["updates"]
+    assert desk["tasks"] == []
+    assert not any("Report qualifier" in text for _, text in desk["comments"])
+    line = desk["posts"][-1]
+    assert line.startswith(":white_check_mark: Handled: 1 moved to Sam Build "
+                           "Now")
+    assert "still needs" not in line and "?" not in line
+    assert desk["reactions"] == ["1.1"]
+
+
+def test_a_task_already_there_is_not_moved_again(monkeypatch, desk):
+    desk["task_list"] = fd.SAM_ACCEPTED
+    items = {"1": dict(WAITING)}
+    monkeypatch.setattr(fd, "_row", lambda ts: _row(items, task_id="T1"))
+    fd._on_reply("1.1", {"ts": "2", "user": SAM, "text": "build 1"})
+    assert desk["moves"] == []
+    saved = json.loads([s for s in desk["saves"] if "items" in s][-1]["items"])
+    assert saved["1"]["state"] == fd.BUILD_NOW
+
+
+def test_a_settled_log_can_still_be_moved(monkeypatch, desk):
+    """The architect's own `log` left the task in the Priority Queue and
+    settled the thread; Sam's later `build 1` still moves it."""
+    items = {"1": {"n": "1", "verdict": "log", "state": fd.LOGGED,
+                   "recorded": True}}
+    monkeypatch.setattr(fd, "_row", lambda ts: _row(
+        items, task_id="T1", status=fd.SETTLED))
+    fd._on_reply("1.1", {"ts": "2", "user": SAM, "text": "build 1"})
+    assert desk["moves"] == [("T1", fd.SAM_ACCEPTED)]
+    assert desk["posts"][-1].startswith("1: moved to Sam Build Now")
+
+
+def test_route_assigns_the_engineer_alone(monkeypatch, desk):
+    items = {"1": dict(WAITING)}
+    monkeypatch.setattr(fd, "_row", lambda ts: _row(
+        items, task_id="T1", requester="Ron"))
+    fd._on_reply("1.1", {"ts": "2", "user": SAM, "text": "route 1 onlyg"})
+    import sprint_thread
+
+    onlyg = sprint_thread.ENGINEERS["onlyg"]
+    assert desk["moves"] == []
+    assert ("/task/T1", {"assignees": {"add": [onlyg[0]],
+                                       "rem": [fd.SAM_CLICKUP]}}) \
+        in desk["updates"]
+    assert any(f"<@{onlyg[1]}>" in post for post in desk["posts"])
+    assert "routed to OnlyG" in desk["posts"][-1]
+
+
+def test_route_without_an_engineer_asks(monkeypatch, desk):
+    monkeypatch.setattr(fd, "_row", lambda ts: _row({"1": dict(WAITING)}))
+    fd._on_reply("1.1", {"ts": "2", "user": SAM, "text": "route 1"})
+    assert desk["updates"] == [] and "onlyg" in desk["posts"][-1]
+
+
+def test_leave_writes_nothing(monkeypatch, desk):
+    monkeypatch.setattr(fd, "_row", lambda ts: _row({"1": dict(WAITING)},
+                                                    task_id="T1"))
+    fd._on_reply("1.1", {"ts": "2", "user": SAM, "text": "leave 1"})
+    assert desk["moves"] == [] and desk["updates"] == []
+    assert desk["comments"] == []
+    assert "left in Priority Queue" in desk["posts"][-1]
+
+
+def test_a_task_outside_the_product_lists_is_left_alone(monkeypatch, desk):
+    desk["task_list"] = "999"
+    monkeypatch.setattr(fd, "_row", lambda ts: _row({"1": dict(WAITING)},
+                                                    task_id="T1"))
+    fd._on_reply("1.1", {"ts": "2", "user": SAM, "text": "build 1"})
+    assert desk["moves"] == [] and desk["updates"] == []
+    assert desk["posts"][-1].startswith(":warning: Nothing moved")
+
+
+def test_build_now_with_no_task_creates_one_in_sam_build_now(monkeypatch,
+                                                            desk):
+    monkeypatch.setattr(fd, "_row", lambda ts: _row({"1": dict(WAITING)}))
+    fd._on_reply("1.1", {"ts": "2", "user": SAM, "text": "build 1"})
+    assert desk["tasks"] == [("1", {"list_id": fd.SAM_ACCEPTED,
+                                    "assignees": [fd.SAM_CLICKUP],
+                                    "priority": 2})]
+
+
+def test_a_task_named_in_the_reply_is_the_one_moved(monkeypatch, desk):
+    monkeypatch.setattr(fd, "_row", lambda ts: _row({"1": dict(WAITING)}))
+    fd._on_reply("1.1", {"ts": "2", "user": SAM, "text":
+                         "move it to build now, it's 868mkbdz6"})
+    assert desk["moves"] == [("868mkbdz6", fd.SAM_ACCEPTED)]
+    assert desk["tasks"] == []
 
 
 # ---------------------------------------------------------------------------
