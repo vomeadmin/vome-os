@@ -26,12 +26,15 @@ def _client_message(text: str, ctx: dict) -> GuardResult:
                          internal-names check
       require_signature  False for agents whose caller appends the signature
                          after the guard runs
+      sam_wrote          True when the text is Sam's own edit, which may say
+                         "draft" in its ordinary sense
     """
     result = validate_client_message(
         text,
         category=str(ctx.get("guard_category") or ctx.get("agent") or ""),
         contact_name=str(ctx.get("contact_name") or ""),
         require_signature=bool(ctx.get("require_signature", True)),
+        sam_wrote=bool(ctx.get("sam_wrote")),
     )
     return GuardResult(
         "client_message",

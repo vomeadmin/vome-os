@@ -183,6 +183,29 @@ def test_runaway_length_is_blocked():
     assert any("characters" in r for r in result["reasons"])
 
 
+SAM_9537 = (
+    "Hi Dyane,\n\nThanks for both suggestions. Saving emails as a draft and "
+    "sending another email to the same recipients have been added to our "
+    "team review.\n\nSam | Vome team\nsupport.vomevolunteer.com"
+)
+
+
+def test_sams_own_words_may_mention_a_draft():
+    """#9537 (2026-10-21): the customer asked for email drafts. Sam's reply
+    names the feature; a model's reply saying "a draft" is still held."""
+    assert validate_client_message(SAM_9537, sam_wrote=True)["ok"] is True
+    held = validate_client_message(SAM_9537)
+    assert held["ok"] is False
+    assert any("drafting" in r for r in held["reasons"])
+
+
+def test_sams_own_words_still_get_every_other_check():
+    draft = SAM_9537.replace("team review", "ClickUp backlog")
+    result = validate_client_message(draft, sam_wrote=True)
+    assert result["ok"] is False
+    assert any("internal" in r for r in result["reasons"])
+
+
 def test_em_dash_warns_but_does_not_block():
     draft = (
         "Hi Nora, the issue you reported is resolved — please give it "

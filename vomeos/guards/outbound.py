@@ -126,6 +126,11 @@ _FORMAT_PATTERNS = [
 
 _MIN_CHARS = 20
 
+# Patterns that catch a model narrating its own drafting. Words Sam wrote
+# himself use them in their ordinary sense ("save emails as a draft", #9537),
+# so his edits skip these and every other check still runs.
+_SAM_MAY_WRITE = {"talks about drafting instead of being the message"}
+
 
 def validate_client_message(
     draft: str,
@@ -133,6 +138,7 @@ def validate_client_message(
     category: str = "",
     contact_name: str = "",
     require_signature: bool = True,
+    sam_wrote: bool = False,
 ) -> dict:
     """Decide whether `draft` is safe to send to someone outside the company.
 
@@ -166,6 +172,8 @@ def validate_client_message(
 
     for group in (_META_PATTERNS, _INTERNAL_PATTERNS, _FORMAT_PATTERNS):
         for reason, pattern in group:
+            if sam_wrote and reason in _SAM_MAY_WRITE:
+                continue
             match = pattern.search(body)
             if match:
                 matched = match.group(0).strip()

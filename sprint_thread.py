@@ -1043,8 +1043,10 @@ def _referenced_block(text: str, items: list[dict], focus) -> str:
     return "\n\n".join(blocks) or "(none)"
 
 
-def _check_draft(item: dict, text: str) -> tuple[str, str]:
-    """Every outbound guard on a draft the partner wrote. (status, why)."""
+def _check_draft(item: dict, text: str,
+                 sam_wrote: bool = False) -> tuple[str, str]:
+    """Every outbound guard on a draft the partner wrote, or on Sam's own
+    edit when `sam_wrote`. (status, why)."""
     from vomeos.guards import run_guards
 
     import shadow_triage
@@ -1053,7 +1055,7 @@ def _check_draft(item: dict, text: str) -> tuple[str, str]:
                                           item.get("ticket_id") or "")
     ctx = {"agent": "customer_success.sprint_partner",
            "contact_name": (item.get("recipients") or {}).get("first_name")
-           or ""}
+           or "", "sam_wrote": sam_wrote}
     if release.get("live"):
         ctx.update({"verified_fix_task": release.get("task_id") or "",
                     "verified_fix_status": "on prod",
@@ -1231,7 +1233,7 @@ def _guard_notes(text: str, item: dict) -> list[str]:
 
     first = (item.get("recipients") or {}).get("first_name") or ""
     result = validate_client_message(text, category="sprint edit",
-                                     contact_name=first)
+                                     contact_name=first, sam_wrote=True)
     notes = list(result.get("reasons") or []) + list(
         result.get("warnings") or [])
     return notes
@@ -1288,7 +1290,8 @@ def _send(item: dict) -> str:
     import zoho_actions
 
     n = item.get("number")
-    if item.get("status") not in sprint_store.CARRIES:
+    owed = _reply_owed(item)
+    if item.get("status") not in sprint_store.CARRIES and not owed:
         return f"*{n}.* already {item.get('status')}, nothing sent."
     if item.get("status") == sprint_store.FIXING and item.get("sent_at"):
         return (f"*{n}.* already acknowledged and the agent is fixing it, "
@@ -1322,13 +1325,26 @@ def _send(item: dict) -> str:
         # stays in flight instead of finishing (#9582).
         sprint_store.keep_fixing(item["id"])
     else:
-        sprint_store.decide(item["id"], sprint_store.SENT, "sent by Sam")
+        sprint_store.decide(item["id"], sprint_store.SENT,
+                            f"sent by Sam after {item.get('decision')}"
+                            if owed else "sent by Sam")
     sprint_store.record_sent(item["id"], draft)
     copied = f" cc {', '.join(cc)}" if cc else ""
     _post(f"Sent #{item.get('ticket_number')} to {to}{copied} on Sam's "
           "approval in the sprint.", channel=AGENT_LOG)
     after = _after_send(item)
     return f"*{n}.* sent to {to}{copied}." + (f" {after}" if after else "")
+
+
+def _reply_owed(item: dict) -> bool:
+    """Logging or building a request finishes the item, but the customer
+    has not been answered yet, and `_feature` says to draft that reply. A
+    finished item is sendable only in that case: its decision is the
+    request and nothing has gone out (#9557, 2026-10-21)."""
+    decision = str(item.get("decision") or "")
+    return (item.get("status") == sprint_store.DONE
+            and not item.get("sent_at")
+            and decision.startswith(("log:", "build:")))
 
 
 def _engineer_shipped(item: dict) -> str:

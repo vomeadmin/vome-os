@@ -480,7 +480,7 @@ def send_ticket_reply(ticket: str, sam_said: str, caller: str,
     learned = ""
     if text.strip():
         body = sprint_thread._signed(item, text)
-        status, why = sprint_thread._check_draft(item, body)
+        status, why = sprint_thread._check_draft(item, body, sam_wrote=True)
         before = item.get("draft") or ""
         sprint_store.set_draft(item["id"], body, status, why)
         learned = sprint_thread._learn(item, before, body, sam_said)

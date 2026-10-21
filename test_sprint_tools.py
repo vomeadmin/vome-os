@@ -96,8 +96,10 @@ def test_send_uses_the_one_guarded_send_path(sam, one, monkeypatch):
 
 def test_an_edited_reply_is_guarded_and_teaches(sam, one, monkeypatch):
     stored, learned = [], []
+    checked = []
     monkeypatch.setattr(sprint_thread, "_check_draft",
-                        lambda item, body: ("ok", ""))
+                        lambda item, body, sam_wrote=False:
+                        checked.append(sam_wrote) or ("ok", ""))
     monkeypatch.setattr(sprint_store, "set_draft",
                         lambda i, t, s, w="": stored.append(t))
     monkeypatch.setattr(sprint_store, "get_item",
@@ -111,11 +113,14 @@ def test_an_edited_reply_is_guarded_and_teaches(sam, one, monkeypatch):
         "9604", "send this instead", SAM, text="Use the People tab.")
     assert stored[0].startswith("Hi Ana,") and "Sam | Vome team" in stored[0]
     assert learned and out["lesson"] == ":brain: Learned L2"
+    # Sam's own words: "a draft" may mean the product's drafts (#9537).
+    assert checked == [True]
 
 
 def test_an_edit_a_guard_blocks_is_not_sent(sam, one, monkeypatch):
     monkeypatch.setattr(sprint_thread, "_check_draft",
-                        lambda item, body: ("blocked", "no_confirmation"))
+                        lambda item, body, sam_wrote=False:
+                        ("blocked", "no_confirmation"))
     monkeypatch.setattr(sprint_store, "set_draft", lambda *a, **k: None)
     monkeypatch.setattr(sprint_thread, "_learn", lambda *a: "")
     sent = []

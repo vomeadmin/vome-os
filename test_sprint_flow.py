@@ -148,6 +148,27 @@ def test_an_item_already_sent_is_not_sent_twice(world):
     assert world.zoho == []
 
 
+def test_a_logged_request_still_sends_the_reply_it_owes(world):
+    """#9557 (2026-10-21): `build` finished the item before Sam's reply
+    went, and `send` then refused it as already done."""
+    out = sprint_thread._send(_item(status="done",
+                                    decision="build: https://cu/86y"))
+    assert world.zoho and "sent to phanda@mlhs.org" in out
+    assert world.decided[0][1] == sprint_store.SENT
+    assert world.decided[0][2] == "sent by Sam after build: https://cu/86y"
+
+
+@pytest.mark.parametrize("over", [
+    {"status": "done", "decision": "done by Sam"},
+    {"status": "done", "decision": "log: https://cu/86y",
+     "sent_at": "2026-10-21T14:00:00"},
+    {"status": "sent", "decision": "log: https://cu/86y"},
+])
+def test_a_finished_item_is_not_sent(world, over):
+    out = sprint_thread._send(_item(**over))
+    assert world.zoho == [] and "nothing sent" in out
+
+
 def test_edit_keeps_sams_words_and_adds_only_greeting_and_signature(world):
     out = sprint_thread._edit(_item(), "She can remove the note now.")
     body = world.drafts[0][1]
