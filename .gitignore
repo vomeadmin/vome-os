@@ -14,3 +14,6 @@ __pycache__/
 # real ticket IDs and customer emails from allowed command examples.
 .claude/settings.local.json
 workflow_map.html
+
+# backlog_sweep.py output: customer names and ticket threads. Never commit.
+backlog_sweep_out/

@@ -90,6 +90,9 @@ release_resolutions.py  a live fix -> one resolution draft per client, as a
                    card in the day thread (RELEASE_AUTO_SEND sends clean ones)
 sentry_agent_fixes.py  actionable Sentry issue -> one Agent Fixes task/cause
 autonomy_report.py weekly: how often drafts go out unedited, per category
+backlog_sweep.py   one-off: triage what reached OnlyG/Sanjay before triage
+                   existed; answer / agent-fix / close what comes off their
+                   plates, only the items Sam names (see its docstring)
 feature_desk.py    #feature-requests: engineering.feature_architect shapes each
                    request (skill shaping-a-backend-change), additive ones
                    become fix_author PRs; Sam answers go N / log N / no N.
