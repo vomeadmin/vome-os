@@ -288,46 +288,51 @@ def test_an_unreadable_pr_is_said_out_loud(monkeypatch, tracked):
     assert tracked.clickup == []
 
 
-def test_pull_request_reads_try_the_write_token_first(monkeypatch):
+@pytest.fixture
+def pr_tokens(monkeypatch):
+    """Bitbucket with three tokens; `works` names the ones that can read a
+    pull request. Returns (works, used, read)."""
     from vomeos.integrations import code_search
     from vomeos.integrations.base import IntegrationResult
 
     monkeypatch.setenv("VOMEOS_BITBUCKET_TOKEN", "read-only")
+    monkeypatch.setenv("VOMEOS-PIPELINES", "pipelines")
+    monkeypatch.delenv("VOMEOS_BITBUCKET_PIPELINES_TOKEN", raising=False)
     monkeypatch.setenv("VOMEOS_BITBUCKET_WRITE_TOKEN", "write")
     monkeypatch.setenv("VOMEOS_BITBUCKET_WORKSPACE", "vomedjango")
     monkeypatch.delenv("VOMEOS_BITBUCKET_EMAIL", raising=False)
-    used = []
+    works, used = set(), []
 
     def call(self, op, method, path, headers=None, **kw):
         token = headers["Authorization"].split()[-1]
         used.append(token)
-        return IntegrationResult("bitbucket", op, token == "read-only",
+        return IntegrationResult("bitbucket", op, token in works,
                                  data={"state": "MERGED"},
-                                 error="" if token == "read-only" else "403")
+                                 error="" if token in works else "403")
 
     monkeypatch.setattr(code_search.Bitbucket, "_call", call)
-    result = code_search.Bitbucket().pull_request("vomedjango-restored-core-app", "3541")
-    # The write token failed here, so the read token was tried after it.
-    assert used == ["write", "read-only"] and result.ok
+
+    def read():
+        return code_search.Bitbucket().pull_request(
+            "vomedjango-restored-core-app", "3541")
+
+    return works, used, read
 
 
-def test_pull_request_reads_stop_at_the_first_token_that_works(monkeypatch):
-    from vomeos.integrations import code_search
-    from vomeos.integrations.base import IntegrationResult
+def test_pull_request_reads_try_the_broader_tokens_first(pr_tokens):
+    """2026-10-20: the read token lacks read:pullrequest, so every read
+    403'd. The pipelines and write tokens are tried before it."""
+    works, used, read = pr_tokens
+    works.add("read-only")
+    assert read().ok
+    assert used == ["pipelines", "write", "read-only"]
 
-    monkeypatch.setenv("VOMEOS_BITBUCKET_TOKEN", "read-only")
-    monkeypatch.setenv("VOMEOS_BITBUCKET_WRITE_TOKEN", "write")
-    monkeypatch.setenv("VOMEOS_BITBUCKET_WORKSPACE", "vomedjango")
-    monkeypatch.delenv("VOMEOS_BITBUCKET_EMAIL", raising=False)
-    used = []
 
-    def call(self, op, method, path, headers=None, **kw):
-        used.append(headers["Authorization"].split()[-1])
-        return IntegrationResult("bitbucket", op, True, data={})
-
-    monkeypatch.setattr(code_search.Bitbucket, "_call", call)
-    code_search.Bitbucket().pull_request("vomedjango-restored-core-app", "3541")
-    assert used == ["write"]
+def test_pull_request_reads_stop_at_the_first_token_that_works(pr_tokens):
+    works, used, read = pr_tokens
+    works.update({"pipelines", "write"})
+    read()
+    assert used == ["pipelines"]
 
 
 # ---------------------------------------------------------------------------

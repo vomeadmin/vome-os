@@ -56,8 +56,9 @@ ENVIRONMENT
                                2026-10-01, 148 hits across the workspace).
     VOMEOS-PIPELINES           second Atlassian token carrying
     (or VOMEOS_BITBUCKET_PIPELINES_TOKEN)
-                               read:pipeline:bitbucket, used only by
-                               Bitbucket.pipelines(). Unset means the main
+                               read:pipeline:bitbucket, used by
+                               Bitbucket.pipelines() and tried first by
+                               Bitbucket.pull_request(). Unset means the main
                                token is tried, which works if it has the scope.
                                The hyphenated name is the Railway one; some
                                shells drop hyphenated names, which is what the
@@ -100,7 +101,11 @@ MAX_FILE_BYTES = int(os.environ.get("VOMEOS_CODE_MAX_FILE_BYTES", "60000"))
 PIPELINES_TOKEN_VARS = ("VOMEOS-PIPELINES", "VOMEOS_BITBUCKET_PIPELINES_TOKEN")
 
 # Tokens that may read pull requests, tried in order before the main token.
-PULL_REQUEST_TOKEN_VARS = ("VOMEOS_BITBUCKET_WRITE_TOKEN",)
+# The pipelines token is Sam's broader read token (2026-10-20); the write
+# token opens the agent's PRs. Whichever carries read:pullrequest answers.
+PULL_REQUEST_TOKEN_VARS = PIPELINES_TOKEN_VARS + (
+    "VOMEOS_BITBUCKET_WRITE_TOKEN",
+)
 
 # The one GitHub token per account, under the name it was created with in
 # Railway. Every GitHub repo (vome-react, vome-landing-page, VomeApp) is under
@@ -297,7 +302,7 @@ class Bitbucket(Connector):
         Needs read:pullrequest:bitbucket, which the code-search token was
         never given: every read 403'd, so no merged agent fix ever moved to
         `on dev` (found 2026-10-20, PRs #3541 and #3542 sat merged for a
-        day). The write token opens these PRs, so it is tried first
+        day). The pipelines and write tokens are tried first
         (PULL_REQUEST_TOKEN_VARS), then the main token.
         """
         if not _repo_permitted(repo, self.allowlist):
