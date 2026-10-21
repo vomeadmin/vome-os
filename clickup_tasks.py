@@ -678,11 +678,12 @@ def remove_clickup_task_assignee(task_id: str) -> bool:
 def move_clickup_task(task_id: str, new_list_id: str) -> bool:
     """Move a ClickUp task to a different list.
 
-    ClickUp has no atomic move; the pattern is add-to-new then remove-from-old.
-    Requires the "Tasks in Multiple Lists" ClickApp to be enabled on the
-    workspace. If the remove step fails after the add succeeds the task ends
-    up multi-homed — still reported as success since it is now in the target
-    list.
+    The v3 home-list move first: v2 cannot remove a task from its home list,
+    so add-to-new then remove-from-old left Ron's Priority Queue handoffs in
+    both lists. The v2 pattern stays as the fallback. It needs the "Tasks in
+    Multiple Lists" ClickApp, and if the remove step fails after the add
+    succeeds the task ends up multi-homed, still reported as success since
+    it is now in the target list.
     """
     if not CLICKUP_API_TOKEN or not task_id or not new_list_id:
         return False
@@ -692,6 +693,20 @@ def move_clickup_task(task_id: str, new_list_id: str) -> bool:
         "Authorization": CLICKUP_API_TOKEN,
         "Content-Type": "application/json",
     }
+
+    team = os.environ.get("CLICKUP_TEAM_ID", "") or "3604276"
+    try:
+        r = httpx.put(
+            f"https://api.clickup.com/api/v3/workspaces/{team}/tasks/"
+            f"{task_id}/home_list/{new_list_id}",
+            headers=headers,
+            timeout=20,
+        )
+        r.raise_for_status()
+        print(f"ClickUp task {task_id} moved to {new_list_id}")
+        return True
+    except Exception as e:
+        print(f"Home-list move of {task_id} failed, adding instead: {e}")
 
     try:
         r = httpx.get(

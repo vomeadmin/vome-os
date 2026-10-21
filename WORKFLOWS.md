@@ -194,12 +194,15 @@ flowchart TD
   AF -->|PR closed unmerged| RO["Item reopens for go N / log N,<br/>check mark removed"]:::built
   FX -->|declined or refused| LOG
   FA -->|decision: shapes, plans, privacy| SAM["Options + recommendation<br/>Sam asked in the thread"]:::built
-  FA -->|log: bigger than the envelope| LOG["Analysis on the requester's task<br/>(no task: Sam says log N for Raw Intake)"]:::built
+  FA -->|log: bigger than the envelope| LOG["Stays on the requester's task in Sam's Priority Queue<br/>(no task: Sam places it)"]:::built
   FA -->|already exists / frontend only| FIN["Finding posted, nothing built"]:::built
   FA -->|needs_info| ASK["Requester asked one question<br/>(4 rounds, then Sam)"]:::built
-  SAM --> CMD["Sam: go N / go NB / log N / no N / close<br/>or free-text direction, re-decided"]:::built
+  SAM --> CMD["Sam: go N / go NB / no N / close<br/>or free-text direction, re-decided"]:::built
   CMD -->|his shape fits the envelope| FX
   CMD -->|it does not| LOG
+  SAM --> PLACE["Sam places it (command or own words):<br/>build N = Sam Build Now, log N = Raw Intake,<br/>route N onlyg/sanjay, leave N = Priority Queue"]:::built
+  LOG --> PLACE
+  PLACE --> MOVE["Requester's task moved, never copied<br/>(build now: assigned Sam, high, no analysis)"]:::built
   ASK --> RE["Requester answers, analysis runs again"]:::built
 ```
 
