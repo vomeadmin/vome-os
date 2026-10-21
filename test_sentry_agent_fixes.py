@@ -175,68 +175,67 @@ ANALYSIS = {"root_cause": "SentEmail row written without content_mode",
             "needs_migration": False, "duplicate_of": "", "files": []}
 
 
-def test_files_a_new_task_in_agent_fixes(clickup):
+def test_creates_a_task_in_agent_fixes(clickup):
     calls, ledger = clickup
-    out = saf.file_issue(_issue(), ANALYSIS, {"opened": False},
-                         {"reason": "risk is high, not low"})
-    assert out == {"action": "created", "task_id": "86new"}
+    task_id = saf.create_task(_issue(), ANALYSIS, {"opened": False},
+                              {"reason": "risk is high, not low"},
+                              assignees=[saf.CLICKUP_USER_SAM])
+    assert task_id == "86new"
     path, body = calls[0]
     assert path == f"/list/{saf.AGENT_FIXES_LIST}/task"
     assert body["name"].startswith("[Sentry] Error sending Vome birthday")
     assert body["status"] == "queued"
     assert body["priority"] == 2
+    assert body["assignees"] == [saf.CLICKUP_USER_SAM]
     assert "risk is high" in body["markdown_description"]
     assert "Not verified" in body["markdown_description"]
     assert chr(0x2014) not in body["markdown_description"]
-    # No engineer is volunteered for work nobody has proposed a fix for.
     assert not any(f["id"] == saf.FIELD_MERGE_OWNER
                    for f in body["custom_fields"])
     assert ledger["7796380886"]["clickup_task_id"] == "86new"
 
 
-def test_an_open_pr_names_the_merge_owner(clickup):
+def test_an_open_pr_is_followed_when_it_merges(clickup):
+    import ticket_fix
+
     calls, _ = clickup
-    saf.file_issue(_issue(), {**ANALYSIS, "risk": "low"},
-                   {"opened": True, "url": "https://bb/pr/9"}, {})
+    saf.create_task(_issue(), {**ANALYSIS, "risk": "low"},
+                    {"opened": True, "url": "https://bb/pr/9"}, {})
     body = calls[0][1]
     assert body["status"] == "in progress"
     owner = [f for f in body["custom_fields"]
              if f["id"] == saf.FIELD_MERGE_OWNER][0]
     # Sam merges agent PRs into the dev branch (2026-10-18).
     assert owner["value"] == {"add": [saf.CLICKUP_USER_SAM]}
-    assert "https://bb/pr/9" in body["markdown_description"]
+    # The line promote_merged reads. "Draft pull request:" was never read,
+    # so a merged Sentry fix would have stayed at in progress.
+    match = ticket_fix._PR_LINE.search(body["markdown_description"])
+    assert match and match.group(1) == "https://bb/pr/9"
 
 
-def test_a_second_issue_of_the_same_fault_comments(monkeypatch, clickup):
-    calls, ledger = clickup
+def test_an_engineer_task_goes_to_priority_queue_untagged(clickup):
+    calls, _ = clickup
+    saf.create_task(_issue(), ANALYSIS, {"opened": False}, {},
+                    list_id="901113386257", assignees=[saf.CLICKUP_USER_ONLYG],
+                    note="**Routed to OnlyG**")
+    path, body = calls[0]
+    assert path == "/list/901113386257/task"
+    assert body["assignees"] == [saf.CLICKUP_USER_ONLYG]
+    assert body["markdown_description"].startswith("**Routed to OnlyG**")
+    assert not any(f["id"] == saf.FIELD_TAGS for f in body["custom_fields"])
+
+
+def test_same_fault_finds_the_existing_task(monkeypatch, clickup):
+    _, ledger = clickup
     monkeypatch.setattr(saf, "_group_task", lambda key, issue_id: "86first")
-    out = saf.file_issue(_issue(issue_id="2", title=INTEGRITY), ANALYSIS,
-                         {}, {})
-    assert out == {"action": "commented", "task_id": "86first"}
-    assert calls[0][0] == "/task/86first/comment"
-    assert ledger["2"]["clickup_task_id"] == "86first"
+    issue = _issue(issue_id="2", title=INTEGRITY)
+    assert saf.existing_task(issue, ANALYSIS) == "86first"
+    assert ledger["2"]["group_key"] == saf.group_key(CORE, INTEGRITY)
 
 
-def test_analyst_duplicate_comments_on_the_existing_task(clickup):
-    calls, _ = clickup
-    saf.file_issue(_issue(), {**ANALYSIS, "duplicate_of": "868mabc12"},
-                   {}, {})
-    assert calls[0][0] == "/task/868mabc12/comment"
-
-
-def test_daily_cap(monkeypatch, clickup):
-    calls, _ = clickup
-    monkeypatch.setattr(saf, "_filed_today", lambda: 5)
-    out = saf.file_issue(_issue(), ANALYSIS, {}, {})
-    assert out["action"] == "skipped" and "cap" in out["reason"]
-    assert calls == []
-
-
-def test_switched_off(monkeypatch, clickup):
-    calls, _ = clickup
-    monkeypatch.setenv("SENTRY_AGENT_FIXES_ENABLED", "false")
-    assert saf.file_issue(_issue(), ANALYSIS, {}, {})["action"] == "skipped"
-    assert calls == []
+def test_analyst_duplicate_wins(clickup):
+    assert saf.existing_task(
+        _issue(), {**ANALYSIS, "duplicate_of": "868mabc12"}) == "868mabc12"
 
 
 def test_clickup_failure_is_reported_not_raised(monkeypatch, clickup):
@@ -244,8 +243,8 @@ def test_clickup_failure_is_reported_not_raised(monkeypatch, clickup):
         raise RuntimeError("ClickUp 500")
 
     monkeypatch.setattr(saf, "_clickup", boom)
-    out = saf.file_issue(_issue(), ANALYSIS, {}, {})
-    assert out["action"] == "skipped" and "500" in out["reason"]
+    assert saf.create_task(_issue(), ANALYSIS, {}, {}) == ""
+    assert saf.comment("86x", "hi") is False
 
 
 # ---------------------------------------------------------------------------

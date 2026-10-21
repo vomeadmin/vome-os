@@ -193,6 +193,10 @@ def world(monkeypatch):
     monkeypatch.setattr(rw, "GitHub", lambda: W.github)
     monkeypatch.setattr(rw, "Bitbucket", lambda: W.bitbucket)
     monkeypatch.setattr(rw, "Ledger", lambda **k: W.ledger)
+    W.clickup = []
+    monkeypatch.setattr(rw, "_clickup",
+                        lambda path, method="GET", body=None:
+                        W.clickup.append((path, method, body)) or {})
     import ticket_fix
 
     monkeypatch.setattr(ticket_fix, "run_promotion", lambda: {})
@@ -309,6 +313,44 @@ def test_a_fix_already_live_gets_its_drafts_once(world):
     world.resolutions = []
     rw.run_release_watcher(dry_run=False)
     assert len(world.posts) == 1
+
+
+def test_a_live_fix_with_clients_stays_open_for_the_reply(world):
+    world.github.runs = [gh_run(7, "a3a3a33")]
+    world.stamp = "a3a3a33"
+    world.tasks = [parent("p1", "web@a2a2a22"), child("k1", "p1", "9415")]
+    summary = rw.run_release_watcher(dry_run=False)
+    assert _state(summary, "p1")["closed"] is False
+    assert world.clickup == []
+
+
+def test_a_live_fix_with_no_client_closes(world):
+    """The kiosk fix (2026-10-20) sat at on dev, Live, with nobody to tell
+    and nothing to close it."""
+    world.github.runs = [gh_run(7, "a3a3a33")]
+    world.stamp = "a3a3a33"
+    world.tasks = [parent("p1", "web@a2a2a22")]
+    summary = rw.run_release_watcher(dry_run=False)
+    assert _state(summary, "p1")["closed"] is True
+    # Closed, never on prod: on prod emails clients.
+    assert world.clickup == [("/task/p1", "PUT", {"status": "Closed"})]
+
+
+def test_no_client_fix_waits_while_slack_is_down(world, monkeypatch):
+    monkeypatch.setattr(rw, "_post", lambda text: False)
+    world.github.runs = [gh_run(7, "a3a3a33")]
+    world.stamp = "a3a3a33"
+    world.tasks = [parent("p1", "web@a2a2a22")]
+    rw.run_release_watcher(dry_run=False)
+    assert world.clickup == []
+
+
+def test_dry_run_never_closes(world):
+    world.github.runs = [gh_run(7, "a3a3a33")]
+    world.stamp = "a3a3a33"
+    world.tasks = [parent("p1", "web@a2a2a22")]
+    rw.run_release_watcher(dry_run=True)
+    assert world.clickup == []
 
 
 def test_dry_run_and_print_only_never_draft(world):
