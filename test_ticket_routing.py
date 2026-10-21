@@ -126,7 +126,7 @@ def world(monkeypatch):
 
     class W:
         created, comments, posts, alerts = [], [], [], []
-        filed, zoho, notes, decided = [], [], [], []
+        filed, zoho, notes, decided, owners = [], [], [], [], []
         siblings: list = []
         linked: list = []
         live: dict = {}
@@ -165,6 +165,9 @@ def world(monkeypatch):
     monkeypatch.setattr(tr, "_read_state", live)
     monkeypatch.setattr(zoho_actions, "set_in_progress",
                         lambda tid, team: W.zoho.append((tid, team)))
+    monkeypatch.setattr(zoho_actions, "follow_route",
+                        lambda tid, team: W.owners.append((tid, team))
+                        or False)
     monkeypatch.setattr(zoho_actions, "send_reply",
                         lambda *a: pytest.fail("routing never emails"))
     monkeypatch.setattr("zoho_desk_api.add_ticket_comment",
@@ -172,6 +175,7 @@ def world(monkeypatch):
     monkeypatch.delenv("AUTO_ROUTE_ENABLED", raising=False)
     W.created, W.comments, W.posts, W.alerts = [], [], [], []
     W.filed, W.zoho, W.notes, W.decided = [], [], [], []
+    W.owners = []
     W.siblings, W.linked, W.live, W.search_fails = [], [], {}, False
     return W
 
@@ -189,6 +193,47 @@ def test_a_routine_bug_is_filed_quietly(world):
     assert world.zoho == [] and "Routed to onlyg" in world.notes[0]
     # No Slack, and the item stays open for Sam's reply.
     assert world.posts == [] and world.alerts == [] and world.decided == []
+
+
+def test_the_zoho_owner_follows_the_route_to_the_team(world):
+    """#9501: routed to Sanjay on a reopen, Zoho still said Backend Team."""
+    tr.route(_item(), _card(), {}, {}, 0, owner="sanjay")
+    assert world.owners == [("569440000043000001", "frontend")]
+    assert world.zoho == []  # the status is still Sam's to move
+
+
+@pytest.fixture
+def zoho_ticket(monkeypatch):
+    import zoho_actions
+
+    class Z:
+        owner = ""
+        patches: list = []
+
+    monkeypatch.setattr(zoho_actions, "_get",
+                        lambda path, params=None: {"assigneeId": Z.owner})
+    monkeypatch.setattr(zoho_actions, "_send",
+                        lambda method, path, body: Z.patches.append(body))
+    Z.patches = []
+    return Z
+
+
+def test_the_other_teams_ticket_moves_owner_only(zoho_ticket):
+    import zoho_actions
+
+    zoho_ticket.owner = zoho_actions.BACKEND_TEAM
+    assert zoho_actions.follow_route("T1", "frontend") is True
+    assert zoho_ticket.patches == [
+        {"assigneeId": zoho_actions.FRONTEND_TEAM}]
+
+
+def test_an_owner_that_is_not_the_other_team_is_left(zoho_ticket):
+    import zoho_actions
+
+    for owner in (zoho_actions.FRONTEND_TEAM, zoho_actions.SAM_AGENT, ""):
+        zoho_ticket.owner = owner
+        assert zoho_actions.follow_route("T1", "frontend") is False
+    assert zoho_ticket.patches == []
 
 
 def test_an_urgent_bug_reaches_the_engineer_and_sam(world):

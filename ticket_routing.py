@@ -23,7 +23,9 @@ WHAT HAPPENS, PER TRIAGED TICKET
   The Zoho status is NOT changed. Sam's rule (2026-10-19): New or
   Processing in Zoho means "this client is owed a reply", so nothing the
   agents do on their own moves a ticket out of it. The status changes only
-  when the client has been told (`sprint_thread._after_send`).
+  when the client has been told (`sprint_thread._after_send`). The owner
+  is different: a ticket still owned by the other team from an earlier
+  round moves to this route's team (Sam, 2026-10-21, #9501).
 - a ticket already linked to a task (in any list), or whose incident
   matches a ticket already routed, joins that task instead: one bug, one
   task.
@@ -363,6 +365,13 @@ def _route(item: dict, card: dict, incident: dict, arr: float,
                            f"Routed to {owner} automatically: {task['url']}")
     except Exception:
         pass
+    # The owner, though, follows the route when it still names the other
+    # team from an earlier round (#9501).
+    try:
+        if zoho_actions.follow_route(item["ticket_id"], team):
+            print(f"[ROUTE] #{number} Zoho owner moved to the {team} team")
+    except Exception as exc:
+        print(f"[ROUTE] #{number} Zoho owner not moved: {exc}")
 
     if urgent:
         sprint_thread._post(

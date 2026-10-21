@@ -213,6 +213,24 @@ def set_in_progress(ticket_id: str, team: str) -> dict:
                  {"status": "In Progress", "assigneeId": owner})
 
 
+def follow_route(ticket_id: str, team: str) -> bool:
+    """A ticket owned by one team, routed to the other: move the owner.
+
+    #9501: acknowledged with Backend Team as owner, reopened by the client,
+    routed to Sanjay, and Zoho still showed Backend Team. Only the owner
+    moves, never the status (New or Processing still means the client is
+    owed Sam's reply). A ticket owned by anyone other than the other team
+    (Support Agent, Sam) is left for `set_in_progress` when the ack is sent.
+    True when the owner was moved.
+    """
+    owner = FRONTEND_TEAM if team == "frontend" else BACKEND_TEAM
+    other = BACKEND_TEAM if owner == FRONTEND_TEAM else FRONTEND_TEAM
+    if str(_get(f"/tickets/{ticket_id}").get("assigneeId") or "") != other:
+        return False
+    _send("PATCH", f"/tickets/{ticket_id}", {"assigneeId": owner})
+    return True
+
+
 AGENT_FIX_TAG = "agent-fix"
 
 
