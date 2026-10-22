@@ -87,6 +87,7 @@ believe there is nothing, say so explicitly rather than leaving it empty.
 {
   "attempted": true | false,
   "reason": "why, especially when attempted is false",
+  "needs_context": false,
   "diff": "unified diff, or empty",
   "rationale": "two sentences for the reviewer",
   "risks": "what might break, or 'none identified'",

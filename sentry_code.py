@@ -108,10 +108,15 @@ def _window(text: str, lineno: int) -> str:
         return ""
     start = max(0, lineno - 1 - WINDOW)
     end = min(len(lines), lineno + WINDOW)
+    return _span(lines, start, end, {lineno})
+
+
+def _span(lines: list[str], start: int, end: int, marks: set[int]) -> str:
+    """Lines start+1..end, numbered, with `>>` on the marked line numbers."""
     width = len(str(end))
     out = []
     for index in range(start, end):
-        marker = ">>" if index + 1 == lineno else "  "
+        marker = ">>" if index + 1 in marks else "  "
         out.append(f"{marker} {str(index + 1).rjust(width)} | {lines[index]}")
     head = f"--- {{path}} lines {start + 1}-{end} ---"
     return head + "\n" + "\n".join(out)
@@ -322,6 +327,170 @@ def _commit_rows(data) -> list[str]:
         who = author.split("<")[0].strip()
         rows.append(f"  {sha} {date} {who[:22]:22} {subject[:70]}")
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Feature builds
+# ---------------------------------------------------------------------------
+#
+# A crash is fixed next to the line that raised, so a window is enough. A
+# requested change is not: it usually adds a name the file does not import
+# yet and copies logic from somewhere else. 2026-10-21, profile status on
+# form submissions: the builder was handed three windows, could not see
+# either file's imports or the get_is_invited it was told to copy, and
+# rightly refused. So a feature build gets each edited file's top-level
+# import blocks, a wider window, and the precedent code as read-only
+# reference, under a larger budget.
+
+FEATURE_WINDOW = int(os.environ.get("FEATURE_BUILD_WINDOW", "100"))
+FEATURE_MAX_CHARS = int(os.environ.get("FEATURE_BUILD_MAX_CHARS", "60000"))
+FEATURE_MAX_REFERENCES = int(os.environ.get("FEATURE_BUILD_MAX_REFS", "4"))
+
+# A reference as the architect writes it: "core:path/file.py:123", the repo
+# prefix optional, several separated by ";" or spaces.
+_REFERENCE = re.compile(r"(?:\b[a-z]+:)?([\w./-]+\.py):(\d+)")
+_IMPORT = re.compile(r"^(?:import\s+[\w.]+|from\s+[\w.]+\s+import\b)")
+
+
+def import_blocks(lines: list[str]) -> list[tuple[int, int]]:
+    """Top-level import blocks as (start, end), 0-based, end exclusive.
+
+    The first block runs from line 1 so a module docstring comes with it.
+    Later blocks (a mid-file `from x import (...)`, a `# noqa: E402` one)
+    are their own spans. Blank and comment lines between statements keep a
+    block together; indented imports inside functions are not the module's.
+    """
+    blocks: list[list[int]] = []
+    index, total = 0, len(lines)
+    while index < total:
+        line = lines[index]
+        if not _IMPORT.match(line):
+            index += 1
+            continue
+        start = index
+        depth = line.count("(") - line.count(")")
+        while (depth > 0 or lines[index].rstrip().endswith("\\")) \
+                and index + 1 < total:
+            index += 1
+            depth += lines[index].count("(") - lines[index].count(")")
+        end = index + 1
+        if blocks and all(not lines[i].strip()
+                          or lines[i].lstrip().startswith("#")
+                          for i in range(blocks[-1][1], start)):
+            blocks[-1][1] = end
+        else:
+            blocks.append([start, end])
+        index = end
+    # The docstring above the first block, unless the file has a long
+    # preamble, which is not worth the budget.
+    if blocks and blocks[0][0] <= 80:
+        blocks[0][0] = 0
+    return [(start, end) for start, end in blocks]
+
+
+def _merge(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[list[int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(start, end) for start, end in merged]
+
+
+def references(text: str) -> list[tuple[str, int]]:
+    """Every path:line in an architect's evidence or plan, in order."""
+    seen: list[tuple[str, int]] = []
+    for path, line in _REFERENCE.findall(text or ""):
+        ref = (path, int(line))
+        if ref not in seen:
+            seen.append(ref)
+    return seen
+
+
+def gather_for_build(edits: list[tuple[str, int]], repo: str, ref: str,
+                     host: str = "bitbucket", owner: str = "",
+                     refs: list[tuple[str, int]] | None = None) -> dict:
+    """Source for a requested change: what to edit, and what to copy.
+
+    `edits` are the plan's anchors. Each edited file gets its import blocks
+    and a window around every anchor in it. `refs` (the architect's
+    evidence and any path:line in the plan) that land in an edited file
+    widen that file; the rest are read as READ-ONLY reference windows.
+
+    Returns `{"files": str, "read": [...], "errors": [...]}`, and like
+    `gather` never returns an empty string for a failure.
+    """
+    client = _client_for(host)
+    kwargs = {"owner": owner} if host == "github" and owner else {}
+    if not client.configured(**kwargs):
+        return {"files": "Repository access is NOT configured. No code was "
+                         "read.",
+                "read": [], "errors": ["connector not configured"]}
+
+    edit_lines: dict[str, list[int]] = {}
+    for path, line in edits:
+        edit_lines.setdefault(path, []).append(int(line))
+    extra: dict[str, list[int]] = {}
+    for path, line in refs or []:
+        if path in edit_lines:
+            if int(line) not in edit_lines[path]:
+                edit_lines[path].append(int(line))
+        elif len(extra) < FEATURE_MAX_REFERENCES or path in extra:
+            extra.setdefault(path, []).append(int(line))
+
+    chunks: list[str] = []
+    read: list[str] = []
+    errors: list[str] = []
+    budget = FEATURE_MAX_CHARS
+
+    def add(path: str, lines_at: list[int], with_imports: bool) -> None:
+        nonlocal budget
+        if budget <= 0:
+            errors.append(f"{path}: not read, the source budget ran out")
+            return
+        result = client.read_file(repo, path, ref=ref, max_bytes=READ_BYTES,
+                                  **kwargs)
+        body = result.data if result.ok and isinstance(result.data, str) \
+            else ""
+        if not body:
+            errors.append(f"{path}: {result.error[:120] or 'empty response'}")
+            return
+        lines = body.splitlines()
+        spans = list(import_blocks(lines)) if with_imports else []
+        for lineno in lines_at:
+            spans.append((max(0, lineno - 1 - FEATURE_WINDOW),
+                          min(len(lines), lineno + FEATURE_WINDOW)))
+        for start, end in _merge(spans):
+            chunk = _span(lines, start, end, set(lines_at)).replace(
+                "{path}", path)[:budget]
+            budget -= len(chunk)
+            chunks.append(chunk)
+            if budget <= 0:
+                break
+        read.extend(f"{path}:{lineno}" for lineno in lines_at)
+
+    chunks.append("=== FILES TO EDIT (import blocks and the lines around "
+                  "each edit; `>>` marks the anchor) ===")
+    for path, lines_at in edit_lines.items():
+        add(path, lines_at, with_imports=True)
+    if extra:
+        chunks.append("=== READ-ONLY REFERENCE (precedent the plan cites; "
+                      "do not edit these files) ===")
+        for path, lines_at in extra.items():
+            add(path, lines_at, with_imports=False)
+
+    if not read:
+        files_text = (
+            "Could not read any source file. This is a repository access "
+            "problem, NOT evidence that the code is fine:\n  "
+            + "\n  ".join(errors or ["no anchors given"])
+        )
+    else:
+        files_text = "\n\n".join(chunks)
+        if errors:
+            files_text += "\n\nNOT read:\n  " + "\n  ".join(errors)
+    return {"files": files_text, "read": read, "errors": errors}
 
 
 def describe() -> dict:

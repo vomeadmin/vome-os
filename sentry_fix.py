@@ -124,6 +124,9 @@ def propose(analysis: dict, context: dict,
             "attempted": False,
             "reason": result.get("reason") or "the fix author declined",
             "diff": "",
+            # True when the only blocker was source it was not shown. The
+            # feature desk holds those for `go N` instead of logging them.
+            "needs_context": bool(result.get("needs_context")),
         }
 
     patch = str(result.get("diff") or "")

@@ -369,6 +369,70 @@ def test_the_daily_cap_holds_but_sam_lifts_it(monkeypatch, desk):
     assert items["1"]["state"] == fd.LOGGED
 
 
+# The fix author's own words on profile status, 2026-10-21 (trimmed).
+SHORT_OF_SOURCE = (
+    "The change cannot be written safely from the source given. All three "
+    "edits depend on names whose imports I cannot see: "
+    "OrganizationOfflineVolunteerInvite in form_app/institution/serializers"
+    ".py. The detail change relies on get_is_invited, which I was not shown "
+    "and so cannot copy. To proceed I need: the import blocks of both files.")
+
+
+@pytest.mark.parametrize("proposal", [
+    {"reason": "the imports are outside the windows", "needs_context": True},
+    {"reason": SHORT_OF_SOURCE},
+])
+def test_a_builder_short_of_source_waits_for_go(monkeypatch, desk, proposal):
+    """2026-10-21: Sam said `go 1` on profile status, the builder could not
+    see the imports or get_is_invited, and the item was logged. Missing
+    source is fixable, so the item waits for `go 1` again."""
+    monkeypatch.setattr(fd, "_propose", lambda ts, item: (proposal, None))
+    items = {"1": {**_build_item(), "state": fd.HELD}}
+    result = fd._build("1.1", {"task_id": "T1"}, items, "1",
+                       sam_approved=True)
+    assert result["built"] is False
+    assert items["1"]["state"] == fd.HELD
+    assert desk["comments"] == [] and desk["tasks"] == []
+    assert "needs more source" in desk["posts"][-1]
+    assert "say `go 1` to try again, or `log 1`" in desk["posts"][-1]
+
+
+def test_a_real_refusal_is_still_logged(monkeypatch, desk):
+    monkeypatch.setattr(fd, "_propose", lambda ts, item: (
+        {"reason": "it needs a migration", "needs_context": False}, None))
+    items = {"1": {**_build_item(), "state": fd.HELD}}
+    fd._build("1.1", {"task_id": "T1"}, items, "1", sam_approved=True)
+    assert items["1"]["state"] == fd.LOGGED
+    assert "builder declined" in desk["posts"][-1]
+
+
+def test_an_unchecked_build_goes_to_sam_not_the_builder(monkeypatch, desk):
+    """The architect wrote "Not yet checked" on option B and the build went
+    ahead; the builder stopped on the same open question."""
+    monkeypatch.setenv("FEATURE_DESK_PR_ENABLED", "true")
+    monkeypatch.setattr(fd, "_build", lambda *a, **k:
+                        desk["builds"].append(a))
+    items = {"1": _build_item(analysis=(
+        "Guests read as offline via volunteers.is_offline_volunteer. Not "
+        "yet checked: whether is_offline_volunteer is cleared when a "
+        "stand-in is claimed. The v4 list already annotates is_offline."))}
+    fd.act("1.1", {"task_id": ""}, {"summary": "Profile status"}, items)
+    assert desk["builds"] == []
+    assert items["1"]["verdict"] == "decision"
+    assert items["1"]["state"] == fd.WAITING_SAM
+    assert items["1"]["question"].startswith("Not yet checked: whether")
+    assert "Should I check that before building" in desk["posts"][0]
+
+
+def test_a_checked_build_is_still_offered(monkeypatch, desk):
+    monkeypatch.delenv("FEATURE_DESK_PR_ENABLED", raising=False)
+    items = {"1": _build_item(analysis="Checked: a claim deletes the "
+                                       "stand-in, so the flag never "
+                                       "outlives it.")}
+    fd.act("1.1", {"task_id": ""}, {"summary": "Profile status"}, items)
+    assert items["1"]["state"] == fd.HELD
+
+
 # ---------------------------------------------------------------------------
 # Re-analysis
 # ---------------------------------------------------------------------------
@@ -822,3 +886,125 @@ def test_the_release_watcher_promotion_tells_the_thread(monkeypatch):
                                 "custom_fields": [],
                                 "description": f"Fix PR: {PR}"}])
     assert told == [(PR, "core@abc123")]
+
+
+# ---------------------------------------------------------------------------
+# What the builder is shown
+# ---------------------------------------------------------------------------
+
+import sentry_code  # noqa: E402
+
+SERIALIZERS = "\n".join([
+    '"""Form serializers."""',
+    "import json",
+    "",
+    "from django.db.models import (Count,",
+    "                              OuterRef)",
+    "# models",
+    "from form_app.models import Form",
+    "",
+    *[f"x{i} = {i}" for i in range(8, 300)],
+    "from organization_app.models import OrganizationVolunteer  # noqa: E402",
+    *[f"y{i} = {i}" for i in range(301, 700)],
+    "    def helper(self):",
+    "        from user_app.models import User",
+    *[f"z{i} = {i}" for i in range(703, 1000)],
+])
+REFERENCE = "\n".join(f"r{i} = {i}" for i in range(1, 6000))
+
+
+class _Read:
+    def __init__(self, data):
+        self.ok, self.data, self.error = bool(data), data, \
+            "" if data else "HTTP 404"
+
+
+class _Client:
+    def __init__(self, files):
+        self.files, self.reads = files, []
+
+    def configured(self, **k):
+        return True
+
+    def read_file(self, repo, path, ref="", max_bytes=0, **k):
+        self.reads.append(path)
+        return _Read(self.files.get(path, ""))
+
+
+def test_import_blocks_cover_header_and_later_top_level_imports():
+    lines = SERIALIZERS.splitlines()
+    blocks = sentry_code.import_blocks(lines)
+    assert blocks[0] == (0, 7)            # docstring through Form
+    assert blocks[1] == (300, 301)        # the E402 import, its own span
+    assert len(blocks) == 2               # an import inside a def is not
+
+
+def test_references_read_the_architects_where_line():
+    where = ("core:form_app/institution/api_version/v4/api.py:282; "
+             "core:organization_app/serializers.py:4836")
+    assert sentry_code.references(where) == [
+        ("form_app/institution/api_version/v4/api.py", 282),
+        ("organization_app/serializers.py", 4836)]
+
+
+def test_a_feature_build_sees_imports_anchors_and_read_only_precedent(
+        monkeypatch):
+    client = _Client({"form_app/serializers.py": SERIALIZERS,
+                      "organization_app/serializers.py": REFERENCE})
+    monkeypatch.setattr(sentry_code, "_client_for", lambda host: client)
+    out = sentry_code.gather_for_build(
+        [("form_app/serializers.py", 900)], "core", "development",
+        refs=[("organization_app/serializers.py", 4848),
+              ("form_app/serializers.py", 900)])
+    text = out["files"]
+    assert "--- form_app/serializers.py lines 1-7 ---" in text
+    assert "from form_app.models import Form" in text
+    assert "--- form_app/serializers.py lines 301-301 ---" in text
+    assert ">> 900 |" in text
+    edit, reference = text.split("=== READ-ONLY REFERENCE")
+    assert "organization_app/serializers.py" not in edit
+    assert "--- organization_app/serializers.py lines 4748-4948 ---" \
+        in reference
+    assert out["read"] == ["form_app/serializers.py:900",
+                           "organization_app/serializers.py:4848"]
+
+
+def test_a_feature_build_that_reads_nothing_says_so(monkeypatch):
+    monkeypatch.setattr(sentry_code, "_client_for",
+                        lambda host: _Client({}))
+    out = sentry_code.gather_for_build([("a.py", 3)], "core", "development")
+    assert out["files"].startswith("Could not read any source file")
+    assert "a.py: HTTP 404" in out["files"]
+
+
+def test_propose_hands_the_evidence_to_the_reader(monkeypatch):
+    import sentry_fix
+    import sentry_projects
+    import vomeos.tools
+
+    class Repo:
+        slug, host, owner, branch, alias = "core-slug", "bitbucket", "", \
+            "master", "core"
+
+    seen = {}
+    monkeypatch.setattr(vomeos.tools, "repo_map", lambda: {"core": Repo})
+    monkeypatch.setattr(sentry_projects, "fix_target",
+                        lambda slug: "development")
+    monkeypatch.setattr(sentry_code, "gather_for_build",
+                        lambda edits, repo, ref, **k: seen.update(
+                            edits=edits, ref=ref, refs=k["refs"])
+                        or {"files": "SOURCE"})
+    monkeypatch.setattr(sentry_fix, "propose", lambda analysis, ctx:
+                        seen.update(source=ctx["source"]) or {"diff": ""})
+    item = _build_item(
+        evidence="core:organization_app/serializers.py:4836",
+        build={"repo": "core", "anchors": ["form_app/a.py:10"],
+               "plan": "Copy get_is_invited (organization_app/"
+                       "serializers.py:4848) onto the row.",
+               "contract": "is_invited: bool"})
+    fd._propose("1.1", item)
+    assert seen["edits"] == [("form_app/a.py", 10)]
+    assert seen["ref"] == "development"
+    assert seen["refs"] == [("organization_app/serializers.py", 4836),
+                            ("organization_app/serializers.py", 4848)]
+    assert seen["source"] == "SOURCE"

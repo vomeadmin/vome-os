@@ -519,6 +519,13 @@ def act(ts: str, row: dict, card: dict, items: dict,
             verdict = item["verdict"] = "decision"
             item["question"] = (f"I've asked for more information "
                                 f"{MAX_ROUNDS} times. Can you take it?")
+        open_check = _unchecked(item) if verdict == "agent_build" else ""
+        if open_check:
+            # Never offered as ready while the architect says it has not
+            # looked: Sam is asked, and his answer re-runs the analysis.
+            verdict = item["verdict"] = "decision"
+            item["question"] = (f"{open_check}. Should I check that before "
+                                "building, or build it as planned?")
         if verdict == "agent_build":
             ok, why = _can_build(item)
             if ok and (pr_enabled() or item.get("sam_approved")):
@@ -651,6 +658,38 @@ def _can_build(item: dict) -> tuple[bool, str]:
     return True, ""
 
 
+# The architect's own words for something it has not looked at yet. An
+# agent_build carrying one is not ready: 2026-10-21, "Not yet checked:
+# whether is_offline_volunteer is cleared on claim" reached the builder,
+# which stopped on it.
+_UNCHECKED = re.compile(r"\bnot (?:yet )?(?:checked|verified|confirmed)\b",
+                        re.I)
+
+# A fix author refusing because it was not shown enough, in its own words.
+# The structured `needs_context` field is the real signal; this catches a
+# reason written before that field existed or without it.
+_MISSING_SOURCE = re.compile(
+    r"\b(?:cannot|can't|could not|did not) see\b|\bnot shown\b"
+    r"|\bnever shown\b|\bnot (?:visible|included) in the source\b"
+    r"|\bto proceed,? i need\b|\bneeds? more (?:source|context)\b", re.I)
+
+
+def _unchecked(item: dict) -> str:
+    """The open check in an agent_build's analysis or plan, else ''."""
+    build = item.get("build") if isinstance(item.get("build"), dict) else {}
+    for text in (item.get("analysis"), build.get("plan")):
+        match = _UNCHECKED.search(str(text or ""))
+        if match:
+            return str(text)[match.start():].split(". ")[0].strip(" .")
+    return ""
+
+
+def _needs_context(proposal: dict) -> bool:
+    if proposal.get("needs_context"):
+        return True
+    return bool(_MISSING_SOURCE.search(str(proposal.get("reason") or "")))
+
+
 def _build(ts: str, row: dict, items: dict, n: str,
            sam_approved: bool = False) -> dict:
     """fix_author writes the diff, patch safety checks it, a PR opens into
@@ -681,6 +720,19 @@ def _build(ts: str, row: dict, items: dict, n: str,
     proposal, repo = _propose(ts, item)
     if not proposal.get("diff"):
         reason = proposal.get("reason") or "no diff"
+        if _needs_context(proposal):
+            # The plan may be fine; the builder was not shown enough source
+            # to write it. That is fixable, so the item waits for `go N`
+            # instead of being logged as if the plan were wrong (2026-10-21:
+            # Sam's `go 1` on profile status was logged over missing imports).
+            item["state"] = HELD
+            item["build_stopped"] = reason
+            _save(ts, items=json.dumps(items))
+            _post(f"*{n}* needs more source than the builder was given: "
+                  f"{reason.rstrip('. ')}. <@{SAM_SLACK}> say `go {n}` to "
+                  f"try again, or "
+                  f"`log {n}`.", thread_ts=ts)
+            return {"n": n, "built": False, "reason": reason}
         return _fell_through(ts, row, items, n,
                              f"the builder declined: {reason}")
     pr = _open_pr(ts, row, item, proposal, repo)
@@ -735,8 +787,10 @@ def _fell_through(ts: str, row: dict, items: dict, n: str,
 
 def _propose(ts: str, item: dict):
     """The fix author's diff for the plan, against the dev branch it will
-    merge into. The anchors become a synthetic trace so the same source
-    reader that serves Sentry fixes reads every file the plan touches."""
+    merge into. Each edited file comes with its import blocks, and every
+    path:line the evidence or plan cites comes as read-only reference, so
+    the builder can add an import and copy a precedent it was told to copy
+    (2026-10-21: three bare windows made it refuse, rightly)."""
     import sentry_code
     import sentry_fix
     import sentry_projects
@@ -748,10 +802,11 @@ def _propose(ts: str, item: dict):
         return {"reason": f"unknown repo {build.get('repo')!r}"}, repo
     ref = sentry_projects.fix_target(repo.slug) or repo.branch
     anchors = [a.rsplit(":", 1) for a in build.get("anchors") or []]
-    trace = "\n".join(f'File "{path}", line {line}, in feature_request'
-                      for path, line in anchors)
-    gathered = sentry_code.gather(trace, repo.slug, ref, host=repo.host,
-                                  owner=repo.owner)
+    refs = sentry_code.references(
+        f"{item.get('evidence') or ''}\n{build.get('plan') or ''}")
+    gathered = sentry_code.gather_for_build(
+        [(path, int(line)) for path, line in anchors], repo.slug, ref,
+        host=repo.host, owner=repo.owner, refs=refs)
     proposal = sentry_fix.propose({
         "root_cause": (f"Not a bug. A requested backend change: "
                        f"{item.get('title')}. {item.get('analysis') or ''}"),

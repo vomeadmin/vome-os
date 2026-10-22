@@ -110,3 +110,22 @@ for widening it.
   and a new shape is Sam's call.
 - Count the registries the pattern needs. A request that "just adds a
   setting" to a step type touches the draft twin and every serializer above.
+
+## Before offering a build
+
+- **Settle every "not yet checked".** If a shape depends on behaviour you
+  have not read (is a flag ever cleared, does a stand-in survive
+  activation, is a value set anywhere else), read the code and answer it
+  before the item is agent_build, and write the answer into `build.plan`.
+  An agent_build whose analysis or plan still says "not yet checked" goes
+  back to Sam as a question, not to the builder. 2026-10-21, profile status
+  on form submissions: option B said "not yet checked: whether
+  `is_offline_volunteer` is cleared on claim", Sam said go b, and the
+  builder stopped on the same question. The answer was in the code:
+  `form_app/guest_claim.py` moves the submissions and deletes the stand-in,
+  and `user_app/signals.py` keeps UUID users inactive.
+- **Cite the precedent the plan copies** as `path:line` in `evidence` or
+  in the plan. The builder is shown each edited file's import blocks, the
+  lines around each anchor, and every cited `path:line` as read-only
+  reference, and nothing else. A plan that says "copy get_is_invited"
+  without its location cannot be built.

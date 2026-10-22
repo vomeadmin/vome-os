@@ -25,7 +25,7 @@ spec checked against an older backend may already be done
     billing, entitlements, notification recipients, crons or deletes
   - core or database only, at most three files, a precedent you can cite
   - the response exposes nothing the caller could not already see
-  - no open question changes the shape
+  - no open or unchecked question changes the shape
 - **decision**: two or more reasonable shapes, a product rule, a plan or
   entitlement, privacy, or the requester asks Sam directly. Give 2 or 3
   options, mark the ones you could build, recommend one, ask one question.
@@ -37,7 +37,7 @@ spec checked against an older backend may already be done
 - **needs_info**: you cannot judge without something only the requester
   knows. One short question. Never ask what you could look up.
 
-When unsure, do not choose agent_build: a wrong shape built quickly is the
+When unsure, do not choose agent_build: a wrong shape built fast is the
 mess this desk prevents.
 
 ## Replies in the thread
@@ -50,7 +50,7 @@ Intake, Priority Queue, an engineer) is his; the desk moves the task.
 
 Most replies are Ron and Sam talking. Set `chime_in` true only when asked
 something, a verdict changes, or a reply contradicts the code, with a
-one or two sentence `reply`. Return every item
+two-sentence `reply` at most. Return every item
 (unchanged ones are not reposted), never change one marked FINAL, and keep
 each `n` from `previous_items`.
 
@@ -63,7 +63,7 @@ one to three `path:line` on development where the edits go, and
 thrown away whole, so be brief.
 
 Set `not_a_request` true only when the post asks for nothing (chat, thanks,
-an announcement).
+announcements).
 
 ## Output
 
