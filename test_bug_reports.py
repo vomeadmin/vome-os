@@ -798,9 +798,13 @@ def test_rollup_closes_the_fix_when_a_pr_is_closed_unmerged(rec,
 
 def test_someone_else_saying_fix_is_not_a_command(rec, monkeypatch):
     _stored(monkeypatch, status=bug_reports.ROUTED)
-    out = bug_reports._on_reply(TS, {"ts": "2.0", "text": "fix",
-                                     "user": "U01B6D235N1"})
-    assert out["status"] == "skipped"
+    read = []
+    monkeypatch.setattr(bug_reports, "_digest",
+                        lambda ts, row, reply: read.append(reply["text"])
+                        or {"status": "ok", "kind": "chat"})
+    bug_reports._on_reply(TS, {"ts": "2.0", "text": "fix",
+                               "user": "U01B6D235N1"})
+    assert rec.opened == [] and read == ["fix"]
 
 
 def test_reporter_answer_reruns_a_waiting_report(rec, monkeypatch):
@@ -1002,3 +1006,248 @@ def test_branch_is_offered_in_the_tool_schema(monkeypatch):
     monkeypatch.setenv("VOMEOS_CODE_EXTRA_BRANCHES", "core=development")
     defs = tools.definitions(["read_code_file"])
     assert "branch" in defs[0]["input_schema"]["properties"]
+
+
+# ---------------------------------------------------------------------------
+# Every other reply is read (Sam, 2026-10-21): Ron's "one more on this" on a
+# merged fix used to be dropped as chat on a finished report.
+# ---------------------------------------------------------------------------
+
+RON = "U01B6D235N1"
+RON_FOLLOW_UP = (
+    "@Sammy one more on this: the sequence completion email sends the same "
+    "template, so it has the bold custom message and English footer too.")
+
+
+@pytest.fixture
+def reader(rec, monkeypatch):
+    """The reader's answer, and everything around it, faked."""
+    import types
+
+    import vomeos
+
+    r = types.SimpleNamespace(data={"kind": "chat"}, ok=True, runs=[],
+                              analysed=[], lessons=[], children=[])
+
+    def run_agent(name, context=None, **kw):
+        r.runs.append((name, context))
+        return types.SimpleNamespace(ok=r.ok, data=r.data,
+                                     why=lambda: "timed out")
+
+    monkeypatch.setattr(vomeos, "run_agent", run_agent)
+    monkeypatch.setattr(bug_reports, "_read_report", lambda ts: {
+        "text": "the report", "reporter": "Ron", "reporter_id": RON,
+        "thread": "agent: Merged into development", "task_id": "868mg8nce"})
+    monkeypatch.setattr(bug_reports, "_name", lambda u: "Ron")
+    monkeypatch.setattr(bug_reports, "_follow_ups", lambda ts: r.children)
+    monkeypatch.setattr(bug_reports, "analyse",
+                        lambda ts, **k: r.analysed.append(ts)
+                        or {"status": "ok", "verdict": "agent_fix"})
+    saved = []
+    monkeypatch.setattr(bug_reports, "_save",
+                        lambda ts, **f: saved.append((ts, f)))
+    r.saved = saved
+    _stored(monkeypatch, status=bug_reports.MERGED)
+    rows = {TS: bug_reports._row(TS)}
+    monkeypatch.setattr(bug_reports, "_row", lambda ts: rows.get(ts, {}))
+    r.rows = rows
+
+    from vomeos import lessons
+
+    monkeypatch.setattr(lessons, "add", lambda agent, rule, source, **k:
+                        r.lessons.append((agent, rule, k)) or 41)
+    return r
+
+
+def _ron(text, ts="3.0"):
+    return {"ts": ts, "text": text, "user": RON}
+
+
+def test_a_follow_up_on_a_merged_fix_becomes_its_own_report(rec, reader):
+    reader.data = {"kind": "follow_up",
+                   "follow_up": "Sequence completion email uses the same "
+                                "template and English-only text."}
+    out = bug_reports._on_reply(TS, _ron(RON_FOLLOW_UP))
+    assert out["follow_up"] == "3.0" and reader.analysed == ["3.0"]
+    child = dict(reader.saved)["3.0"]
+    assert child["parent_ts"] == TS and child["reporter_id"] == RON
+    assert child["status"] == bug_reports.CHECKING
+    assert "Sequence completion email" in child["card"]
+    assert rec.posts == [("bug", TS, "Looking into this follow-up. I'll "
+                          "check it against the code and update this "
+                          "thread.")]
+    # The reader saw where the report stands, so it never calls it live.
+    context = reader.runs[0][1]
+    assert "merged into the dev branch, not in production" in \
+        context["status"]
+    assert context["new_reply"].startswith("Ron: @Sammy one more")
+
+
+def test_a_follow_up_seen_before_is_not_checked_twice(rec, reader):
+    reader.data = {"kind": "follow_up", "follow_up": "x"}
+    reader.rows["3.0"] = {"ts": "3.0", "parent_ts": TS}
+    out = bug_reports._on_reply(TS, _ron(RON_FOLLOW_UP))
+    assert out["reason"] == "follow-up already handled"
+    assert reader.analysed == []
+
+
+def test_thanks_needs_no_model_and_no_post(rec, reader):
+    out = bug_reports._on_reply(TS, _ron("thanks!"))
+    assert out["reason"] == "acknowledgement"
+    assert reader.runs == [] and rec.posts == []
+
+
+def test_chat_stays_quiet(rec, reader):
+    out = bug_reports._on_reply(TS, _ron("OnlyG is on it tomorrow"))
+    assert out["action"] == "read, stayed quiet" and rec.posts == []
+
+
+def test_a_question_is_answered_in_the_thread(rec, reader):
+    reader.data = {"kind": "question",
+                   "reply": "Merged into development, not in production "
+                            "yet."}
+    bug_reports._on_reply(TS, _ron("Is this live yet?"))
+    assert rec.posts == [("bug", TS, "Merged into development, not in "
+                          "production yet.")]
+
+
+def test_detail_goes_on_the_task_and_the_thread_gets_the_link(rec, reader):
+    reader.data = {"kind": "info", "task_note": "Org: Maison Fraternite."}
+    bug_reports._on_reply(TS, _ron("Use Maison Fraternite to test"))
+    assert "Org: Maison Fraternite." in _comments(rec)
+    assert "Added in the #bug-reports thread by Ron" in _comments(rec)
+    assert rec.posts[-1][2] == ("Added to the ClickUp task: "
+                                "<https://app.clickup.com/t/868mg8nce|task>")
+
+
+def test_ron_teaching_the_analyst_tags_sam(rec, reader):
+    reader.data = {"kind": "feedback", "reply": "Noted.",
+                   "lesson": "Route the part a fix leaves out.",
+                   "lesson_agent": "bug_report_analyst"}
+    bug_reports._on_reply(TS, _ron("you should route the leftover part"))
+    agent, rule, extra = reader.lessons[0]
+    assert agent == "engineering.bug_report_analyst"
+    assert extra["evidence"] == "Ron: you should route the leftover part"
+    text = rec.posts[-1][2]
+    assert text.startswith("Noted.\n<@U01B9FQNSBU> :brain: Learned *L41*")
+    assert "Say `forget 41` to undo." in text
+
+
+def test_sam_teaching_does_not_tag_himself(rec, reader):
+    reader.data = {"kind": "feedback", "lesson": "Route leftovers.",
+                   "lesson_agent": "fix_author"}
+    bug_reports._on_reply(TS, _sam("route leftovers next time"))
+    assert reader.lessons[0][0] == "engineering.fix_author"
+    assert rec.posts[-1][2].startswith(":brain: Learned *L41*")
+
+
+def test_a_correction_that_leaves_work_learns_and_checks_it(rec, reader):
+    """Sam's "route the leftover part straight away" is a rule for next
+    time and undone work in this thread."""
+    reader.data = {"kind": "follow_up", "follow_up": "Route the French "
+                   "footer part.", "lesson": "Route what a fix leaves out.",
+                   "lesson_agent": "bug_report_analyst"}
+    bug_reports._on_reply(TS, _sam("route the leftover part straight away"))
+    assert reader.analysed == ["2.0"]
+    assert reader.lessons[0][0] == "engineering.bug_report_analyst"
+    ack = rec.posts[-1][2]
+    assert ack.startswith("Looking into this follow-up.")
+    assert "\n:brain: Learned *L41*" in ack
+
+
+def test_a_lesson_for_any_other_agent_is_refused(rec, reader):
+    reader.data = {"kind": "feedback", "lesson": "Always apologise.",
+                   "lesson_agent": "reply_drafter"}
+    bug_reports._on_reply(TS, _ron("be nicer"))
+    assert reader.lessons == [] and rec.posts == []
+
+
+def test_a_failed_read_stays_out_of_the_thread(rec, reader):
+    reader.ok = False
+    out = bug_reports._on_reply(TS, _ron("one more on this"))
+    assert out["reason"] == "reply read failed" and rec.posts == []
+
+
+def test_sams_command_answers_the_waiting_follow_up(rec, reader,
+                                                    monkeypatch):
+    reader.children = [{"ts": "3.0", "parent_ts": TS,
+                        "status": bug_reports.DECISION, "card": "{}",
+                        "task_id": "868mg8nce"}]
+    routed = []
+    monkeypatch.setattr(bug_reports, "_route",
+                        lambda ts, row, card, team, reason="":
+                        routed.append((ts, team)) or {"status": "ok"})
+    bug_reports._on_reply(TS, _sam("route backend"))
+    assert routed == [("3.0", "backend")]
+
+
+def test_an_answer_reruns_the_waiting_follow_up(rec, reader):
+    reader.children = [{"ts": "3.0", "parent_ts": TS,
+                        "status": bug_reports.NEEDS_INFO, "card": "{}"}]
+    bug_reports._on_reply(TS, _ron("the French sequence", ts="4.0"))
+    assert reader.analysed == ["3.0"] and reader.runs == []
+
+
+def test_forget_retires_the_lesson(rec, reader, monkeypatch):
+    from vomeos import lessons
+
+    retired = []
+    monkeypatch.setattr(lessons, "get", lambda i: {"rule": "Route it."})
+    monkeypatch.setattr(lessons, "retire",
+                        lambda i, note="": retired.append(i))
+    bug_reports._on_reply(TS, _sam("forget 41"))
+    assert retired == [41]
+    assert rec.posts[-1][2] == ":wastebasket: Forgot L41: Route it."
+
+
+def test_a_follow_up_reads_as_its_own_report(monkeypatch):
+    """The reply is the report, the earlier report heads the thread, and
+    the task is the earlier report's unless the reply links one."""
+    import json
+
+    rows = {"3.0": {"ts": "3.0", "parent_ts": TS,
+                    "card": json.dumps({"follow_up": "Same template."})}}
+    monkeypatch.setattr(bug_reports, "_row", lambda ts: rows.get(ts, {}))
+    monkeypatch.setattr(bug_reports, "_name", lambda u: u)
+
+    class Client:
+        def conversations_replies(self, channel, ts, limit):
+            assert ts == TS
+            return {"messages": [
+                {"ts": TS, "user": "R", "text":
+                    "bold email https://app.clickup.com/t/868parent"},
+                {"ts": "2.0", "bot_id": "B", "text": "Merged."},
+                {"ts": "3.0", "user": RON, "text": RON_FOLLOW_UP},
+                {"ts": "4.0", "user": "S", "text": "nice catch"}]}
+
+    monkeypatch.setattr(bug_reports, "_slack", Client)
+    report = bug_reports._read_report("3.0")
+    assert report["text"].startswith(bug_reports.FOLLOW_UP_NOTE)
+    assert "In short: Same template." in report["text"]
+    assert report["text"].endswith(RON_FOLLOW_UP)
+    assert report["reporter_id"] == RON and report["task_id"] == "868parent"
+    assert report["thread"].startswith("Earlier report by R: bold email")
+    assert "agent: Merged." in report["thread"]
+    assert RON_FOLLOW_UP not in report["thread"]
+
+
+def test_a_follow_ups_posts_go_in_the_reports_thread(monkeypatch):
+    posted = []
+
+    class Client:
+        def chat_postMessage(self, **kw):
+            posted.append(kw["thread_ts"])
+            return {"ts": "9.0"}
+
+    monkeypatch.setattr(bug_reports, "_slack", Client)
+    monkeypatch.setattr(bug_reports, "_row", lambda ts: {
+        "3.0": {"parent_ts": TS}}.get(ts, {}))
+    bug_reports._post("hi", thread_ts="3.0")
+    bug_reports._post("hi", thread_ts=TS)
+    assert posted == [TS, TS]
+
+
+def test_merged_notice_tags_who_raised_the_follow_up(monkeypatch):
+    monkeypatch.setattr(bug_reports, "_row",
+                        lambda ts: {"reporter_id": "UFOLLOW"})
+    assert bug_reports._reporter_mention("3.0") == "<@UFOLLOW> "

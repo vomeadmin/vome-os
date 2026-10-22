@@ -666,7 +666,8 @@ async def slack_events_webhook(request: Request):
 
         elif channel == bug_reports.CHANNEL:
             # #bug-reports. A top-level message is a new report; a reply is
-            # Sam's command or the reporter's answer to a question.
+            # Sam's command, an answer to a question, or read by the agent
+            # (a follow-up bug, detail for the task, a question, feedback).
             bug_reports.handle_message({
                 "user": user,
                 "text": text,

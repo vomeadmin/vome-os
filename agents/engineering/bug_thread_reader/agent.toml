@@ -1,0 +1,47 @@
+[identity]
+name = "bug_thread_reader"
+division = "engineering"
+title = "Bug Thread Reader"
+reports_to = "sam"
+hired = "2026-10-21"
+
+[model]
+# Standard tier. One reply, one decision. The expensive judgement (is it a
+# bug, who fixes it) stays with the bug report analyst: a follow-up this
+# reader finds is handed to the analyst as a report of its own.
+tier = "standard"
+max_tokens = 1500
+
+[job]
+charter = "charter.md"
+# Read-only code access, for answering a question about the report ("did
+# the fix cover the French footer?"). The output is an internal note in
+# Slack and ClickUp, never a customer message.
+tools = ["search_code", "read_code_file", "recent_commits"]
+max_tool_calls = 6
+requires_context = [
+    "report",
+    "reporter",
+    "thread",
+    "status",
+    "new_reply",
+]
+output = "json"
+
+[guards]
+output = ["json_shape", "non_empty"]
+client_facing = false
+
+[limits]
+timeout_seconds = 90
+max_retries = 2
+
+[approval]
+# A follow-up goes through the analyst's own gates. A lesson is announced in
+# the thread with `forget N`, and Sam is tagged when someone else taught it.
+requires_ceo_approval = false
+escalate_to = "#bug-reports"
+
+[evals]
+path = "evals/cases.jsonl"
+min_agreement = 0.85

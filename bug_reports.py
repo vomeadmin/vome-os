@@ -53,9 +53,26 @@ ticket_fix.promote_merged does not read; `run_rollup` (every 15 minutes)
 writes every commit into Fix Commit once all of them merge, so the release
 watcher waits for all of them.
 
-Replies in the thread: from Sam, `fix`, `route backend|frontend|both` and
-`close` act anywhere; any other reply to a report waiting on an answer runs
-the analysis again with the thread.
+Replies in the thread: from Sam, `fix`, `route backend|frontend|both`,
+`close` and `forget N` act anywhere; any other reply to a report waiting on
+an answer runs the analysis again with the thread.
+
+EVERY OTHER REPLY (Sam, 2026-10-21)
+-----------------------------------
+Ron's "one more on this" on a merged fix (a second email sending the same
+template, with its own English-only text) was dropped as chat. Now any reply
+on a report that is not waiting goes to engineering.bug_thread_reader:
+
+    follow_up  a problem the report did not cover -> its own report, keyed
+               on the reply (icon on the reply, posts in the same thread,
+               the reporter's task unless the reply links another). Sam's
+               commands then answer the newest follow-up that is waiting.
+    info       detail for the record -> a comment on the ClickUp task
+    question   answered in the thread, from the code and the status
+    feedback   a correction that holds beyond this report -> a live lesson
+               for the analyst or the fix author (Sam tagged when someone
+               else taught it, `forget N` drops it)
+    chat       nothing posted
 
 THE REPORTER'S OWN TASK
 -----------------------
@@ -96,6 +113,11 @@ CHANNEL = os.environ.get("SLACK_CHANNEL_BUG_REPORTS", "C0CAJ269RAQ")
 HANDLER_KEY = "engineering.bug_report"
 QUEUE = "engineering"
 AGENT = "engineering.bug_report_analyst"
+READER = "engineering.bug_thread_reader"
+# Agents a thread comment can teach. Lessons from here never reach the
+# customer-facing agents.
+LEARNABLE = {"bug_report_analyst": "engineering.bug_report_analyst",
+             "fix_author": "engineering.fix_author"}
 
 SAM_SLACK = "U01B9FQNSBU"
 SAM_CLICKUP = 3691763
@@ -121,6 +143,14 @@ MAX_ROUNDS = 4
 
 _TASK_LINK = re.compile(r"app\.clickup\.com/t/(?:\d+/)?([a-z0-9]+)")
 _ROUTE = re.compile(r"^route\s+(backend|frontend|both)\b", re.I)
+_FORGET = re.compile(r"^\s*(forget|unlearn)\s+L?(\d+)\s*$", re.I)
+# Thanks and nods need no model run.
+_CHAT = re.compile(r"^(thanks?( you)?|ty|ok(ay)?|great|nice|cool|perfect|"
+                   r"awesome|got it|sounds good|lgtm|:[\w+-]+:)[\s.!]*$",
+                   re.I)
+FOLLOW_UP_NOTE = ("FOLLOW-UP raised in the thread of an earlier report. The "
+                  "earlier report and everything said since is in `thread`; "
+                  "it is already handled. Judge only this follow-up.\n\n")
 # "core:form_app/s.py:120", as ticket_fix requires of a fix location.
 _EXACT_WHERE = re.compile(r"^[\w-]+:[^\s:()]+(:\d+(-\d+)?)?$")
 # A fix spanning repos lists its PRs this way, so ticket_fix.promote_merged
@@ -207,6 +237,8 @@ store.register_table(
         card          TEXT,
         rounds        INTEGER NOT NULL DEFAULT 0,
         last_reply_ts VARCHAR,
+        parent_ts     VARCHAR,
+        reporter_id   VARCHAR,
         created_at    TIMESTAMP NOT NULL DEFAULT NOW(),
         updated_at    TIMESTAMP NOT NULL DEFAULT NOW()
     )
@@ -293,41 +325,244 @@ def _on_reply(ts: str, reply: dict) -> dict:
         return {"status": "skipped", "reason": "reply already handled"}
     _save(ts, last_reply_ts=reply.get("ts"))
     text = str(reply.get("text") or "").strip()
-    card = _card(row)
+    sam = reply.get("user") == SAM_SLACK
+    if sam and _FORGET.match(text):
+        return _forget(ts, text)
 
-    status = row.get("status")
+    # Commands and answers go to whatever in the thread is waiting on one:
+    # the report itself, or a follow-up raised in its thread.
+    target = _active(ts, row)
+    key, card = target["ts"], _card(target)
+    status = target.get("status")
     asking = status in (GREENLIGHT, GREENLIT)
 
-    if reply.get("user") == SAM_SLACK:
+    if sam:
         word = text.lower().rstrip(".! ")
         route = _ROUTE.match(text)
         if route:
-            return _route(ts, row, card, route.group(1).lower(),
+            return _route(key, target, card, route.group(1).lower(),
                           reason="Sam's call")
         if word in ("close", "no"):
-            _save(ts, status=CLOSED)
+            _save(key, status=CLOSED)
             _post("Closed. Nothing filed.", thread_ts=ts)
             return {"status": "ok", "action": "closed"}
         # `fix` works anywhere; the other yeses only answer a greenlight.
         if word == "fix" or (asking and _is_yes(text)):
-            _save(ts, status=GREENLIT)
+            _save(key, status=GREENLIT)
             if "read" not in card:
                 # Saved before the analysis recorded which files it opened
                 # (deployed 2026-10-19 16:37), so the fix author would get no
                 # reference files: Sam's yes on the exemption thread failed
                 # that way. Look again first, then build.
-                card = _refresh_card(ts) or card
-            return _build(ts, {**row, "greenlit": True}, card, greenlit=True)
+                card = _refresh_card(key) or card
+            return _build(key, {**target, "greenlit": True}, card,
+                          greenlit=True)
         if asking:
             # A question or a change to the fix: think again with his note
             # in the thread, then ask again.
-            return analyse(ts, greenlit=status == GREENLIT)
-    elif asking:
+            return analyse(key, greenlit=status == GREENLIT)
+    elif asking and _is_yes(text):
         return {"status": "skipped", "reason": "only Sam can greenlight"}
 
     if status in WAITING:
-        return analyse(ts)
-    return {"status": "skipped", "reason": "chat on a finished report"}
+        return analyse(key)
+    # Everything else used to be dropped as chat on a finished report, so
+    # Ron's "one more on this" after a merged fix went nowhere (Sam,
+    # 2026-10-21). Now it is read.
+    return _digest(ts, row, reply)
+
+
+def _active(ts: str, row: dict) -> dict:
+    """The newest thing in the thread waiting on an answer (a follow-up
+    first, then the report), or the report itself."""
+    asking = WAITING + (GREENLIGHT, GREENLIT)
+    for child in _follow_ups(ts):
+        if child.get("status") in asking:
+            return child
+    return {**row, "ts": ts}
+
+
+def _follow_ups(ts: str) -> list[dict]:
+    """Follow-ups raised in a report's thread, newest first."""
+    if not store.ensure_table(LEDGER):
+        return []
+    return [dict(r) for r in store.query(
+        f"SELECT * FROM {LEDGER} WHERE parent_ts = :t"
+        " ORDER BY created_at DESC", {"t": ts})]
+
+
+def _parent_of(ts: str) -> str:
+    """The report a follow-up was raised under, or "" for a report."""
+    try:
+        return str(_row(ts).get("parent_ts") or "")
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Reading every other reply (Sam, 2026-10-21)
+# ---------------------------------------------------------------------------
+
+def _digest(ts: str, row: dict, reply: dict) -> dict:
+    """A reply nobody's command or question covers: a new problem, detail
+    for the task, a question, a correction, or chat. The reader decides; a
+    new problem is checked and handled like a report of its own, in the
+    same thread."""
+    from vomeos import run_agent
+
+    text = str(reply.get("text") or "").strip()
+    if _CHAT.match(text):
+        return {"status": "skipped", "reason": "acknowledgement"}
+    report = _read_report(ts)
+    if not report:
+        return {"status": "skipped", "reason": "message unreadable"}
+    user = str(reply.get("user") or "")
+    who = "Sam" if user == SAM_SLACK else _name(user)
+    result = run_agent(READER, context={
+        "report": report["text"],
+        "reporter": report["reporter"],
+        "thread": report["thread"] or "(no replies)",
+        "status": _status_text(ts, row),
+        "new_reply": f"{who}: {text}",
+    }, subject_type="slack_bug_report_reply", subject_id=str(reply.get("ts")))
+    if not result.ok:
+        # Nobody asked for this read, so a failed one stays out of the
+        # thread rather than becoming a question for Sam.
+        print(f"[BUG REPORTS] reply read failed on {ts}: {result.why()}")
+        return {"status": "skipped", "reason": "reply read failed"}
+    data = result.data or {}
+    kind = str(data.get("kind") or "chat")
+    # A correction can also leave work undone ("route the leftover part
+    # straight away"): the rule is learned and the work checked.
+    learned = (_learn(data, who, text)
+               if kind in ("feedback", "follow_up") else "")
+    if kind == "follow_up":
+        return _follow_up(ts, reply, str(data.get("follow_up") or ""),
+                          learned)
+
+    lines = []
+    said = str(data.get("reply") or "").strip()
+    if said and kind in ("question", "feedback", "info"):
+        lines.append(said)
+    note = str(data.get("task_note") or "").strip()
+    task_id = row.get("task_id") or ""
+    if note and task_id:
+        _comment(task_id, f"Added in the #bug-reports thread by {who}:\n\n"
+                          f"{note}\n\n{_permalink(str(reply.get('ts')))}")
+        lines.append(f"Added to the ClickUp task: "
+                     f"<https://app.clickup.com/t/{task_id}|task>")
+    if learned:
+        lines.append(learned)
+    if lines:
+        _post("\n".join(lines), thread_ts=ts)
+    return {"status": "ok", "kind": kind,
+            "action": "replied" if lines else "read, stayed quiet"}
+
+
+def _follow_up(ts: str, reply: dict, restated: str,
+               learned: str = "") -> dict:
+    """A new problem raised in a report's thread becomes its own report,
+    keyed on the reply: checked against the code, then fixed, greenlit,
+    routed or asked about, with its icon on the reply."""
+    key = str(reply.get("ts") or "")
+    if not key or _row(key):
+        return {"status": "skipped", "reason": "follow-up already handled"}
+    _post("Looking into this follow-up. I'll check it against the code and "
+          "update this thread." + (f"\n{learned}" if learned else ""),
+          thread_ts=ts)
+    _save(key, parent_ts=ts, reporter_id=str(reply.get("user") or ""),
+          status=CHECKING, card=json.dumps({"follow_up": restated}))
+    try:
+        return {**analyse(key), "follow_up": key}
+    except Exception as exc:
+        print(f"[BUG REPORTS] follow-up {key} failed: "
+              f"{type(exc).__name__}: {exc}")
+        _save(key, status=ERROR)
+        url = _log_failure(key, {}, f"{type(exc).__name__}: "
+                                    f"{str(exc)[:300]}",
+                           what="A #bug-reports follow-up crashed")
+        _post(f"I couldn't finish checking this follow-up "
+              f"({type(exc).__name__}). <@{SAM_SLACK}> it needs a look."
+              + _logged_line(url), thread_ts=ts)
+        return {"status": "error", "error": str(exc)}
+
+
+def _learn(data: dict, who: str, said: str) -> str:
+    """A correction that holds beyond this report becomes a live lesson for
+    the agent it is about. Sam is tagged when someone else taught it, so he
+    can drop it. Returns the line for the thread, or ""."""
+    rule = str(data.get("lesson") or "").strip()
+    agent = LEARNABLE.get(str(data.get("lesson_agent") or ""))
+    if not rule or not agent:
+        return ""
+    try:
+        from vomeos import lessons
+
+        lesson_id = lessons.add(agent, rule, "bug_reports_thread",
+                                evidence=f"{who}: {said}",
+                                created_by="bug_thread_reader")
+    except Exception as exc:
+        print(f"[BUG REPORTS] lesson not saved: {exc}")
+        return ""
+    if not lesson_id:
+        return ""
+    sam = "" if who == "Sam" else f"<@{SAM_SLACK}> "
+    short = agent.split(".")[-1].replace("_", " ")
+    return (f"{sam}:brain: Learned *L{lesson_id}* ({short}): {rule} "
+            f"Say `forget {lesson_id}` to undo.")
+
+
+def _forget(ts: str, text: str) -> dict:
+    from vomeos import lessons
+
+    lesson_id = int(_FORGET.match(text).group(2))
+    found = lessons.get(lesson_id)
+    if found:
+        lessons.retire(lesson_id, "Sam said forget in #bug-reports")
+        _post(f":wastebasket: Forgot L{lesson_id}: {found.get('rule')}",
+              thread_ts=ts)
+    else:
+        _post(f"There is no lesson L{lesson_id}.", thread_ts=ts)
+    return {"status": "ok", "action": "forget"}
+
+
+# What each status means, for the reader: it must never call a fix live or
+# merged that is not.
+STATUS_TEXT = {
+    CHECKING: "being checked against the code now",
+    NEEDS_INFO: "waiting on the reporter's answer",
+    DECISION: "waiting on Sam's call",
+    GREENLIGHT: "fix described, waiting on Sam's yes to build it",
+    GREENLIT: "Sam said yes; the build did not finish",
+    ROUTED: "sent to an engineer, not fixed yet",
+    FIXING: "agent pull request open, not merged yet",
+    MERGED: "fix merged into the dev branch, not in production yet",
+    LIVE: "fix live in production",
+    CLOSED: "closed",
+    ERROR: "the check crashed",
+}
+
+
+def _status_text(ts: str, row: dict) -> str:
+    def one(r: dict) -> str:
+        card = _card(r)
+        bits = [STATUS_TEXT.get(str(r.get("status")), str(r.get("status")))]
+        if card.get("headline"):
+            bits.append(f"headline: {card['headline']}")
+        if r.get("team"):
+            bits.append(f"team: {r['team']}")
+        if r.get("pr_url"):
+            bits.append(f"PRs: {r['pr_url']}")
+        code = card.get("code_check") or {}
+        if code.get("where"):
+            bits.append(f"where: {code['where']}")
+        if code.get("fix"):
+            bits.append(f"fix: {code['fix']}")
+        return "; ".join(bits)
+
+    lines = [f"Report: {one(row)}"]
+    lines += [f"Follow-up {c['ts']}: {one(c)}" for c in _follow_ups(ts)]
+    return "\n".join(lines)
 
 
 def analyse(ts: str, dry_run: bool = False, greenlit: bool = False) -> dict:
@@ -346,8 +581,12 @@ def analyse(ts: str, dry_run: bool = False, greenlit: bool = False) -> dict:
         url = _log_failure(ts, card, card["failed"],
                            what="The bug report analysis did not finish")
         card["question"] = card["question"] + _logged_line(url)
+    if row.get("parent_ts"):
+        # A rerun keeps the reader's restatement of the follow-up.
+        card.setdefault("follow_up", _card(row).get("follow_up", ""))
     if not dry_run:
         _save(ts, reporter=report["reporter"], task_id=task_id,
+              reporter_id=report["reporter_id"],
               verdict=str(card.get("verdict") or ""),
               team=str(card.get("team") or ""), card=json.dumps(card),
               rounds=rounds, status=GREENLIT if greenlit else CHECKING)
@@ -658,7 +897,7 @@ def _log_failure(ts: str, card: dict, reason: str,
             f"- References: "
             f"{', '.join(code.get('references') or []) or '(none)'}",
         ]),
-        channel=CHANNEL, thread_ts=ts,
+        channel=CHANNEL, thread_ts=_parent_of(ts) or ts,
         next_step="Work out with Claude what the workflow needs, fix it, "
                   "then say yes again in the thread.",
     )
@@ -1055,8 +1294,14 @@ def _is_live(fix_task: str) -> bool:
 
 
 def _reporter_mention(ts: str) -> str:
-    """A mention of whoever posted the report, or "" if Slack will not
-    say."""
+    """A mention of whoever posted the report (or raised the follow-up), or
+    "" if nobody knows."""
+    try:
+        stored = str(_row(ts).get("reporter_id") or "")
+        if stored:
+            return f"<@{stored}> "
+    except Exception:
+        pass
     try:
         replies = _slack().conversations_replies(
             channel=CHANNEL, ts=ts, limit=1).get("messages") or []
@@ -1345,19 +1590,41 @@ def _comment_text(card: dict, ts: str, reason: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 def _read_report(ts: str) -> dict:
+    """The report, its thread, and the task it links. For a follow-up, the
+    reply is the report and the earlier report heads its thread; its task
+    is the one the reply links, else the earlier report's."""
+    parent_ts = _parent_of(ts)
+    row = _row(ts) if parent_ts else {}
     client = _slack()
-    replies = client.conversations_replies(channel=CHANNEL, ts=ts,
-                                           limit=50).get("messages") or []
+    replies = client.conversations_replies(channel=CHANNEL,
+                                           ts=parent_ts or ts,
+                                           limit=100).get("messages") or []
     if not replies:
         return {}
-    parent = replies[0]
-    reporter_id = str(parent.get("user") or "")
-    thread = []
-    for msg in replies[1:]:
+
+    def said(msg: dict) -> str:
         who = "agent" if msg.get("bot_id") else _name(msg.get("user"))
-        thread.append(f"{who}: {msg.get('text') or ''}")
-    text = str(parent.get("text") or "")
-    match = _TASK_LINK.search(text)
+        return f"{who}: {msg.get('text') or ''}"
+
+    first = replies[0]
+    if parent_ts:
+        mine = next((m for m in replies if m.get("ts") == ts), None)
+        if not mine:
+            return {}
+        thread = [f"Earlier report by {said(first)}"]
+        thread += [said(m) for m in replies[1:] if m.get("ts") != ts]
+        restated = str(_card(row).get("follow_up") or "")
+        text = FOLLOW_UP_NOTE + (f"In short: {restated}\n\nAs written:\n"
+                                 if restated else "") + str(
+            mine.get("text") or "")
+        reporter_id = str(mine.get("user") or "")
+        match = (_TASK_LINK.search(str(mine.get("text") or ""))
+                 or _TASK_LINK.search(str(first.get("text") or "")))
+    else:
+        thread = [said(m) for m in replies[1:]]
+        text = str(first.get("text") or "")
+        reporter_id = str(first.get("user") or "")
+        match = _TASK_LINK.search(text)
     return {"text": text, "reporter_id": reporter_id,
             "reporter": _name(reporter_id), "thread": "\n\n".join(thread),
             "task_id": match.group(1) if match else ""}
@@ -1481,7 +1748,9 @@ def _post(text: str, thread_ts: str = "", channel: str = "") -> str:
         kwargs = {"channel": channel or CHANNEL, "text": text,
                   "unfurl_links": False, "unfurl_media": False}
         if thread_ts:
-            kwargs["thread_ts"] = thread_ts
+            # A follow-up is keyed on its reply; Slack threads only under
+            # the report itself.
+            kwargs["thread_ts"] = _parent_of(thread_ts) or thread_ts
         return str(_slack().chat_postMessage(**kwargs).get("ts") or "")
     except Exception as exc:
         print(f"[BUG REPORTS] Slack post failed: {exc}")

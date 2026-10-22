@@ -180,6 +180,13 @@ flowchart TD
   FX & GB & EN & SAM & ASK & FIN --> TH["Thread: check mark, one line, ClickUp link<br/>(ClickUp holds the record, Slack the conversation)"]:::built
   SAM --> CMD["Sam replies: fix / route backend|frontend|both / close<br/>or answers, and the analysis runs again"]:::built
   ASK --> RE["Reporter answers, analysis runs again"]:::built
+  TH --> RD["Any other reply, on any status (anyone's)<br/>Bug thread reader reads it against the thread"]:::built
+  RD -->|"follow_up: a problem the report did not cover"| FU["Its own report, keyed on the reply<br/>(icon on the reply, same thread)"]:::built
+  FU --> AN
+  RD -->|"info"| NOTE["Comment on the ClickUp task, link in the thread"]:::built
+  RD -->|"question"| ANS["Answered in the thread (code + status)"]:::built
+  RD -->|"feedback with a rule"| LES["Live lesson for the analyst or fix author<br/>(Sam tagged if someone else taught it; forget N)"]:::built
+  RD -->|"chat"| QUIET["Nothing posted"]:::built
 ```
 
 <!-- map:diagram id=featuredesk title="9. A request in #feature-requests, shaped before it is built (built 2026-10-19, switched off)" -->
@@ -325,3 +332,4 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 | G53 | release | A release that names a client gets a resolution draft when it closes | built | #9501's release closed Oct 19 with "make sure she is notified" and she never heard | Push; hourly `support.shipped_untold` reads "Zoho #N" from release comments, one claim per client, never auto-sent (the client may have written since) | agent |
 | G54 | director | needs_human cards carry a holding reply | built | #9501 (7000 ARR) sat five days with no draft because the card said needs_human | Push; the draft stays under NEEDS YOUR DECISION (`send N`, never `send ready`) | agent |
 | G55 | code | Code checks cannot read production data | proposed | #9501 (which records hold a field) and #9587 (a role's stored setting) both ended on data the agent could not see | A read-only, institution-scoped lookup tool for triage | Sam |
+| G56 | bugreports | Every reply in a #bug-reports thread is read: a follow-up becomes its own report in the same thread, detail goes on the task, questions are answered, corrections become live lessons | built | Ron's "one more on this" (the sequence completion email sharing the fixed template, plus its own English-only text) came after the fix merged and was dropped as "chat on a finished report" | Push; agent `engineering.bug_thread_reader` (10/10 evals). Then Ron's 7:52 PM reply needs reposting (or a manual follow-up) since it arrived before this existed | Sam |
