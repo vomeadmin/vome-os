@@ -1656,7 +1656,8 @@ def backfill(dry_run: bool, limit: int = 10) -> list[dict]:
     """Recent top-level human requests in the channel not yet handled."""
     history = _slack().conversations_history(channel=CHANNEL, limit=100)
     posts = [m for m in history.get("messages") or []
-             if not m.get("bot_id") and not m.get("subtype")
+             if not m.get("bot_id")
+             and m.get("subtype") in (None, "file_share")
              and len((m.get("text") or "").strip()) >= MIN_REQUEST_CHARS]
     out = []
     for msg in reversed(posts[:limit]):

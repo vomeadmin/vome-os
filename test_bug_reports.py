@@ -1251,3 +1251,76 @@ def test_merged_notice_tags_who_raised_the_follow_up(monkeypatch):
     monkeypatch.setattr(bug_reports, "_row",
                         lambda ts: {"reporter_id": "UFOLLOW"})
     assert bug_reports._reporter_mention("3.0") == "<@UFOLLOW> "
+
+
+# =====================================================================
+# A report posted with a screenshot (2026-10-22)
+#
+# Ron typed "Can't save admin role. Says Invalid Modules" in Slack with an
+# image. Slack sent it as subtype "file_share" and the webhook dropped every
+# subtype, so the report got no reply. It must reach the channel handler.
+# =====================================================================
+
+def _main():
+    import os as _os
+
+    _os.environ.setdefault("DATABASE_URL", "")
+    import main
+    return main
+
+
+def test_a_report_with_a_screenshot_reaches_the_handler():
+    main = _main()
+    event = {"type": "message", "subtype": "file_share",
+             "channel": bug_reports.CHANNEL, "user": "URON",
+             "text": "Can't save admin role", "ts": "5.0"}
+    assert not main._ignored_event(event)
+
+
+def test_other_subtypes_and_bots_are_still_ignored():
+    main = _main()
+    for event in ({"subtype": "message_changed",
+                   "channel": bug_reports.CHANNEL},
+                  {"subtype": "file_share", "bot_id": "B1",
+                   "channel": bug_reports.CHANNEL},
+                  {"subtype": "file_share", "channel": "CTICKETS"}):
+        assert main._ignored_event(event)
+    assert not main._ignored_event({"channel": "CTICKETS", "text": "hi"})
+
+
+def test_backfill_includes_a_report_with_a_screenshot(monkeypatch):
+    class Client:
+        def conversations_history(self, **kw):
+            return {"messages": [
+                {"ts": "6.0", "subtype": "channel_join", "text": "joined"},
+                {"ts": "5.0", "subtype": "file_share", "user": "URON",
+                 "text": "Can't save admin role"}]}
+
+    seen = []
+    monkeypatch.setattr(bug_reports, "_slack", Client)
+    monkeypatch.setattr(bug_reports, "analyse",
+                        lambda ts, dry_run=False: seen.append(ts) or {})
+    bug_reports.backfill(dry_run=True)
+    assert seen == ["5.0"]
+
+
+def test_run_one_skips_a_report_already_handled(monkeypatch):
+    monkeypatch.setattr(bug_reports, "_row",
+                        lambda ts: {"status": bug_reports.ROUTED})
+    monkeypatch.setattr(bug_reports, "analyse",
+                        lambda ts, dry_run=False: pytest.fail("reran"))
+    assert bug_reports.run_one(TS, dry_run=False)["status"] == "skipped"
+
+
+def test_run_one_acks_and_analyses_a_missed_report(monkeypatch):
+    calls = []
+    monkeypatch.setattr(bug_reports, "_row", lambda ts: {})
+    monkeypatch.setattr(bug_reports, "_post",
+                        lambda text, thread_ts: calls.append(("post", thread_ts)))
+    monkeypatch.setattr(bug_reports, "_mark",
+                        lambda ts, status: calls.append(("mark", status)))
+    monkeypatch.setattr(bug_reports, "analyse",
+                        lambda ts, dry_run=False: calls.append(("analyse", ts))
+                        or {"status": "ok"})
+    bug_reports.run_one(TS, dry_run=False)
+    assert calls == [("post", TS), ("mark", "checking"), ("analyse", TS)]

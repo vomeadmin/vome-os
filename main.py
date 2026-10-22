@@ -529,6 +529,24 @@ SLACK_QUEUE_ONLYG_CHANNEL = os.environ.get("SLACK_CHANNEL_SUPPORT_QUEUE_ONLYG", 
 
 _slack_processed_events: dict[str, float] = {}
 
+# Channels that take a message with an attachment. Slack sends one with
+# subtype "file_share", so a report typed in Slack with a screenshot was
+# dropped as a subtype (Ron's #bug-reports post, 2026-10-22). The ticket
+# channels keep ignoring it: they get files through file_shared instead.
+FILE_SHARE_CHANNELS = (bug_reports.CHANNEL, feature_desk.CHANNEL)
+
+
+def _ignored_event(event: dict) -> bool:
+    """Bot messages and subtypes (edits, deletes, joins), except a human
+    message with an attachment in FILE_SHARE_CHANNELS."""
+    if event.get("bot_id"):
+        return True
+    subtype = event.get("subtype")
+    if not subtype:
+        return False
+    return not (subtype == "file_share"
+                and event.get("channel") in FILE_SHARE_CHANNELS)
+
 
 @app.post("/webhook/slack-events")
 async def slack_events_webhook(request: Request):
@@ -565,7 +583,7 @@ async def slack_events_webhook(request: Request):
     channel = event.get("channel", "")
 
     # Ignore bot messages and non-message events we don't handle
-    if event.get("bot_id") or event.get("subtype"):
+    if _ignored_event(event):
         return {"status": "ok"}
 
     # app_mention - @Agent was mentioned in a channel

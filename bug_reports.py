@@ -1812,8 +1812,10 @@ def _link(task_id: str, other: str) -> None:
 def backfill(dry_run: bool, limit: int = 20) -> list[dict]:
     """Every top-level human report in the channel not yet handled."""
     history = _slack().conversations_history(channel=CHANNEL, limit=100)
+    # "file_share" is a report posted with a screenshot.
     reports = [m for m in history.get("messages") or []
-               if not m.get("bot_id") and not m.get("subtype")
+               if not m.get("bot_id")
+               and m.get("subtype") in (None, "file_share")
                and (m.get("text") or "").strip()]
     out = []
     for msg in reversed(reports[:limit]):
@@ -1826,6 +1828,20 @@ def backfill(dry_run: bool, limit: int = 20) -> list[dict]:
             _mark(ts, "checking")
         out.append(analyse(ts, dry_run=dry_run))
     return out
+
+
+def run_one(ts: str, dry_run: bool) -> dict:
+    """One top-level report the webhook missed, by its Slack ts. Runs it
+    like a new report unless the ledger already handled it."""
+    if not dry_run:
+        row = _row(ts)
+        if row and row.get("status") != ERROR:
+            return {"status": "skipped", "reason": "already handled",
+                    "row_status": row.get("status")}
+        _post("Looking into this. I'll check it against the code and "
+              "update this thread.", thread_ts=ts)
+        _mark(ts, "checking")
+    return analyse(ts, dry_run=dry_run)
 
 
 if __name__ == "__main__":
@@ -1841,8 +1857,14 @@ if __name__ == "__main__":
     parser.add_argument("--build", metavar="TS",
                         help="preview what Sam's yes would build (needs "
                              "--dry-run; it never opens a PR)")
+    parser.add_argument("--ts", metavar="TS",
+                        help="run one missed top-level report by its "
+                             "Slack ts")
     args = parser.parse_args()
-    if args.build:
+    if args.ts:
+        print(json.dumps(run_one(args.ts, args.dry_run), indent=2,
+                         default=str))
+    elif args.build:
         if not args.dry_run:
             parser.error("--build only previews: add --dry-run")
         preview_build(args.build)
