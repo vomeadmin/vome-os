@@ -100,27 +100,35 @@ def first_name(author: str, email: str = "", given: str = "") -> str:
     return re.split(r"[._\d]", local)[0].capitalize() if local else ""
 
 
+def _newest(threads: list[dict], direction: str, skip=None) -> dict:
+    found = [t for t in threads if t.get("direction") == direction
+             and not (skip and skip(t))]
+    if not found:
+        return {}
+    found.sort(key=lambda t: str(t.get("createdTime") or ""), reverse=True)
+    return found[0]
+
+
+def _threads(ticket_id: str) -> list[dict]:
+    return _get(f"/tickets/{ticket_id}/threads", {"limit": 50}).get(
+        "data") or []
+
+
 def latest_inbound(ticket_id: str) -> dict:
     """The newest message from the customer side, or {} if none."""
-    data = _get(f"/tickets/{ticket_id}/threads", {"limit": 50})
-    inbound = [t for t in (data.get("data") or [])
-               if t.get("direction") == "in"]
-    if not inbound:
-        return {}
-    inbound.sort(key=lambda t: str(t.get("createdTime") or ""), reverse=True)
-    return inbound[0]
+    return _newest(_threads(ticket_id), "in")
 
 
 def latest_outbound(ticket_id: str) -> dict:
     """The newest message we sent on this ticket, or {} if none."""
-    data = _get(f"/tickets/{ticket_id}/threads", {"limit": 50})
-    outbound = [t for t in (data.get("data") or [])
-                if t.get("direction") == "out"]
-    if not outbound:
-        return {}
-    outbound.sort(key=lambda t: str(t.get("createdTime") or ""),
-                  reverse=True)
-    return outbound[0]
+    return _newest(_threads(ticket_id), "out")
+
+
+def last_exchange(ticket_id: str, skip=None) -> tuple[dict, dict]:
+    """(newest inbound, newest outbound) from one read of the thread.
+    `skip(thread)` true leaves an inbound out (an out-of-office)."""
+    threads = _threads(ticket_id)
+    return _newest(threads, "in", skip), _newest(threads, "out")
 
 
 def ticket_status(ticket_id: str) -> str:

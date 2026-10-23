@@ -1349,10 +1349,15 @@ def _reply_owed(item: dict) -> bool:
 
 def _engineer_shipped(item: dict) -> str:
     """Why an acknowledgment must not go: the engineer triage routed it to
-    has already shipped, and the on-prod handler emailed the client "it is
-    fixed". A "we are on it" after that reads as if nobody is reading. A
-    resolution draft for the same ticket is the reply that is owed, so it
-    passes. '' when the send may go ahead (ClickUp unreadable included)."""
+    has already shipped. A "we are on it" after that reads as if nobody is
+    reading. A resolution draft for the same ticket is the reply that is
+    owed, so it passes. '' when the send may go ahead (ClickUp unreadable
+    included).
+
+    The item finishes only when Zoho shows the client was written to after
+    their last message. Only `on prod` emails the client; an engineer
+    closing the task tells nobody, and until 2026-10-22 that finished eight
+    tickets nobody had answered (#9330, #9441, #9504, #9549 among them)."""
     filed = item.get("eng_task") or {}
     if not filed.get("id"):
         return ""
@@ -1364,9 +1369,22 @@ def _engineer_shipped(item: dict) -> str:
     state = ticket_routing.task_state(filed)
     if not state.get("shipped"):
         return ""
+    try:
+        told = sprint_batch.answered_in_zoho(str(item.get("ticket_id")))
+    except Exception as exc:
+        print(f"[SPRINT] could not tell if {item.get('ticket_id')} was "
+              f"answered: {exc}")
+        told = False
+    if not told:
+        return (f"*{item.get('number')}.* nothing sent: "
+                f"{filed.get('owner')} closed the task "
+                f"({state.get('status')}, {filed.get('url')}) and the "
+                "client has not been told the outcome. This draft says the "
+                "team is on it; redraft it with the outcome first.")
     sprint_store.decide(item["id"], sprint_store.DONE,
                         f"{filed.get('owner')} shipped it "
                         f"({state.get('status')}) before Sam replied")
+    item["status"] = sprint_store.DONE
     return (f"*{item.get('number')}.* nothing sent: {filed.get('owner')} "
             f"already shipped this ({state.get('status')}, "
             f"{filed.get('url')}), and the client is emailed when a fix "

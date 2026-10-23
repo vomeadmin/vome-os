@@ -571,11 +571,17 @@ def render(batch_number: int, picked: dict, context: dict,
 # ---------------------------------------------------------------------------
 
 def _resolution_tickets() -> set:
+    return set(_pending_resolutions())
+
+
+def _pending_resolutions() -> dict:
+    """Ticket id -> when its resolution was drafted, for every resolution
+    still waiting on Sam."""
     rows = store.query(
-        "SELECT ticket_id FROM vomeos_release_resolutions"
+        "SELECT ticket_id, created_at FROM vomeos_release_resolutions"
         " WHERE outcome IN ('drafted', 'held', 'no_draft')"
     )
-    return {str(r["ticket_id"]) for r in rows}
+    return {str(r["ticket_id"]): r.get("created_at") for r in rows}
 
 
 def _release_context(since: datetime | None) -> dict:
@@ -869,42 +875,157 @@ def triage_untriaged(limit: int, ignore_cap: bool = False,
 
 
 def run_queue_sweep() -> dict:
-    """Every 30 minutes: tickets a webhook missed, a few at a time."""
-    return triage_untriaged(SWEEP_CAP)
+    """Every 30 minutes: tickets a webhook missed, a few at a time, and
+    items handled outside the sprint since the last sweep."""
+    out = triage_untriaged(SWEEP_CAP)
+    try:
+        out["handled_elsewhere"] = reconcile_working_set()
+    except Exception as exc:
+        print(f"[BATCH] reconcile skipped: {exc}")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Handled outside the sprint
+# ---------------------------------------------------------------------------
+#
+# Sam answers and closes tickets in Zoho too. Until 2026-10-22 the only check
+# for that ran when a Slack batch posted, and batches were paused on Oct 18,
+# so the Claude.ai sprint kept showing tickets he had answered or closed by
+# hand (22 of them that day). It now runs from the Zoho webhook, the
+# 30-minute sweep and every sprint tool before it lists anything.
+
+RECONCILE_KEY = "customer_success.sprint_reconcile"
+ANSWERED = "handled outside the sprint (answered in Zoho)"
+# Our own fast paths answer within seconds of the customer (the activation
+# check told #9615 and #9622 "your account is already active" 5 and 8
+# seconds after they wrote). A person takes longer, so an outbound this
+# soon after the customer's message is not an answer.
+AUTO_REPLY_WINDOW = timedelta(seconds=60)
+
+
+def _out_of_office(thread: dict) -> bool:
+    from agent import _looks_like_auto_reply
+
+    return _looks_like_auto_reply(thread.get("summary") or "")
+
+
+def answered_in_zoho(ticket_id: str, since: datetime | None = None) -> bool:
+    """We wrote to the customer after their newest message, so nothing is
+    owed (lesson L27). An out-of-office arriving after our answer is not a
+    message (#9526 and #9112 on 2026-10-22). `since`: the answer must also
+    be newer than this. Raises when Zoho cannot be read."""
+    import zoho_actions
+
+    inbound, outbound = zoho_actions.last_exchange(ticket_id,
+                                                   skip=_out_of_office)
+    sent = _parse_time(outbound.get("createdTime"))
+    if sent is None or (since and sent < since):
+        return False
+    received = _parse_time(inbound.get("createdTime"))
+    return received is None or sent > received + AUTO_REPLY_WINDOW
+
+
+def _handled(item: dict, open_ids: set, pending: dict) -> str:
+    """Why this item no longer needs Sam, or ''. Never raises: a ticket
+    Zoho cannot answer for stays."""
+    import zoho_actions
+
+    ticket_id = str(item.get("ticket_id") or "")
+    try:
+        status = ("Processing" if ticket_id in open_ids
+                  else zoho_actions.ticket_status(ticket_id))
+        if not status:
+            return ""
+        if status == "Closed":
+            return f"handled outside the sprint (Zoho: {status})"
+        if status not in ("New", "Processing"):
+            # In Progress or Awaiting Client Response. A resolution waiting
+            # to be sent, or an agent fix PR, stays: those tickets sit In
+            # Progress while the fix is built, and the client is owed news.
+            if ticket_id in pending or item.get("fix_pr"):
+                return ""
+            return f"handled outside the sprint (Zoho: {status})"
+        # A resolution is answered only by something sent after it was
+        # drafted, not by the acknowledgment before the fix.
+        if answered_in_zoho(ticket_id, _parse_time(pending.get(ticket_id))):
+            return ANSWERED
+    except Exception as exc:
+        print(f"[BATCH] {ticket_id} unreadable, kept: {exc}")
+    return ""
 
 
 def sync_handled_elsewhere(items: list[dict], open_ids: set) -> int:
-    """Finish items whose ticket was handled outside the sprint.
+    """Finish open and held items whose ticket was handled outside the
+    sprint: closed in Zoho, moved on to In Progress or Awaiting Client
+    Response, or answered after the customer's last message. Returns how
+    many finished.
 
-    Someone closed it in Zoho, or moved it to In Progress or Awaiting
-    Client Response: it no longer needs Sam here. The queue read only covers
-    recent tickets, so a ticket missing from it is asked about directly
-    before anything is finished. A resolution waiting to be sent, or a
-    ticket with an agent fix PR, stays: those tickets usually sit In
-    Progress while the fix is built, and the client is still owed a reply.
+    `open_ids` are tickets the queue read shows at New or Processing; any
+    other ticket is asked about directly, because the queue read only
+    covers recent tickets. Items the agent is fixing are left alone: the
+    release watcher brings them back when the fix is live.
     """
-    import zoho_actions
+    import release_resolutions
+    from concurrent.futures import ThreadPoolExecutor
 
-    keep = _resolution_tickets()
+    todo = [i for i in items
+            if i.get("status") in (sprint_store.OPEN, sprint_store.HELD)]
+    if not todo:
+        return 0
+    pending = _pending_resolutions()
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        reasons = list(pool.map(
+            lambda item: _handled(item, open_ids, pending), todo))
     finished = 0
-    for item in items:
-        ticket_id = str(item.get("ticket_id") or "")
-        if (item.get("status") not in sprint_store.CARRIES
-                or ticket_id in open_ids or ticket_id in keep
-                or item.get("fix_pr")):
+    for item, why in zip(todo, reasons):
+        if not why:
             continue
-        try:
-            status = zoho_actions.ticket_status(ticket_id)
-        except Exception as exc:
-            print(f"[BATCH] status of {ticket_id} unreadable: {exc}")
-            continue
-        if not status or status in ("New", "Processing"):
-            continue
-        sprint_store.decide(item["id"], sprint_store.DONE,
-                            f"handled outside the sprint (Zoho: {status})")
+        sprint_store.decide(item["id"], sprint_store.DONE, why)
         item["status"] = sprint_store.DONE
+        item["decision"] = why
+        ticket_id = str(item.get("ticket_id") or "")
+        if ticket_id in pending:
+            release_resolutions.handled_elsewhere(ticket_id, why)
         finished += 1
     return finished
+
+
+def reconcile_working_set() -> int:
+    """sync_handled_elsewhere over every open item, reading the Zoho queue
+    once. Raises when the queue cannot be read."""
+    if not sprint_store.ready():
+        return 0
+    open_ids = {str(t.get("id")) for t in _queue()}
+    return sync_handled_elsewhere(sprint_store.working_set(), open_ids)
+
+
+def enqueue_reconcile(ticket_id: str) -> bool:
+    """Called from the Zoho update webhook. Cheap, never raises."""
+    if not ticket_id or ticket_id == "unknown":
+        return False
+    try:
+        from vomeos.worker import enqueue_event
+
+        enqueue_event(RECONCILE_KEY, {"ticket_id": str(ticket_id)},
+                      queue="support")
+        return True
+    except Exception as exc:
+        print(f"[BATCH] could not queue reconcile of {ticket_id}: {exc}")
+        return False
+
+
+def handle_reconcile(message: dict) -> dict:
+    """One ticket changed in Zoho (closed, answered, moved on)."""
+    ticket_id = str((message or {}).get("ticket_id") or "")
+    if not (ticket_id and sprint_store.ready()):
+        return {"status": "skipped"}
+    item = sprint_store.by_ticket(ticket_id)
+    if not item:
+        return {"status": "skipped", "reason": "no sprint item"}
+    finished = sync_handled_elsewhere([item], set())
+    return {"status": "ok", "finished": finished,
+            "decision": item.get("decision") if finished else ""}
 
 
 def _fresh_start(thread: str, now: datetime) -> datetime:

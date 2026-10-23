@@ -339,6 +339,17 @@ def register_all() -> None:
         description="Triage one ticket into the sprint thread",
     )
 
+    # Any Zoho update: finish the ticket's sprint item if Sam closed it,
+    # moved it on or answered it by hand. Idempotent: a finished item is
+    # left alone.
+    register_event_handler(
+        sprint_batch.RECONCILE_KEY,
+        sprint_batch.handle_reconcile,
+        queue=QUEUE,
+        time_limit=120,
+        description="Finish a sprint item handled outside the sprint",
+    )
+
     # Sam's replies in the sprint thread. Idempotent on the Slack message ts.
     register_event_handler(
         COMMAND_KEY,

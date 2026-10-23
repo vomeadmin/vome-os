@@ -1786,6 +1786,7 @@ _AUTO_REPLY_RE = re.compile(
     r"|on (vacation|holiday|leave|annual leave|parental leave|maternity leave)"
     r"|currently (away|out of (the )?office)|i am (currently )?out of"
     r"|i will be out of|réponse automatique|absence du bureau|de retour le"
+    r"|mailbox (?:is|will) not (?:be )?(?:attended|monitored)"
     r"|en (congé|vacances)"
     r")"
 )

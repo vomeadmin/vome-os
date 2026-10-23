@@ -106,6 +106,19 @@ def _finish(child_id: str, item_number, outcome: str, detail: str) -> None:
     )
 
 
+def handled_elsewhere(ticket_id: str, why: str) -> int:
+    """Sam answered or closed the ticket himself: the resolution waiting
+    for him is no longer owed, so sprint_followups stops listing it."""
+    rows = store.query(
+        f"UPDATE {TABLE} SET outcome = 'handled_by_hand', detail = :d"
+        " WHERE ticket_id = :t AND outcome IN ('drafted', 'held',"
+        " 'no_draft') RETURNING child_id",
+        {"t": str(ticket_id), "d": why[:1000]},
+        write=True,
+    )
+    return len(rows)
+
+
 def _live_release(parent: dict) -> dict:
     """The release state the watcher just proved, in the agents' words."""
     import release_watcher as rw

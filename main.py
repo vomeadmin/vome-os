@@ -793,6 +793,10 @@ async def zoho_update_webhook(request: Request):
     # reverse direction and only writes ClickUp, never the Zoho status).
     sync_zoho_to_clickup(ticket_id)
 
+    # Every update, Sam's own reply included: if he closed, moved on or
+    # answered the ticket in Zoho, its sprint item finishes (on the worker).
+    sprint_batch.enqueue_reconcile(ticket_id)
+
     return {"status": "ok"}
 
 

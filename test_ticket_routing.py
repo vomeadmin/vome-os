@@ -372,6 +372,7 @@ def test_no_acknowledgment_after_the_engineer_shipped(monkeypatch, world):
     import sprint_batch
 
     monkeypatch.setattr(sprint_batch, "_resolution_tickets", lambda: set())
+    monkeypatch.setattr(sprint_batch, "answered_in_zoho", lambda t: True)
     monkeypatch.setattr(tr, "task_state",
                         lambda filed: {"status": "on prod", "shipped": True})
     item = _item(eng_task={"id": "86x", "url": "https://cu/86x",
@@ -379,6 +380,23 @@ def test_no_acknowledgment_after_the_engineer_shipped(monkeypatch, world):
     out = sprint_thread._send(item)
     assert "nothing sent" in out and "already shipped" in out
     assert world.decided[0][1] == sprint_store.DONE
+
+
+def test_a_closed_task_nobody_told_the_client_about_stays(monkeypatch,
+                                                          world):
+    """#9441 and seven more (2026-10-22): the engineer closed the task, no
+    email went, and the ticket left the sprint as if it had."""
+    import sprint_batch
+
+    monkeypatch.setattr(sprint_batch, "_resolution_tickets", lambda: set())
+    monkeypatch.setattr(sprint_batch, "answered_in_zoho", lambda t: False)
+    monkeypatch.setattr(tr, "task_state",
+                        lambda filed: {"status": "closed", "shipped": True})
+    item = _item(eng_task={"id": "86x", "url": "https://cu/86x",
+                           "owner": "onlyg"})
+    out = sprint_thread._send(item)
+    assert "nothing sent" in out and "has not been told" in out
+    assert world.decided == [] and item["status"] == "open"
 
 
 def test_a_resolution_still_goes_after_the_engineer_shipped(monkeypatch,

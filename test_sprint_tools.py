@@ -318,7 +318,30 @@ def test_the_engineer_summary_carries_the_code_check():
 # The queue and the follow-ups
 # ---------------------------------------------------------------------------
 
-def test_queue_groups_like_the_sprint(monkeypatch):
+@pytest.fixture
+def zoho(monkeypatch):
+    """Zoho as the reconcile reads it: status per ticket, and the newest
+    (inbound, outbound) per ticket. Unknown tickets are Processing with
+    nothing sent."""
+    import zoho_actions
+
+    class Z:
+        status: dict = {}
+        threads: dict = {}
+        decided: list = []
+
+    Z.status, Z.threads, Z.decided = {}, {}, []
+    monkeypatch.setattr(zoho_actions, "ticket_status",
+                        lambda t: Z.status.get(t, "Processing"))
+    monkeypatch.setattr(zoho_actions, "last_exchange",
+                        lambda t, skip=None: Z.threads.get(
+                            t, ({}, {})))
+    monkeypatch.setattr(sprint_store, "decide",
+                        lambda i, s, d: Z.decided.append((i, s, d)))
+    return Z
+
+
+def test_queue_groups_like_the_sprint(monkeypatch, zoho):
     items = [_item(1), _item(2, draft="", draft_status="none",
                              category="needs_human",
                              card={"live_question": "q"}),
@@ -335,6 +358,41 @@ def test_queue_groups_like_the_sprint(monkeypatch):
     assert out["counts"]["quiet"] == 1
     assert out["ready_to_send"][0]["draft"] == DRAFT
     assert out["untriaged_open_tickets"] == 1
+
+
+def test_queue_never_lists_what_sam_answered_or_closed_in_zoho(
+        monkeypatch, zoho):
+    """2026-10-22: a Claude.ai sprint showed tickets Sam had already
+    answered and closed by hand (lesson L27)."""
+    items = [_item(1), _item(2), _item(3)]
+    zoho.threads["56940001"] = ({"createdTime": "2026-10-21T18:38:00Z"},
+                                {"createdTime": "2026-10-21T19:56:00Z"})
+    zoho.status["56940002"] = "Closed"
+    monkeypatch.setattr(sprint_store, "ready", lambda: True)
+    monkeypatch.setattr(sprint_store, "working_set", lambda: items)
+    monkeypatch.setattr(sprint_batch, "_queue",
+                        lambda pages=None: [{"id": "56940001"},
+                                            {"id": "56940003"}])
+    monkeypatch.setattr(store, "query", lambda *a, **k: [])
+    out = sprint_tools.sprint_queue()
+    listed = [i["item"] for i in out["ready_to_send"]]
+    assert listed == [3]
+    assert sorted(d[2] for d in zoho.decided) == [
+        "handled outside the sprint (Zoho: Closed)", sprint_batch.ANSWERED]
+
+
+def test_an_unreadable_queue_finishes_nothing(monkeypatch, zoho):
+    monkeypatch.setattr(sprint_store, "ready", lambda: True)
+    monkeypatch.setattr(sprint_store, "working_set", lambda: [_item(1)])
+
+    def boom(pages=None):
+        raise RuntimeError("Zoho 500")
+
+    monkeypatch.setattr(sprint_batch, "_queue", boom)
+    monkeypatch.setattr(store, "query", lambda *a, **k: [])
+    out = sprint_tools.sprint_queue()
+    assert zoho.decided == [] and out["counts"]["ready"] == 1
+    assert out["untriaged_open_tickets"].startswith("unknown")
 
 
 def test_production_owner():
@@ -389,7 +447,35 @@ def test_find_by_ticket_number(db):
     assert ticket_id == "569400009500" and found["id"] == item["id"]
 
 
-def test_followups_list_owed_replies_and_waiting_prs(db):
+def test_followups_drop_a_resolution_sam_answered_by_hand(db, monkeypatch):
+    import zoho_actions
+
+    _upsert("569400009436")
+    store.execute(
+        "INSERT INTO vomeos_release_resolutions (child_id, parent_id,"
+        " ticket_id, ticket_number, outcome, created_at) VALUES ('c1',"
+        " 'p1', '569400009436', '9436', 'drafted', '2026-10-20 12:00')")
+    monkeypatch.setattr(zoho_actions, "ticket_status",
+                        lambda t: "Processing")
+    exchange = ({"createdTime": "2026-10-19T10:00:00Z"},
+                {"createdTime": "2026-10-20T15:00:00Z"})
+    monkeypatch.setattr(zoho_actions, "last_exchange",
+                        lambda t, skip=None: exchange)
+    out = sprint_tools.sprint_followups()
+    assert out["replies_owed_for_shipped_work"] == []
+    row = store.query("SELECT outcome FROM vomeos_release_resolutions")[0]
+    assert row["outcome"] == "handled_by_hand"
+    assert sprint_store.by_ticket("569400009436")["status"] == \
+        sprint_store.DONE
+
+
+def test_followups_list_owed_replies_and_waiting_prs(db, monkeypatch):
+    import zoho_actions
+
+    monkeypatch.setattr(zoho_actions, "ticket_status",
+                        lambda t: "Processing")
+    monkeypatch.setattr(zoho_actions, "last_exchange",
+                        lambda t, skip=None: ({}, {}))
     owed = _upsert("569400009436")
     store.execute(
         "INSERT INTO vomeos_release_resolutions (child_id, parent_id,"
