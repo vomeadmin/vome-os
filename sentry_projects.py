@@ -20,8 +20,8 @@ THE THING THAT IS NOT OBVIOUS FROM THE SENTRY UI
 We separate dev from prod BY PROJECT, not by the `environment` tag. Every
 repository has a pair named after it, `<repo>-prod` and `<repo>-dev`, using
 the names we use locally: django-core, django-db, django-chats,
-django-integrations, vome-react and vome-app. Sentry teams group them by
-layer (backend, web, mobile).
+django-integrations, vome-react, landing-page and vome-app. Sentry teams
+group them by layer (backend, web, mobile).
 
 The projects were renamed to that convention on 2026-10-23. Before then they
 were `prod-vome`/`dev-vome-app` (core), `prod-volunteer-database`/
@@ -115,7 +115,7 @@ class Project:
 
 
 # ---------------------------------------------------------------------------
-# The table. Twelve Sentry projects, six repositories, a pair each.
+# The table. Fourteen Sentry projects, seven repositories, a pair each.
 # ---------------------------------------------------------------------------
 
 _PROJECTS: tuple[Project, ...] = (
@@ -279,6 +279,30 @@ _PROJECTS: tuple[Project, ...] = (
         ref="develop",
         notes="No events yet. Same build-time DSN cause as vome-react-prod.",
     ),
+    # The marketing site, Astro, static on S3 and CloudFront. Projects created
+    # 2026-10-23 for broken scripts and failed contact form submissions.
+    Project(
+        slug="landing-page-prod",
+        repo="vome-landing-page",
+        host=GITHUB,
+        owner="vomeadmin",
+        stack=FRONTEND,
+        production=True,
+        channel_env="SLACK_CHANNEL_ENG_FRONTEND",
+        # cicd-prod.yml deploys on push to `master`.
+        ref="master",
+    ),
+    Project(
+        slug="landing-page-dev",
+        repo="vome-landing-page",
+        host=GITHUB,
+        owner="vomeadmin",
+        stack=FRONTEND,
+        production=False,
+        channel_env="SLACK_CHANNEL_ENG_FRONTEND",
+        ref="develop",
+        notes="Same repo as landing-page-prod, different branch.",
+    ),
     # The mobile app, React Native.
     #
     # Confirmed from an event's App context: build `com.vomeinc.vomemobile`,
@@ -329,6 +353,8 @@ RECEIVING_NOTHING = (
     "django-integrations-dev",
     "vome-react-prod",
     "vome-react-dev",
+    "landing-page-prod",
+    "landing-page-dev",
     "vome-app-dev",
 )
 
@@ -445,6 +471,7 @@ _FIX_TARGETS = {
     "vomedjango-chats-app": "development",
     "vomedjango-integrations-app": "development",
     "vome-react": "develop",
+    "vome-landing-page": "develop",
     "VomeApp": "development",
 }
 

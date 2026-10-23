@@ -90,13 +90,13 @@ def test_every_real_project_is_mapped(monkeypatch):
     _clear(monkeypatch)
     repos = (
         "django-core", "django-db", "django-chats", "django-integrations",
-        "vome-react", "vome-app",
+        "vome-react", "landing-page", "vome-app",
     )
     for repo in repos:
         for env in ("prod", "dev"):
             slug = f"{repo}-{env}"
             assert sentry_projects.route(slug).slug == slug
-    assert len(sentry_projects.all_projects()) == 12
+    assert len(sentry_projects.all_projects()) == 14
 
 
 def test_pre_rename_slugs_route_to_the_renamed_project(monkeypatch):
@@ -383,6 +383,7 @@ def test_repos_in_scope_is_what_code_repos_must_contain(monkeypatch):
     _clear(monkeypatch)
     assert sentry_projects.repos_in_scope() == (
         "VomeApp",
+        "vome-landing-page",
         "vome-react",
         "vomedjango-chats-app",
         "vomedjango-database-app",

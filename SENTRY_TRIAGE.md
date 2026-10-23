@@ -72,7 +72,7 @@ Bitbucket will not.
 
 ## The projects, and the thing that is not obvious about them
 
-**Twelve** Sentry projects, six repositories, named `<repo>-prod` and
+**Fourteen** Sentry projects, seven repositories, named `<repo>-prod` and
 `<repo>-dev` after the names we use locally. Sentry teams group them by
 layer: Backend, Web, Mobile. The table lives in `sentry_projects.py`.
 
@@ -93,6 +93,8 @@ so older ledger rows and allowlists still route.
 | `django-integrations-prod` | Backend | same repo | `main` (unconfirmed) | Bitbucket | **none** |
 | `vome-react-dev` | Web | `vomeadmin/vome-react` | `develop` | GitHub | **none** |
 | `vome-react-prod` | Web | same repo | `master` (unconfirmed) | GitHub | **none** |
+| `landing-page-dev` | Web | `vomeadmin/vome-landing-page` | `develop` | GitHub | **none** |
+| `landing-page-prod` | Web | same repo | `master` | GitHub | **none** |
 | `vome-app-dev` | Mobile | `vomeadmin/VomeApp` | `development` | GitHub | **none** |
 | `vome-app-prod` | Mobile | same repo | `master` | GitHub | yes |
 
