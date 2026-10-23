@@ -1286,7 +1286,12 @@ def _redraft(item: dict, notes: str) -> str:
             f"```{draft['text']}```")
 
 
-def _send(item: dict) -> str:
+def _send(item: dict, sam_wrote: bool = False) -> str:
+    """`sam_wrote`: the text is Sam's own (send_ticket_reply with `text`).
+    It still passed every outbound guard in _check_draft; only the stale
+    acknowledgment check is skipped, because Sam writing the reply is the
+    outcome that check waits for (#9549, #9575 on 2026-10-23: corrected
+    answers refused as "the team is on it")."""
     import zoho_actions
 
     n = item.get("number")
@@ -1301,7 +1306,7 @@ def _send(item: dict) -> str:
     if not draft or item.get("draft_status") != "ok":
         return (f"*{n}.* has no ready draft ({item.get('draft_status')}). "
                 f"Use `edit {n}: ...` or `redraft {n}: ...` first.")
-    shipped = _engineer_shipped(item)
+    shipped = "" if sam_wrote else _engineer_shipped(item)
     if shipped:
         return shipped
 

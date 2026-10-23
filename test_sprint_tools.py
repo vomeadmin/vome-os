@@ -88,7 +88,7 @@ def test_a_send_needs_sams_own_words(sam, one):
 def test_send_uses_the_one_guarded_send_path(sam, one, monkeypatch):
     sent = []
     monkeypatch.setattr(sprint_thread, "_send",
-                        lambda item: sent.append(item["id"])
+                        lambda item, sam_wrote=False: sent.append(item["id"])
                         or "*4.* sent to ana@ms.org.")
     out = sprint_tools.send_ticket_reply("9604", "yes send it", SAM)
     assert sent == [104] and out["sent"] is True
@@ -108,7 +108,8 @@ def test_an_edited_reply_is_guarded_and_teaches(sam, one, monkeypatch):
                         lambda item, b, a, said: learned.append(a) or
                         "\n:brain: Learned L2")
     monkeypatch.setattr(sprint_thread, "_send",
-                        lambda item: f"sent to x with {item['draft'][:8]}")
+                        lambda item, sam_wrote=False:
+                        f"sent to x with {item['draft'][:8]}")
     out = sprint_tools.send_ticket_reply(
         "9604", "send this instead", SAM, text="Use the People tab.")
     assert stored[0].startswith("Hi Ana,") and "Sam | Vome team" in stored[0]
@@ -124,7 +125,8 @@ def test_an_edit_a_guard_blocks_is_not_sent(sam, one, monkeypatch):
     monkeypatch.setattr(sprint_store, "set_draft", lambda *a, **k: None)
     monkeypatch.setattr(sprint_thread, "_learn", lambda *a: "")
     sent = []
-    monkeypatch.setattr(sprint_thread, "_send", lambda i: sent.append(i))
+    monkeypatch.setattr(sprint_thread, "_send",
+                        lambda i, sam_wrote=False: sent.append(i))
     with pytest.raises(RequestError, match="held by a guard"):
         sprint_tools.send_ticket_reply("9604", "send", SAM,
                                        text="We fixed it.")

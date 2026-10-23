@@ -65,13 +65,14 @@ def _reanalyse(limit: int) -> None:
 
     rows = store.query(
         f"SELECT * FROM {sentry_ledger.TABLE}"
-        " WHERE project = 'prod-vome' AND verdict = 'actionable'"
+        " WHERE project IN ('django-core-prod', 'prod-vome')"
+        " AND verdict = 'actionable'"
         " ORDER BY times_seen DESC NULLS LAST, last_seen_at DESC"
         " LIMIT :limit",
         {"limit": limit},
     )
     if not rows:
-        print("no actionable prod-vome issues in the ledger", flush=True)
+        print("no actionable django-core-prod issues in the ledger", flush=True)
         return
 
     for row in rows:

@@ -552,7 +552,7 @@ def send_ticket_reply(ticket: str, sam_said: str, caller: str,
             _refuse(f"the edited reply is held by a guard ({why}); nothing "
                     "was sent")
         item = sprint_store.get_item(item["id"])
-    result = sprint_thread._send(item)
+    result = sprint_thread._send(item, sam_wrote=bool(text.strip()))
     return {"result": result, "lesson": learned.strip(),
             "sent": " sent to " in result}
 

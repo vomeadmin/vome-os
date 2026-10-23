@@ -467,6 +467,28 @@ def test_a_closed_task_nobody_told_the_client_about_stays(monkeypatch,
     assert world.decided == [] and item["status"] == "open"
 
 
+def test_sams_own_reply_is_the_outcome_and_skips_the_stale_ack_check(
+        monkeypatch, world):
+    """#9549 and #9575 (2026-10-23): Sam's corrected answers were refused
+    as 'the team is on it' because the engineer task was closed."""
+    import sprint_batch
+
+    monkeypatch.setattr(sprint_batch, "_resolution_tickets", lambda: set())
+    monkeypatch.setattr(tr, "task_state",
+                        lambda filed: pytest.fail("not asked for Sam's text"))
+    # Past the guard, stop at the next check (a newer customer message)
+    # so nothing is really sent.
+    import zoho_actions
+
+    monkeypatch.setattr(zoho_actions, "latest_inbound",
+                        lambda tid: {"id": "newer"})
+    item = _item(eng_task={"id": "86x", "url": "https://cu/86x",
+                           "owner": "onlyg"})
+    out = sprint_thread._send(item, sam_wrote=True)
+    assert "has not been told" not in out
+    assert "written again" in out
+
+
 def test_a_resolution_still_goes_after_the_engineer_shipped(monkeypatch,
                                                             world):
     import sprint_batch

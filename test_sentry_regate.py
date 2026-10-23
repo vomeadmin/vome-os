@@ -213,8 +213,9 @@ def test_the_sweep_asks_the_ledger_for_the_currently_triaged_projects(
 
     monkeypatch.setattr(sentry_ledger, "claim_regate", fake_claim)
     handler.run_regate_sweep()
-    assert asked["slugs"] == ("prod-vome",)
-    assert asked["slugs"] == sentry_projects.triaged_slugs()
+    # The renamed project, plus its old slug for rows gated before the rename.
+    assert asked["slugs"] == ("django-core-prod", "prod-vome")
+    assert sentry_projects.triaged_slugs() == ("django-core-prod",)
 
 
 def test_the_gate_is_the_same_one_the_webhook_uses(monkeypatch):

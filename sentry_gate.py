@@ -287,7 +287,7 @@ def check(signal: IssueSignal) -> Decision:
             "project_unmapped",
             f"{signal.project or 'unset'} is not in sentry_projects.py",
         )
-    if signal.project not in project_allowlist():
+    if known.slug not in project_allowlist():
         rule = "project_dev" if not known.production else "project_excluded"
         return Decision(
             False, rule, f"{signal.project} is not triaged"
