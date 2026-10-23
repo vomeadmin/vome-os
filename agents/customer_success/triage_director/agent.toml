@@ -40,7 +40,9 @@ images = 6
 # Read-only code access (vomeos/tools.py). The card is internal, so this is
 # allowed; the drafter that writes to customers is never given it.
 tools = ["search_code", "read_code_file", "recent_commits"]
-max_tool_calls = 10
+# 14, not 10. #9612 spent all ten on core and never opened the web
+# component that held the filter, so the card came back "unclear".
+max_tool_calls = 14
 requires_context = [
     "ticket_number",
     "account",

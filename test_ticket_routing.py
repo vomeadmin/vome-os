@@ -407,6 +407,58 @@ def test_a_ticket_that_works_again_is_never_an_incident(monkeypatch):
         "now") == {}
 
 
+_SITES_CARD = {"situation": "An admin cannot assign sites to volunteer "
+                            "profiles. The Assign sites popup shows no "
+                            "results for her.",
+               "live_question": "Why can she not see the sites?"}
+
+
+def _matcher(monkeypatch, data):
+    import vomeos
+
+    class R:
+        ok = True
+
+    R.data = data
+    monkeypatch.setattr(vomeos, "run_agent", lambda *a, **k: R())
+    monkeypatch.setattr(sprint_store, "recent", lambda h=24: [])
+
+
+def test_a_pair_that_matches_each_other_is_not_the_new_tickets_incident(
+        monkeypatch):
+    """#9612 joined #9607 because #9607 and #9611 were the same email
+    change as each other. The evidence came from them, not from #9612."""
+    import shadow_triage
+
+    _matcher(monkeypatch, {
+        "same_as": [9607], "sentry_issue": "", "confidence": "high",
+        "symptom": "Admin account email change request for Kumbi Matongo",
+        "new_ticket_evidence": "email change request for Kumbi Matongo"})
+    assert shadow_triage.match_incident(
+        "9612", "Sarasota County", _SITES_CARD, "now") == {}
+
+
+def test_a_ticket_match_without_new_ticket_evidence_is_dropped(monkeypatch):
+    import shadow_triage
+
+    _matcher(monkeypatch, {"same_as": [9607], "sentry_issue": "",
+                           "confidence": "high", "symptom": "x"})
+    assert shadow_triage.match_incident(
+        "9612", "Sarasota County", _SITES_CARD, "now") == {}
+
+
+def test_a_match_quoting_the_new_ticket_still_counts(monkeypatch):
+    import shadow_triage
+
+    _matcher(monkeypatch, {
+        "same_as": [9615], "sentry_issue": "", "confidence": "high",
+        "symptom": "Assign sites popup is empty",
+        "new_ticket_evidence": "The Assign sites popup shows no results"})
+    out = shadow_triage.match_incident(
+        "9612", "Sarasota County", _SITES_CARD, "now")
+    assert out["key"] == "tickets:9612" and out["same_as"] == ["9615"]
+
+
 class _PastTheStatusCheck(Exception):
     pass
 
