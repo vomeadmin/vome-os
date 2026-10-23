@@ -21,6 +21,9 @@ From the playbook, learned the hard way:
     Zoho does not add secondary contacts on its own (Kimberly Crest, #9313)
   * never pull an address out of an earlier, forwarded part of the thread
   * never copy our own support mailbox back to itself
+  * keep a Vome teammate (Ron) copied when any client message on the ticket
+    was addressed or copied to them, even if the newest one dropped them.
+    The client put Ron on To, not CC, and the reply dropped him (#9610)
 """
 
 from __future__ import annotations
@@ -77,6 +80,37 @@ def emails_in(value) -> list[str]:
 
 def _ours(address: str) -> bool:
     return any(token in address for token in _OUR_MAILBOXES)
+
+
+_TEAM_DOMAINS = ("@vomevolunteer.com", "@vomevolunteer.co")
+# Shared inboxes, and Sam, who answers from the desk and sees every reply.
+_NOT_TEAMMATES = {
+    "admin@vomevolunteer.com", "sam@vomevolunteer.com",
+    "s.fagen@vomevolunteer.com", "s.fagen@vomevolunteer.co",
+}
+
+
+def teammates_copied(threads: list[dict]) -> list[str]:
+    """Vome teammates a message on the ticket was addressed or copied to.
+    Forwards (a ticket sent on to an engineer) do not count."""
+    found: list[str] = []
+    for t in threads:
+        if t.get("isForward"):
+            continue
+        for address in emails_in(t.get("to")) + emails_in(t.get("cc")):
+            if (address.endswith(_TEAM_DOMAINS) and not _ours(address)
+                    and address not in _NOT_TEAMMATES
+                    and address not in found):
+                found.append(address)
+    return found
+
+
+def ticket_teammates(ticket_id: str) -> list[str]:
+    """teammates_copied for one ticket, [] if the thread cannot be read."""
+    try:
+        return teammates_copied(_threads(ticket_id))
+    except Exception:
+        return []
 
 
 def first_name(author: str, email: str = "", given: str = "") -> str:
@@ -153,7 +187,8 @@ def _secondary_emails(ticket_id: str) -> list[str]:
 
 def recipients(ticket_id: str) -> dict:
     """{"to", "cc", "first_name", "thread_id"} for a reply to this ticket."""
-    latest = latest_inbound(ticket_id)
+    threads = _threads(ticket_id)
+    latest = _newest(threads, "in")
     # Web-form tickets (channel WEB) carry no fromEmailAddress; the address
     # is only on the author.
     sender = (emails_in(latest.get("fromEmailAddress"))
@@ -162,7 +197,8 @@ def recipients(ticket_id: str) -> dict:
     author = (latest.get("author") or {}).get("name") or ""
     given = (latest.get("author") or {}).get("firstName") or ""
     cc: list[str] = []
-    for address in emails_in(latest.get("cc")) + _secondary_emails(ticket_id):
+    for address in (emails_in(latest.get("cc")) + _secondary_emails(ticket_id)
+                    + teammates_copied(threads)):
         if address != to and not _ours(address) and address not in cc:
             cc.append(address)
     return {

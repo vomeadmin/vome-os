@@ -333,6 +333,15 @@ def _extract_ticket_fields(raw_result: dict) -> dict:
     )
 
     cc_email = _ticket_cc_emails(ticket, exclude=contact_email)
+    # A teammate the client wrote to (Ron, #9610) stays on every reply.
+    # _ticket_cc_emails drops all Vome addresses, so add them back here.
+    if ticket.get("id"):
+        import zoho_actions
+        cc = [e for e in cc_email.split(",") if e]
+        for email in zoho_actions.ticket_teammates(str(ticket["id"])):
+            if email.lower() not in {c.lower() for c in cc}:
+                cc.append(email)
+        cc_email = ",".join(cc)
 
     # Origin signals — distinguish a client-submitted ticket (inbound email /
     # web form) from one an agent created by hand inside Zoho Desk. Zoho marks
