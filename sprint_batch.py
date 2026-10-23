@@ -932,6 +932,10 @@ def _handled(item: dict, open_ids: set, pending: dict) -> str:
     import zoho_actions
 
     ticket_id = str(item.get("ticket_id") or "")
+    # Taken off an engineer's plate by the backlog sweep: the ticket is In
+    # Progress on purpose, and only an answer sent after it joined the
+    # sprint finishes it (an older acknowledgment does not).
+    adopted = bool((item.get("card") or {}).get("backlog_sweep"))
     try:
         status = ("Processing" if ticket_id in open_ids
                   else zoho_actions.ticket_status(ticket_id))
@@ -939,7 +943,7 @@ def _handled(item: dict, open_ids: set, pending: dict) -> str:
             return ""
         if status == "Closed":
             return f"handled outside the sprint (Zoho: {status})"
-        if status not in ("New", "Processing"):
+        if status not in ("New", "Processing") and not adopted:
             # In Progress or Awaiting Client Response. A resolution waiting
             # to be sent, or an agent fix PR, stays: those tickets sit In
             # Progress while the fix is built, and the client is owed news.
@@ -948,7 +952,9 @@ def _handled(item: dict, open_ids: set, pending: dict) -> str:
             return f"handled outside the sprint (Zoho: {status})"
         # A resolution is answered only by something sent after it was
         # drafted, not by the acknowledgment before the fix.
-        if answered_in_zoho(ticket_id, _parse_time(pending.get(ticket_id))):
+        since = (_parse_time(item.get("updated_at")) if adopted
+                 else _parse_time(pending.get(ticket_id)))
+        if answered_in_zoho(ticket_id, since):
             return ANSWERED
     except Exception as exc:
         print(f"[BATCH] {ticket_id} unreadable, kept: {exc}")

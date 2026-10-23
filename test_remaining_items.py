@@ -724,6 +724,25 @@ def test_a_resolution_is_answered_only_after_it_was_drafted(zoho_status):
     assert RESOLVED == [("RES", sprint_batch.ANSWERED)]
 
 
+def test_a_ticket_taken_from_an_engineer_stays_until_answered(zoho_status):
+    """backlog_sweep `apply answer` adopts In Progress tickets on purpose;
+    our acknowledgment from before it joined the sprint does not count."""
+    statuses, decided = zoho_status
+    statuses["B"] = "In Progress"
+    EXCHANGES["B"] = _exchange("2026-10-10T10:00:00.000Z",
+                               "2026-10-11T10:00:00.000Z")
+    item = _item(1, ticket_id="B", updated_at=datetime(2026, 10, 23, 2, 0),
+                 card={"live_question": "q", "backlog_sweep": "868abc"})
+    assert sprint_batch.sync_handled_elsewhere([item], set()) == 0
+    EXCHANGES["B"] = _exchange("2026-10-10T10:00:00.000Z",
+                               "2026-10-23T15:00:00.000Z")
+    assert sprint_batch.sync_handled_elsewhere([item], set()) == 1
+    assert decided == [(101, sprint_store.DONE, sprint_batch.ANSWERED)]
+    statuses["C"] = "Closed"
+    closed = _item(2, ticket_id="C", card={"backlog_sweep": "868def"})
+    assert sprint_batch.sync_handled_elsewhere([closed], set()) == 1
+
+
 def test_an_item_the_agent_is_fixing_is_left_alone(zoho_status):
     statuses, decided = zoho_status
     statuses["F"] = "Closed"
