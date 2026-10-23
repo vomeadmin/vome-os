@@ -4,11 +4,9 @@ description: Before choosing a lane for a bug or a "does it work like this" ques
 owner: support
 ---
 
-On 2026-10-16 the code overturned two of the first eight triage calls. One
-card said "open a task" for a crash the app already recovers from; another
-followed an earlier reply that blamed the mobile app, when admin assignments
-simply bypass the overlap rule by design. Both cards read well. The code is
-what made them right.
+On 2026-10-16 the code overturned two of the first eight triage calls. Both
+cards read well. The code is what made them right. The goal is a card exact
+enough that a fix PR opens without anyone sitting down to it.
 
 **When to check.** Every clear_bug, vague_bug and user_education ticket, and
 any ticket where "is this a bug or how it works" decides the lane. Skip it
@@ -23,9 +21,17 @@ for misdirected, account deletion, email updates and billing.
    list `src/views/org/<area>` and read from there.
 2. Read the lines around the hit. Read the function, not just the line.
 3. If something looks recently broken, check recent commits on that path.
+4. **Trace what the customer did.** "I tried them and then removed them"
+   names an action: search for its endpoint (`remove`, `archive`, `delete`
+   plus the object) and see what it does to the rows. A remove that only
+   empties a field or switches a flag off leaves the record in place, and
+   anything still counting it is a bug (#9501, L37).
+5. **A fix we shipped did not help?** Read what it changed, then find the
+   path it missed. That path, with its line, is the card.
 
 Stop once you can answer, or when the budget runs low. Three good reads beat
-eight shallow ones.
+eight shallow ones. "I could not read how X works" is never a finding while
+calls remain: read X.
 
 **Add this to the card:**
 
@@ -43,8 +49,9 @@ eight shallow ones.
 
 **The verdict decides whether a fix is made (Sam, 2026-10-18).**
 
-- **bug**: the code does not do what it was built to do. A low-risk bug at
-  high or medium confidence becomes a pull request with no one asking.
+- **bug**: the code does not do what it was built to do. A low or medium
+  risk bug at high or medium confidence becomes a pull request with no one
+  asking.
 - **works_as_designed**: it does what it was built to do; the customer
   expected something else. That is a how-to answer, never a fix.
 - **design_question**: it does what it was built to do, but that behaviour
@@ -68,9 +75,19 @@ card called that deliberate.
   what they read.
 
 `where` is exactly `repo:path:line`, nothing after it; commentary goes in
-`finding`. `fix_risk` is low only when the change is small, local, has no
-migration, and does not touch auth, billing, permissions or shared data
-paths.
+`finding`.
+
+**fix_risk decides who acts (Sam, 2026-10-22).**
+
+- **low**: a small local logic change that writes nothing new. PR, Sam
+  merges.
+- **medium**: changes what gets written or deleted, or spans a few files,
+  with no migration and nothing on the high list. PR, reviewed and merged
+  by OnlyG (backend) or Sanjay (web, mobile).
+- **high**: a migration, auth, permissions, billing, bulk data changes, or
+  more than one repository. Engineer task with the exact line, no PR.
+
+Pick by the change, not by how serious the bug is.
 
 **Let it change your call.** works_as_designed with high confidence makes a
 "bug" a user_education. A bug the code confirms belongs in clear_bug even if

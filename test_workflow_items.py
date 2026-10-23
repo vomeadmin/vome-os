@@ -284,7 +284,7 @@ GOOD = {"code_check": {"verdict": "bug", "confidence": "high",
     ({"verdict": "works_as_designed"}, "verdict"),
     ({"verdict": "design_question"}, "Sam's decision"),
     ({"confidence": "low"}, "confidence"),
-    ({"fix_risk": "medium"}, "risk"),
+    ({"fix_risk": "high"}, "risk"),
     ({"fix": ""}, "fix"),
     # #9415's card: a path with commentary is not a location to fix at.
     ({"where": "web:src/views/org/orgSequences (exact render path not "
@@ -312,7 +312,7 @@ def test_sam_can_ask_for_a_design_question_fix_but_not_a_risky_one():
                                "confidence": "low"}}
     assert ticket_fix.should_attempt(question)[0] is False
     assert ticket_fix.should_attempt(question, sam_approved=True)[0] is True
-    risky = {"code_check": {**question["code_check"], "fix_risk": "medium"}}
+    risky = {"code_check": {**question["code_check"], "fix_risk": "high"}}
     assert ticket_fix.should_attempt(risky, sam_approved=True)[0] is False
 
 
@@ -321,13 +321,13 @@ def test_sams_fix_may_retry_and_skips_the_daily_cap(monkeypatch):
     import sentry_fix
 
     monkeypatch.setenv("TICKET_FIX_ENABLED", "true")
-    monkeypatch.setattr(ticket_fix, "_attempted", lambda t: True)
+    monkeypatch.setattr(ticket_fix, "_attempted", lambda t, th="": True)
     monkeypatch.setattr(ticket_fix, "_opened_today", lambda: 99)
     monkeypatch.setattr(ticket_fix, "_record", lambda *a, **k: None)
     monkeypatch.setattr(sentry_code, "gather",
                         lambda *a, **k: {"files": "src"})
     monkeypatch.setattr(sentry_fix, "propose",
-                        lambda a, c: {"attempted": True, "diff": "d"})
+                        lambda a, c, **k: {"attempted": True, "diff": "d"})
     monkeypatch.setattr(sentry_fix, "open_pull_request",
                         lambda i, p, c: {"opened": True,
                                          "url": "https://bb/pr/8"})
@@ -349,13 +349,13 @@ def test_propose_opens_a_pr_and_files_tasks(monkeypatch):
 
     filed = []
     monkeypatch.setenv("TICKET_FIX_ENABLED", "true")
-    monkeypatch.setattr(ticket_fix, "_attempted", lambda t: False)
+    monkeypatch.setattr(ticket_fix, "_attempted", lambda t, th="": False)
     monkeypatch.setattr(ticket_fix, "_opened_today", lambda: 0)
     monkeypatch.setattr(ticket_fix, "_record", lambda *a, **k: None)
     monkeypatch.setattr(sentry_code, "gather",
                         lambda *a, **k: {"files": "src"})
     monkeypatch.setattr(sentry_fix, "propose",
-                        lambda a, c: {"attempted": True, "diff": "d"})
+                        lambda a, c, **k: {"attempted": True, "diff": "d"})
     monkeypatch.setattr(sentry_fix, "open_pull_request",
                         lambda i, p, c: {"opened": True,
                                          "url": "https://bb/pr/7"})
@@ -369,7 +369,7 @@ def test_propose_opens_a_pr_and_files_tasks(monkeypatch):
 
 
 def test_one_attempt_per_ticket(monkeypatch):
-    monkeypatch.setattr(ticket_fix, "_attempted", lambda t: True)
+    monkeypatch.setattr(ticket_fix, "_attempted", lambda t, th="": True)
     out = ticket_fix.propose_for_ticket("T1", "9500", "x", GOOD, "u")
     assert out["reason"] == "already attempted"
 

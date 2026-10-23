@@ -19,7 +19,11 @@ WHAT IT CAN DO
 --------------
     create_branch       a new branch off an existing ref
     commit_file         write one file on that branch
-    open_pull_request   a PR from that branch into a non-default branch
+    open_pull_request   a PR from that branch into a non-default branch,
+                        optionally naming the engineer who reviews it
+                        (2026-10-22: medium risk agent fixes go to OnlyG or
+                        Sanjay). Naming them is part of opening the PR, so
+                        there is still no call that reaches an existing one.
 
 WHAT IT CANNOT DO, STRUCTURALLY
 -------------------------------
@@ -202,20 +206,54 @@ class BitbucketWriter(Connector):
         )
 
     def open_pull_request(
-        self, repo: str, branch: str, target: str, title: str, body: str
+        self, repo: str, branch: str, target: str, title: str, body: str,
+        reviewers: tuple[str, ...] = (),
     ) -> IntegrationResult:
+        """`reviewers` are member uuids (see `member_uuid`)."""
         _check(repo, branch=branch, target=target)
+        payload = {
+            "title": title,
+            "description": body,
+            "source": {"branch": {"name": branch}},
+            "destination": {"branch": {"name": target}},
+            "close_source_branch": True,
+        }
+        if reviewers:
+            payload["reviewers"] = [{"uuid": uuid} for uuid in reviewers]
         return self._call(
             "open_pull_request", "POST",
             f"/repositories/{self.workspace}/{repo}/pullrequests",
-            json_body={
-                "title": title,
-                "description": body,
-                "source": {"branch": {"name": branch}},
-                "destination": {"branch": {"name": target}},
-                "close_source_branch": True,
-            },
+            json_body=payload,
         )
+
+    def member_uuid(self, name: str, display: str = "") -> str:
+        """A workspace member's uuid, to name them as reviewer. Read only.
+
+        `VOMEOS_BITBUCKET_UUID_<NAME>` wins. Otherwise the one member whose
+        display name or nickname contains `display`. "" when that is not
+        exactly one person, since asking the wrong person is worse than
+        asking nobody.
+        """
+        override = os.environ.get(f"VOMEOS_BITBUCKET_UUID_{name.upper()}", "")
+        if override:
+            return override
+        if not display:
+            return ""
+        result = self._call(
+            "member_uuid", "GET", f"/workspaces/{self.workspace}/members",
+            params={"pagelen": 100},
+        )
+        if not result.ok or not isinstance(result.data, dict):
+            return ""
+        wanted = display.lower()
+        found = []
+        for member in result.data.get("values") or []:
+            user = member.get("user") or {}
+            names = (f"{user.get('display_name') or ''} "
+                     f"{user.get('nickname') or ''}").lower()
+            if wanted in names and user.get("uuid"):
+                found.append(user["uuid"])
+        return found[0] if len(found) == 1 else ""
 
 
 # ---------------------------------------------------------------------------
@@ -341,11 +379,15 @@ class GitHubWriter(Connector):
 
     def open_pull_request(
         self, repo: str, branch: str, target: str, title: str, body: str,
-        owner: str = "",
+        owner: str = "", assignee: str = "",
     ) -> IntegrationResult:
+        """`assignee` is a login. A PR is an issue on GitHub, and assigning
+        it goes through the issues endpoint, which notifies them. The
+        result's data gains `assigned` (True or False); a failed assignment
+        never fails the PR."""
         _check(repo, branch=branch, target=target)
         who = owner or self.owner
-        return self._call(
+        opened = self._call(
             "open_pull_request", "POST", f"/repos/{who}/{repo}/pulls",
             json_body={
                 "title": title, "body": body,
@@ -353,6 +395,16 @@ class GitHubWriter(Connector):
             },
             headers=self.headers(who),
         )
+        if assignee and opened.ok and isinstance(opened.data, dict):
+            number = opened.data.get("number")
+            assigned = bool(number) and self._call(
+                "assign", "POST",
+                f"/repos/{who}/{repo}/issues/{number}/assignees",
+                json_body={"assignees": [assignee]},
+                headers=self.headers(who),
+            ).ok
+            opened.data["assigned"] = assigned
+        return opened
 
 
 def writer_for(host: str):

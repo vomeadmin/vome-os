@@ -404,8 +404,9 @@ def test_the_write_surface_is_exactly_three_operations():
     # "cannot merge" next to a merge method would pass a naive check.
     allowed = {
         "create_branch", "commit_file", "open_pull_request",
-        # Read helpers needed to perform those three.
-        "ref_sha", "file_sha", "token_for",
+        # Read helpers needed to perform those three. member_uuid finds the
+        # reviewer a medium risk PR opens with (2026-10-22).
+        "ref_sha", "file_sha", "token_for", "member_uuid",
         # Inherited from Connector.
         "configured", "headers",
     }

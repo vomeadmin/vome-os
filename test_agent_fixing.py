@@ -201,7 +201,7 @@ def test_opening_the_pr_marks_zoho(monkeypatch):
     monkeypatch.setattr(ticket_fix, "_record", lambda *a, **k: None)
     monkeypatch.setattr(ticket_fix, "_file_tasks", lambda *a: ("P1", "C1"))
     monkeypatch.setattr(sentry_code, "gather", lambda *a, **k: {"files": ""})
-    monkeypatch.setattr(sentry_fix, "propose", lambda a, c: {"diff": "d"})
+    monkeypatch.setattr(sentry_fix, "propose", lambda a, c, **k: {"diff": "d"})
     monkeypatch.setattr(sentry_fix, "open_pull_request",
                         lambda *a: {"opened": True, "url": PR})
     monkeypatch.setattr(zoho_actions, "mark_agent_fix",

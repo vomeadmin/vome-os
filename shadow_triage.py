@@ -272,6 +272,51 @@ def _drop_known_different(incident: dict, release: dict) -> dict:
     return {**incident, "same_as": keep}
 
 
+def module_of(where: str) -> str:
+    """The area a code check points at, from its `repo:path:line`.
+
+    A Django app for the backend ("core:sequence_app"), the view area for
+    the web app ("web:src/views/org/dashboard"). "" when there is no path.
+    """
+    parts = (where or "").strip().split(":")
+    if len(parts) < 2 or not parts[1].strip():
+        return ""
+    segments = [s for s in parts[1].strip().split("/") if s]
+    depth = 4 if segments and segments[0] == "src" else 1
+    return f"{parts[0].strip()}:{'/'.join(segments[:depth])}"
+
+
+def _drop_other_modules(incident: dict, card: dict) -> dict:
+    """Remove tickets whose code check points at a different module.
+
+    The matcher joined #9501 (deleting sequence fields, core sequence_app)
+    to #9608 (the recruitment workflow builder, web) at high confidence on
+    Oct 21 and sent it to the wrong engineer, though lesson L23 already
+    told it never to pair across modules. A lesson the model keeps missing
+    becomes a check: when both cards name a location and the modules
+    differ, they are not the same problem. Without both, the matcher's
+    call stands.
+    """
+    if not incident or not incident.get("same_as"):
+        return incident
+    mine = module_of((card.get("code_check") or {}).get("where") or "")
+    if not mine:
+        return incident
+    different = set()
+    for other in sprint_store.by_ticket_numbers(incident["same_as"]):
+        theirs = module_of(((other.get("card") or {}).get("code_check")
+                            or {}).get("where") or "")
+        if theirs and theirs != mine:
+            print(f"[SHADOW] not joining #{other.get('ticket_number')}: "
+                  f"{theirs} is not {mine}")
+            different.add(str(other.get("ticket_number")))
+    # A number with no stored card is kept: nothing says it differs.
+    keep = [n for n in incident["same_as"] if str(n) not in different]
+    if not keep and not incident.get("sentry_issue"):
+        return {}
+    return {**incident, "same_as": keep}
+
+
 # ---------------------------------------------------------------------------
 # Drafting
 # ---------------------------------------------------------------------------
@@ -446,6 +491,12 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
         arr = 0.0
     context.pop("_ticket_id", None)
 
+    # A caller that hands us the release is drafting the resolution for a
+    # fix already proven live (release_resolutions, shipped_untold). There
+    # is nothing left to fix on that run: #9501's Oct 20 resolution card sent
+    # the shipped fix back to the fix author, and the decline spent the
+    # ticket's attempt before the customer wrote back.
+    resolution_run = release is not None
     release = release or release_state(ticket_number, ticket_id)
     if release.get("task_id"):
         context["existing_tasks"] = (
@@ -473,6 +524,7 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
         incident = match_incident(ticket_number, context.get("account", ""),
                                   card, when)
         incident = _drop_known_different(incident, release)
+        incident = _drop_other_modules(incident, card)
     except Exception as exc:
         print(f"[SHADOW] incident check failed on {ticket_number}: {exc}")
 
@@ -540,10 +592,14 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
     import ticket_fix
     import zoho_actions as _za
 
-    fix = ticket_fix.propose_for_ticket(
-        ticket_id, ticket_number, context.get("account", ""), card,
-        _za.ticket_url(ticket_id),
-    )
+    if resolution_run:
+        fix = {"outcome": "skipped", "pr_url": "",
+               "reason": "resolution run: this ticket's fix is already live"}
+    else:
+        fix = ticket_fix.propose_for_ticket(
+            ticket_id, ticket_number, context.get("account", ""), card,
+            _za.ticket_url(ticket_id), thread_id=thread_id,
+        )
     if fix.get("pr_url"):
         sprint_store.set_fix_pr(item["id"], fix["pr_url"])
         item["fix_pr"] = fix["pr_url"]
