@@ -467,6 +467,33 @@ def test_a_closed_task_nobody_told_the_client_about_stays(monkeypatch,
     assert world.decided == [] and item["status"] == "open"
 
 
+def test_a_reply_on_a_closed_task_is_the_answer_not_in_progress(
+        monkeypatch, world):
+    """#9549 and #9575 (2026-10-23): answers on closed tasks were set to
+    In Progress 'emailed when it ships', which never happens."""
+    import shadow_triage
+    import zoho_actions
+
+    monkeypatch.setattr(shadow_triage, "release_state",
+                        lambda n, t: {"live": False})
+    monkeypatch.setattr(tr, "task_state",
+                        lambda filed: {"status": "closed", "shipped": True})
+    statuses = []
+    monkeypatch.setattr(zoho_actions, "set_status",
+                        lambda tid, s: statuses.append(s))
+    monkeypatch.setattr(zoho_actions, "set_in_progress",
+                        lambda *a: pytest.fail("not In Progress"))
+    item = _item(eng_task={"id": "86x", "url": "https://cu/86x",
+                           "owner": "onlyg"}, category="needs_human")
+    out = sprint_thread._after_send(item)
+    assert statuses == ["Awaiting Client Response"]
+    assert "emailed when it ships" not in out
+
+    statuses.clear()
+    sprint_thread._after_send({**item, "category": "user_education"})
+    assert statuses == ["Closed"]
+
+
 def test_sams_own_reply_is_the_outcome_and_skips_the_stale_ack_check(
         monkeypatch, world):
     """#9549 and #9575 (2026-10-23): Sam's corrected answers were refused

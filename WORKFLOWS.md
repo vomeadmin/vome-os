@@ -78,7 +78,7 @@ flowchart TD
 <!-- map:diagram id=sentry title="3. A production error, from Sentry to a fix" -->
 ```mermaid
 flowchart TD
-  E1["Django core errors<br/>(prod-vome)"]:::live --> WH["Sentry issue.created webhook"]:::live
+  E1["Django core errors<br/>(django-core-prod)"]:::live --> WH["Sentry issue.created webhook"]:::live
   E2["vome-react errors<br/>(DSN not in the build: zero events)"]:::broken
   E3["Chats / integrations services<br/>(no Sentry at all)"]:::broken
   E4["Mobile app (VomeApp)<br/>(source unreadable, 403)"]:::broken

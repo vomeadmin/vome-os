@@ -1443,7 +1443,12 @@ def _after_send(item: dict) -> str:
     filed = item.get("eng_task") or {}
     task = ticket_routing.task_state(filed) if filed.get("url") else {}
     declined = bool(task.get("declined"))
-    if filed.get("url") and not release.get("live") and not declined:
+    # A task the engineer already closed emails nobody later, so a reply
+    # sent now is the answer, as with a declined task. #9549 and #9575
+    # (2026-10-23) went to In Progress "emailed when it ships" on tasks
+    # that had closed days before.
+    done = declined or bool(task.get("shipped"))
+    if filed.get("url") and not release.get("live") and not done:
         reason = re.sub(r"\W+", "_", str(filed.get("reason") or "auto"))
         sprint_store.decide(item["id"], sprint_store.ROUTED,
                             f"routed to {filed.get('owner')} "
@@ -1463,6 +1468,8 @@ def _after_send(item: dict) -> str:
                     "waiting on your merge).")
         except Exception as exc:
             return f":warning: Zoho status NOT set to In Progress ({exc})."
+    # A closed task only closes the ticket when the reply is a complete
+    # answer (CLOSE_AFTER); otherwise the reply asked something and waits.
     if release.get("live") or category in CLOSE_AFTER or declined:
         status = "Closed"
     else:

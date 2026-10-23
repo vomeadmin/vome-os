@@ -361,7 +361,7 @@ def claim_regate(project_slugs, limit: int = 25) -> list[dict]:
 
     That is the anti-bombardment guarantee working correctly and producing a
     surprising result: widening SENTRY_PROJECT_ALLOWLIST appears to do
-    nothing to the backlog. Four real prod-vome bugs sat in exactly that
+    nothing to the backlog. Four real django-core-prod bugs sat in exactly that
     state on 2026-10-01.
 
     So the invariant becomes "an issue is triaged once per gate

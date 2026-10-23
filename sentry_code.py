@@ -17,11 +17,11 @@ commits that recently touched them.
 
 ON THE BRANCH THAT RAN
 ----------------------
-Every read carries the ref from `sentry_projects`. `dev-vome-app` and
-`prod-vome` are the same repository at different branches, so reading a dev
-traceback against `master` means reasoning about code nobody is running, with
-line numbers that do not match the frames. The wrong branch is worse than no
-branch, because it looks like an answer.
+Every read carries the ref from `sentry_projects`. `django-core-dev` and
+`django-core-prod` are the same repository at different branches, so reading
+a dev traceback against `master` means reasoning about code nobody is
+running, with line numbers that do not match the frames. The wrong branch is
+worse than no branch, because it looks like an answer.
 
 THE BUDGET IS THE DESIGN
 ------------------------

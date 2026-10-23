@@ -63,9 +63,10 @@ def min_level() -> str:
 # because an unexplained entry is one nobody will ever dare remove.
 IGNORED_EXCEPTION_TYPES = {
     # Transient by design: the task raises, Celery retries, it succeeds.
-    # Three of these were among the nine survivors on prod-vome, with 217
-    # events between them in a week, which made them the loudest thing in the
-    # feed and the least actionable. Confirmed transient by Sam, 2026-10-01.
+    # Three of these were among the nine survivors on django-core-prod, with
+    # 217 events between them in a week, which made them the loudest thing in
+    # the feed and the least actionable. Confirmed transient by Sam,
+    # 2026-10-01.
     #
     # The risk being accepted: a retry that NEVER succeeds now looks identical
     # to one that does, and nothing surfaces it. If mapped answers start
@@ -120,8 +121,8 @@ IGNORED_EXCEPTION_TYPES = {
 # Substrings matched against the issue title, for the errors whose type is
 # generic and whose message is the identifying part.
 IGNORED_TITLE_PATTERNS = (
-    # Browser noise, for vome-react. Its two projects (dev-vome-web and
-    # prod-vome-web) exist but receive nothing, so none of these fire yet.
+    # Browser noise, for vome-react. Its two projects (vome-react-dev and
+    # vome-react-prod) exist but receive nothing, so none of these fire yet.
     "ResizeObserver loop limit exceeded",
     "ResizeObserver loop completed with undelivered notifications",
     "Loading chunk",
@@ -163,7 +164,7 @@ IGNORED_CULPRIT_PATTERNS = tuple(
         r"/node_modules/",
         r"gtm\.js|googletagmanager|analytics\.js|fbevents\.js",
         # An engineer typing in a production Django shell. Four of the twenty
-        # new prod-vome issues in one week were this: a DoesNotExist, a
+        # new django-core-prod issues in one week were this: a DoesNotExist, a
         # FieldError on a mistyped keyword, an AttributeError on a constant
         # that does not exist, a bad UUID. All real exceptions, none of them
         # bugs in the product, and all of them from somebody exploring.
@@ -274,9 +275,9 @@ def check(signal: IssueSignal) -> Decision:
         )
 
     # 3. Project. THIS is the production filter, not the environment rule
-    # below. Dev and prod are separate Sentry projects here (prod-vome and
-    # dev-vome-app are the same codebase), so the routing table decides what
-    # is production and the environment tag is only a second line.
+    # below. Dev and prod are separate Sentry projects here (django-core-prod
+    # and django-core-dev are the same codebase), so the routing table decides
+    # what is production and the environment tag is only a second line.
     known = sentry_projects.route(signal.project)
     if known is None:
         # Not a silent drop. An unmapped project means somebody created a

@@ -73,7 +73,7 @@ def _issue(case: str) -> dict:
     if case == "noise":
         # Should be gated by the exception_type rule.
         project, title, culprit, etype, level, category = (
-            "dev-vome-app",
+            "django-core-dev",
             "DisallowedHost: Invalid HTTP_HOST header: 'scanner.example'",
             "django/http/request.py",
             "DisallowedHost",
@@ -81,9 +81,9 @@ def _issue(case: str) -> dict:
             "error",
         )
     elif case == "dev-project":
-        # Should be gated by project_dev, unless dev-vome-app is allowlisted.
+        # Gated by project_dev, unless django-core-dev is allowlisted.
         project, title, culprit, etype, level, category = (
-            "dev-volunteer-database",
+            "django-db-dev",
             "AttributeError: synthetic test from send_test_sentry_webhook",
             "apps/custom_fields/apis/v1/serializers.py",
             "AttributeError",
@@ -93,7 +93,7 @@ def _issue(case: str) -> dict:
     elif case == "performance":
         # Should be gated by issue_category.
         project, title, culprit, etype, level, category = (
-            "dev-vome-app",
+            "django-core-dev",
             "N+1 Query",
             "/api/form/institution/general-form/list/",
             "",
@@ -103,7 +103,7 @@ def _issue(case: str) -> dict:
     else:
         # The default. Should survive every rule and reach the queue.
         project, title, culprit, etype, level, category = (
-            "dev-vome-app",
+            "django-core-dev",
             "AttributeError: synthetic test from send_test_sentry_webhook",
             "opportunity_app/views.py in reserve_shift",
             "AttributeError",
