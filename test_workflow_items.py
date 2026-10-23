@@ -87,9 +87,14 @@ def test_a_question_waits_for_the_customer(after):
     assert after.statuses == [("T1", "Awaiting Client Response")]
 
 
-def test_an_acknowledgment_leaves_the_work_open(after):
-    note = sprint_thread._after_send(_item(category="clear_bug"))
-    assert after.statuses == [] and "left as it is" in note
+def test_a_sent_reply_never_stays_processing(after):
+    # #9394: an acknowledgment with nothing routed used to leave the ticket
+    # in Processing, which reads as "the customer is still owed a reply".
+    for category in ("clear_bug", "needs_human", "design_question", ""):
+        after.statuses = []
+        note = sprint_thread._after_send(_item(category=category))
+        assert after.statuses == [("T1", "Awaiting Client Response")]
+        assert "left as it is" not in note
 
 
 def test_a_zoho_failure_is_reported_not_raised(monkeypatch, after):

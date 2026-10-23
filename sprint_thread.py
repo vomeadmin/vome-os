@@ -1406,16 +1406,18 @@ def _still_fixing(item: dict) -> bool:
 # status follows from it, so nobody has to tidy two systems by hand.
 CLOSE_AFTER = {"user_education", "admin_action", "misdirected",
                "account_deletion"}
-AWAIT_AFTER = {"vague_bug", "email_update"}
 
 
 def _after_send(item: dict) -> str:
     """Zoho status and Agent Fixes closure after a sent reply.
 
     A resolution (the linked fix is Live) or an answer closes the ticket,
-    silently. A question waits for the customer. An acknowledgment leaves
-    the status alone: the work is still open. Failures are reported, never
-    raised: the email already went, and that must not look like it failed.
+    silently. A routed ticket or an agent fix in flight goes to In Progress.
+    Everything else waits for the customer. A sent reply never leaves the
+    ticket in New or Processing: Processing means the customer wrote and we
+    still owe them, which stops being true the moment this email goes
+    (Sam, #9394, 2026-10-22). Failures are reported, never raised: the email
+    already went, and that must not look like it failed.
     """
     import shadow_triage
     import zoho_actions
@@ -1450,10 +1452,8 @@ def _after_send(item: dict) -> str:
             return f":warning: Zoho status NOT set to In Progress ({exc})."
     if release.get("live") or category in CLOSE_AFTER:
         status = "Closed"
-    elif category in AWAIT_AFTER:
-        status = "Awaiting Client Response"
     else:
-        return "Zoho status left as it is (the work is still open)."
+        status = "Awaiting Client Response"
 
     notes = []
     try:
