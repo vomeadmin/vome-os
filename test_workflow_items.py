@@ -187,8 +187,9 @@ def test_only_granted_tools_are_defined():
 def test_unknown_repo_is_a_message_not_a_crash():
     from vomeos import tools
 
+    # `chats` was the example until it joined the map (2026-10-23).
     assert "Unknown repo" in tools.execute("read_code_file",
-                                           {"repo": "chats", "path": "x"})
+                                           {"repo": "billing", "path": "x"})
 
 
 def test_read_returns_numbered_window(monkeypatch):

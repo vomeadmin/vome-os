@@ -320,14 +320,19 @@ def repos_in_scope() -> tuple[str, ...]:
 # Per repository because the name is not consistent: the Django repos use
 # `development`, vome-react uses `develop`.
 #
-# VomeApp is deliberately absent. It has no integration branch at all, only
-# `master`, so there is nowhere safe to aim a fix. Absent means refused rather
-# than defaulted: falling back to the error's own branch is exactly the
-# behaviour this table exists to prevent, and it would be silent.
+# A repository that is absent is refused rather than defaulted: falling back
+# to the error's own branch is exactly the behaviour this table exists to
+# prevent, and it would be silent. VomeApp was absent until it grew a
+# `development` branch; its fix for #9008 was refused on 2026-10-23 for that
+# reason. Chats and integrations joined the same day, when triage started
+# reading them.
 _FIX_TARGETS = {
     "vomedjango-restored-core-app": "development",
     "vomedjango-database-app": "development",
+    "vomedjango-chats-app": "development",
+    "vomedjango-integrations-app": "development",
     "vome-react": "develop",
+    "VomeApp": "development",
 }
 
 

@@ -38,10 +38,14 @@ to be detailed.
 
 - `data_lookup`: needs a record we cannot read (a delivery log, a specific
   account's data)
-- `mobile_unreadable`: the behaviour lives in the mobile app
+- `mobile_unreadable`: the behaviour lives in the mobile app and its code
+  could not be read (it is readable as `mobile` since 2026-10-18; read it
+  first)
 - `schema_or_migration`: a fix needs a model or migration change
 - `auth_or_billing`: touches login, permissions, payments
-- `out_of_repo`: the chats or integrations service, deployed by hand
+- `out_of_repo`: the chats or integrations service and their code could
+  not settle it (both readable as `chats` and `integrations` since
+  2026-10-23; read them first)
 - `low_confidence`: the code check could not settle it
 - `product_decision`: the code works as built and changing it is a product
   call (pair with the code check verdict design_question)

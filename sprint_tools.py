@@ -117,6 +117,21 @@ def _engineer(item: dict) -> dict:
             "filed": filed.get("how") or ""}
 
 
+def _deep_view(card: dict) -> dict:
+    deep = card.get("deep") or {}
+    if not deep:
+        return {}
+    return {k: v for k, v in {
+        "why_it_ran": deep.get("reason") or "",
+        "status": deep.get("status") or "",
+        "verdict": deep.get("verdict") or "",
+        "changes": deep.get("changes") or [],
+        "checked": deep.get("checked") or "",
+        "first_pass": card.get("first_pass") or {},
+        "not_run_because": deep.get("why") or "",
+    }.items() if v}
+
+
 def view(item: dict) -> dict:
     """One item as the model needs it: the agent's first pass, the draft in
     full, and where it stands."""
@@ -169,6 +184,9 @@ def view(item: dict) -> dict:
         "escalation_reason": card.get("escalation_reason") or "",
         "why_human": card.get("why_human") or "",
         "recommended_action": card.get("recommended_action") or "",
+        # The senior second look (deep_triage.py): whether it ran, and what
+        # it changed in the first card and why.
+        "deep_pass": _deep_view(card),
         "draft": item.get("draft") or "",
         "draft_status": item.get("draft_status") or "none",
         "draft_held_because": item.get("draft_why") or "",
@@ -343,6 +361,31 @@ def _production_owner(commits: str) -> str:
     if "web@" in commits:
         owners.append("Sam deploys web to production")
     return " and ".join(owners) or "the repo owner promotes it to production"
+
+
+def ticket_states(state: str = "") -> dict:
+    """Every Zoho ticket at In Progress and what its ClickUp work says, as
+    of the nightly reconcile (ticket_reconciler.py): our team is on it,
+    fixed and waiting for release, shipped, closed, stalled or fell
+    through, with the line to tell the client. Read only."""
+    import ticket_reconciler
+
+    out = ticket_reconciler.states(state.strip())
+    if out.get("error"):
+        _refuse(out["error"])
+    return out
+
+
+def triage_cost(days: int = 14) -> dict:
+    """What triage cost over the last `days` (first pass and deep pass),
+    how often the deep pass ran and corrected the first card, and the
+    monthly and yearly forecast at that rate. Read only."""
+    import deep_triage
+
+    out = deep_triage.report(int(days or 14))
+    if out.get("error"):
+        _refuse(out["error"])
+    return out
 
 
 def fix_status(ticket: str) -> dict:
@@ -727,16 +770,19 @@ def walk_queue() -> dict:
             "is what moves Zoho to In Progress. your_call needs Sam (feature "
             "requests to log, design questions, data or billing). "
             "old_card tickets were triaged before lanes existed: offer to "
-            "re-run them with ticket_first_pass(refresh=true), about $0.40 "
-            "each, only on Sam's yes. not_triaged tickets have no card "
+            "re-run them with ticket_first_pass(refresh=true), $0.40 to "
+            "about $3 each (an unsure card gets the deep pass), only on "
+            "Sam's yes. not_triaged tickets have no card "
             "yet: the 30-minute sweep picks "
             "them up, or use ticket_first_pass on one. answered_in_zoho "
             "tickets were answered by hand after the customer's last "
             "message: nothing is owed, and the status is moved out of New "
             "or Processing on its own (Awaiting Client Response, or In "
             "Progress when routed). One still listed here is a move that "
-            "failed: set it by hand, or offer to close it. If a line is wrong, "
-            "that is a lesson: ask Sam for the rule and use teach_agents."),
+            "failed: set it by hand, or offer to close it. If a line is "
+            "wrong, that is a lesson: ask Sam for the rule and use "
+            "teach_agents. In Progress tickets are not listed here: "
+            "ticket_states shows each one against its ClickUp work."),
     }
 
 

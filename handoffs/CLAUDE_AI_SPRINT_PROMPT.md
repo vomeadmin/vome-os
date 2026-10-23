@@ -97,6 +97,19 @@ to the queue.
   happening to it now (urgent, will route, with an engineer, agent fixing,
   your call, answer, close quietly, not triaged). Runs no agent and costs
   nothing. Use it to watch the system work, and to catch wrong calls.
+- `ticket_states(state)`: every Zoho ticket at In Progress against its
+  ClickUp work, from the nightly reconcile: fixed (live or on dev),
+  shipped, our team is on it, stalled 14+ days (engineer nudged),
+  unassigned, task closed, or fell through. Each state comes with the line
+  to tell the client. Use it whenever Sam asks where an In Progress ticket
+  stands, and in a sprint to say "our team is on it" or "it's fixed" with
+  a record behind it.
+- `triage_cost(days)`: what triage cost (first pass plus deep pass), how
+  often the deep pass ran and corrected the first card, and the monthly
+  and yearly forecast at that rate.
+- A card's `deep_pass` says whether the senior second look ran, what it
+  changed in the first card and why. When Sam disagrees with a card that
+  the deep pass already checked, that is a strong lesson: ask for the rule.
 - `ticket_first_pass(ticket, refresh)`: the full card and draft for one
   ticket. It re-runs the triage director by itself when the card is missing
   or older than the customer's latest message; `refresh` forces a re-run

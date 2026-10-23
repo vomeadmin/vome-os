@@ -831,9 +831,20 @@ def _needs_triage(ticket: dict, fresh_since: datetime | None) -> bool:
             and isinstance(updated, datetime) and updated < fresh_since)
 
 
+# A ticket can now take several minutes (deep_triage.py), so a loop stops
+# starting new tickets once this much of its job's time limit is used and
+# leaves the rest for the next sweep or round, rather than being killed
+# mid-ticket with its lease held.
+SWEEP_SECONDS = int(os.environ.get("SPRINT_SWEEP_SECONDS", "1800"))
+CLEAR_SECONDS = int(os.environ.get("SPRINT_CLEAR_SECONDS", "2400"))
+# Minutes a ticket is leased to one triage run: longer than a deep pass.
+TRIAGE_LEASE_MINUTES = 45
+
+
 def triage_untriaged(limit: int, ignore_cap: bool = False,
                      fresh_since: datetime | None = None,
-                     pages: int | None = None) -> dict:
+                     pages: int | None = None,
+                     seconds: int = 0) -> dict:
     """Triage open tickets silently, oldest activity first.
 
     Normally only tickets with no item. With `fresh_since` ("clear the queue
@@ -851,12 +862,17 @@ def triage_untriaged(limit: int, ignore_cap: bool = False,
         return {"status": "queue unreadable", "error": str(exc)}
     pending = [t for t in tickets if _needs_triage(t, fresh_since)]
     triaged = failed = 0
+    started = time.monotonic()
     for ticket in pending:
         if triaged >= limit:
             break
+        if seconds and time.monotonic() - started > seconds:
+            print(f"[BATCH] time budget of {seconds}s used; the rest waits "
+                  "for the next run")
+            break
         ticket_id = str(ticket.get("id"))
         if not _needs_triage(ticket, fresh_since) or \
-                not _lease(f"triage:{ticket_id}", 20):
+                not _lease(f"triage:{ticket_id}", TRIAGE_LEASE_MINUTES):
             continue
         try:
             outcome = shadow_triage._handle(
@@ -877,7 +893,7 @@ def triage_untriaged(limit: int, ignore_cap: bool = False,
 def run_queue_sweep() -> dict:
     """Every 30 minutes: tickets a webhook missed, a few at a time, and
     items handled outside the sprint since the last sweep."""
-    out = triage_untriaged(SWEEP_CAP)
+    out = triage_untriaged(SWEEP_CAP, seconds=SWEEP_SECONDS)
     try:
         out["handled_elsewhere"] = reconcile_working_set()
     except Exception as exc:
@@ -1169,7 +1185,8 @@ def handle_queue_clear(message: dict) -> dict:
         if pause:
             time.sleep(pause)
         result = triage_untriaged(BATCH_SIZE, ignore_cap=True,
-                                  fresh_since=fresh_since, pages=CLEAR_PAGES)
+                                  fresh_since=fresh_since, pages=CLEAR_PAGES,
+                                  seconds=CLEAR_SECONDS)
         if result.get("status") != "queue unreadable":
             break
     if result.get("status") != "ok":

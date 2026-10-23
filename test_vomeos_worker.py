@@ -407,6 +407,11 @@ ADDED_SINCE = {
     # Claims each task in vomeos_release_resolutions.
     "support.shipped_untold": ("45 * * * *", "support", CLAIM_NONE),
     "support.autonomy_report": ("30 9 * * mon", "support", CLAIM_WEEKLY),
+    # In Progress tickets against ClickUp (2026-10-23). Nudges are spaced
+    # per task and re-triage per ticket, but the claim keeps it to one run.
+    "support.ticket_reconcile": ("30 6 * * *", "support", CLAIM_DAILY),
+    # Downloads only when a repo's live commit changed.
+    "support.code_copies": ("5 * * * *", "support", CLAIM_NONE),
 }
 
 

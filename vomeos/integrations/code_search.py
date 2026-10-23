@@ -214,10 +214,25 @@ class Bitbucket(Connector):
 
     # -- read operations ------------------------------------------------
 
-    def search_code(self, query: str, repo: str = "") -> IntegrationResult:
-        """Find where a symbol, string or error message appears."""
+    def search_code(self, query: str, repo: str = "",
+                    ref: str = "") -> IntegrationResult:
+        """Find where a symbol, string or error message appears.
+
+        With `ref`, the live code at that branch is grepped first
+        (code_mirror.py): Bitbucket's own index covers the default branch
+        only, and core's default is `development`, not the `master`
+        production runs. The index answers when the copy cannot be made.
+        """
         if repo and not _repo_permitted(repo, self.allowlist):
             return self._denied("search_code", repo)
+        if repo and ref:
+            from vomeos.integrations import code_mirror
+
+            mirrored = code_mirror.search_copy(
+                "bitbucket", self.workspace, repo, query, self.headers(),
+                ref=ref)
+            if mirrored.ok:
+                return mirrored
         search = f"{query} repo:{repo}" if repo else query
         return self._call(
             "search_code",

@@ -21,6 +21,9 @@ FLOW
       2. context: thread, images, CRM tier, existing work, help centre,
          and the release state of any Agent Fixes task for this ticket
       3. triage director (senior, sees the images)  -> the card
+      3b. triage investigator (deep_triage.py) when that card is unsure,
+         the lane spends someone's time, or the client is important: it
+         re-checks the card with a full budget and its card replaces it
       4. incident matcher (fast) against the last 24h and Sentry
       5. reply drafter (standard, every outbound guard)  -> the draft
       6. numbered item in sprint_store, card posted in the day's thread
@@ -433,8 +436,12 @@ def _auto_reply(ticket_id: str) -> bool:
 
 def _handle(ticket_id: str, reason: str, force: bool = False,
             release: dict | None = None, ignore_cap: bool = False,
-            refresh: bool = False) -> dict:
+            refresh: bool = False, auto_route: bool = True) -> dict:
     """`release` is the release state when the caller already knows it.
+
+    `auto_route=False` (the nightly reconciler) leaves the card for Sam
+    instead of filing an engineer task: a months-old ticket whose task was
+    closed is his call to send back, not a new task by itself.
 
     The release watcher passes the fix it just proved live, so a second
     ClickUp lookup cannot lose it: in the 2026-10-17 rehearsal a throttled
@@ -515,6 +522,20 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
                 "why_human": "triage failed"}
     else:
         card = result.data or {}
+
+    # An unsure card gets the senior look before anything acts on it: the
+    # draft, the fix ladder and the route below all follow the card, and a
+    # wrong one sent work to an engineer that an answer would have settled
+    # (deep_triage.py, Sam 2026-10-23). A resolution run has nothing left
+    # to investigate.
+    if not resolution_run:
+        import deep_triage
+
+        card = deep_triage.deepen(
+            context, card, images, ticket_id=ticket_id,
+            ticket_number=ticket_number, arr=arr, first_result=result,
+            previous=(existing or {}).get("card"),
+            previous_at=(existing or {}).get("updated_at"))
 
     from error_reports import is_error_report
 
@@ -611,7 +632,8 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
     import ticket_routing
 
     routed = {}
-    if not release.get("task_id") and not is_error_report(subject):
+    if (auto_route and not release.get("task_id")
+            and not is_error_report(subject)):
         routed = ticket_routing.route(item, card, fix, incident, arr)
     if fix.get("pr_url"):
         ticket_routing.flag_urgent_fix(item, card, fix["pr_url"], incident,

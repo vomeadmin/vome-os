@@ -20,11 +20,14 @@ tier = "premium"
 effort = "high"
 # 3000, not 2000. A long thread (ticket #9477) ran out mid-JSON at 2000 and
 # the json_shape guard threw the whole card away. Same lesson as bug_analyst.
-max_tokens = 4500
+# 12000 since 2026-10-23: at effort "high" the thinking shares this budget,
+# and after ten rounds of tool results 4500 left little room to reason.
+max_tokens = 12000
 
 [job]
 charter = "charter.md"
 skills = [
+    "triage-card-rules",
     "reading-a-ticket-thread",
     "checking-for-existing-work",
     "writing-the-triage-card",
@@ -39,8 +42,15 @@ skills = [
 images = 6
 # Read-only code access (vomeos/tools.py). The card is internal, so this is
 # allowed; the drafter that writes to customers is never given it.
-tools = ["search_code", "read_code_file", "recent_commits"]
-max_tool_calls = 10
+# 25 calls since 2026-10-23 (was 10). On the Oct 21 backlog sweep 40 of 64
+# runs hit the cap of 10 and 46 of 79 cards ended "unclear", saying in so
+# many words what they had not read. grep_code / find_files work on a full
+# copy of the live code; read_task reads what an engineer already found.
+# Cards that still come back unsure go to the triage investigator
+# (deep_triage.py), which has 60.
+tools = ["search_code", "grep_code", "find_files", "read_code_file",
+         "recent_commits", "read_task"]
+max_tool_calls = 25
 requires_context = [
     "ticket_number",
     "account",
@@ -60,7 +70,7 @@ client_facing = false
 
 [limits]
 # Per request. A run with code checks makes several requests.
-timeout_seconds = 120
+timeout_seconds = 180
 max_retries = 2
 
 [approval]

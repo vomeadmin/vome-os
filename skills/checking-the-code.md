@@ -15,12 +15,20 @@ for misdirected, account deletion, email updates and billing.
 **How.** You have read-only tools on the code production runs.
 
 1. Search for an anchor: the exact error text, a UI label the customer
-   quoted, a setting or field name. `core` holds most product logic (Django
-   apps such as form_app, opportunity_app, sequence_app, organization_app,
-   notification_app). `web` is the React app; its search is unreliable, so
-   list `src/views/org/<area>` and read from there.
+   quoted, a setting or field name. `grep_code` is a regex over a full copy
+   of the live code: use it to trace a field or endpoint across an app
+   (`path: "sequence_app"`), and `find_files` to find a screen or module by
+   name (`**/*Kiosk*`). `core` holds most product logic (Django apps such
+   as form_app, opportunity_app, sequence_app, organization_app,
+   notification_app). `web` is the React app (`src/views/org/<area>`),
+   `mobile` the app, `chats` the chat service, `integrations` SSO and
+   other connections. A UI label usually lives in a translation file:
+   grep it, then grep its key to find the component.
 2. Read the lines around the hit. Read the function, not just the line.
+   Follow the call: the view, its serializer, the model method it uses.
 3. If something looks recently broken, check recent commits on that path.
+   If the existing-work search names a task, `read_task` it: an engineer's
+   comment often settles the ticket outright.
 4. **Trace what the customer did.** "I tried them and then removed them"
    names an action: search for its endpoint (`remove`, `archive`, `delete`
    plus the object) and see what it does to the rows. A remove that only
@@ -31,7 +39,9 @@ for misdirected, account deletion, email updates and billing.
 
 Stop once you can answer, or when the budget runs low. Three good reads beat
 eight shallow ones. "I could not read how X works" is never a finding while
-calls remain: read X.
+calls remain: read X. When the budget does run out, name in `finding` the
+one file or question still open, so the investigator that picks up an
+unsure card starts there instead of repeating your reads.
 
 **Add this to the card:**
 

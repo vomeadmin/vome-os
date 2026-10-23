@@ -157,9 +157,9 @@ def check_agent(manifest: AgentManifest) -> list[Finding]:
         )
     # Code tools never go to an agent that writes to customers. A reply that
     # quotes a file path tells a customer how our system is built (#8945).
-    from vomeos.tools import CODE_TOOLS
+    from vomeos.tools import ALL_TOOLS
 
-    unknown_tools = set(manifest.job.tools) - set(CODE_TOOLS)
+    unknown_tools = set(manifest.job.tools) - set(ALL_TOOLS)
     for name in sorted(unknown_tools):
         fail(f"declares unknown tool {name!r}")
     if manifest.guards.client_facing and manifest.job.tools:

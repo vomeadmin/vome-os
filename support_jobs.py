@@ -270,8 +270,42 @@ def register_all() -> None:
         cron="*/30 * * * *",
         queue=QUEUE,
         claim=CLAIM_NONE,
-        time_limit=1500,
+        # SPRINT_SWEEP_SECONDS (1800) of starting tickets, plus room for a
+        # deep pass already under way to finish.
+        time_limit=3300,
         description="Triage untriaged open tickets for the next batch",
+    )
+
+    # Full copies of every repo at its live commit, for grep_code and
+    # find_files. Hourly, so a deploy or a release never leaves triage
+    # waiting minutes on the first download. Unclaimed: a double run finds
+    # the copies current and downloads nothing.
+    from vomeos.tools import warm_copies
+
+    register_job(
+        "support.code_copies",
+        warm_copies,
+        cron="5 * * * *",
+        queue=QUEUE,
+        claim=CLAIM_NONE,
+        time_limit=1200,
+        description="Keep a copy of every repo at its live commit",
+    )
+
+    # Every Zoho ticket at In Progress, matched to its ClickUp work, 06:30
+    # (before the 07:30 stale sweep and the 09:00 batch). Nudges stalled
+    # engineer tasks once a fortnight and re-triages up to 15 tickets whose
+    # task shipped, closed or never existed (ticket_reconciler.py).
+    from ticket_reconciler import run as run_reconciler
+
+    register_job(
+        "support.ticket_reconcile",
+        run_reconciler,
+        cron="30 6 * * *",
+        queue=QUEUE,
+        claim=CLAIM_DAILY,
+        time_limit=3300,
+        description="Reconcile In Progress tickets with ClickUp",
     )
 
     # Sam asked for an agent fix from Claude.ai (sprint_tools.propose_fix).
@@ -307,6 +341,9 @@ def register_all() -> None:
         sprint_batch.CLEAR_KEY,
         sprint_batch.handle_queue_clear,
         queue=QUEUE,
+        # SPRINT_CLEAR_SECONDS (2400) of starting tickets, plus room for
+        # the last deep pass and the batch post, inside Celery's 3300s soft
+        # limit.
         time_limit=3300,
         description="Clear the queue: triage a round, post or announce it",
     )
@@ -331,11 +368,13 @@ def register_all() -> None:
     from shadow_triage import HANDLER_KEY as SHADOW_KEY
     from shadow_triage import handle as handle_shadow
 
+    # 2400s, not 600: an unsure card now gets the triage investigator's
+    # deep pass (up to 60 tool calls) before it is drafted and routed.
     register_event_handler(
         SHADOW_KEY,
         handle_shadow,
         queue=QUEUE,
-        time_limit=600,
+        time_limit=2400,
         description="Triage one ticket into the sprint thread",
     )
 

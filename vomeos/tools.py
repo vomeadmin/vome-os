@@ -45,6 +45,15 @@ on the integration branch, or only in the reporter's own unmerged work. So a
 tool call may name `branch`, but only one listed for that repo in
 `VOMEOS_CODE_EXTRA_BRANCHES` (`core=development,web=develop|RON_DEVELOP`).
 Anything else is refused. With no `branch`, reads stay on the live branch.
+
+GREP, FIND AND TASKS (2026-10-23)
+---------------------------------
+`grep_code` and `find_files` work on a full copy of the live commit
+(code_mirror.py), so an agent can trace a field across an app the way a
+person does in Claude Code, instead of guessing exact strings for a host's
+index. `read_task` reads one ClickUp task and its comments: what the
+engineer found is often the whole answer. Chats and integrations joined the
+map the same day; until then every chat ticket ended "out_of_repo".
 """
 
 from __future__ import annotations
@@ -58,16 +67,28 @@ from vomeos.integrations import code_search
 DEFAULT_REPO_MAP = (
     "core=bitbucket:vomedjango/vomedjango-restored-core-app@master,"
     "database=bitbucket:vomedjango/vomedjango-database-app@master,"
+    "chats=bitbucket:vomedjango/vomedjango-chats-app@master,"
+    "integrations=bitbucket:vomedjango/vomedjango-integrations-app@main,"
     "web=github:vomeadmin/vome-react@master,"
     "mobile=github:vomeadmin/VomeApp@master"
 )
 
 DEFAULT_EXTRA_BRANCHES = (
-    "core=development,database=development,web=develop|RON_DEVELOP"
+    "core=development,database=development,chats=development,"
+    "integrations=development,web=develop|RON_DEVELOP"
 )
 
-MAX_RESULT_CHARS = int(os.environ.get("VOMEOS_TOOL_MAX_CHARS", "12000"))
-READ_WINDOW = 160  # lines returned by default around a requested range
+MAX_RESULT_CHARS = int(os.environ.get("VOMEOS_TOOL_MAX_CHARS", "16000"))
+READ_WINDOW = 250  # lines returned by default around a requested range
+
+REPO_DESCRIPTIONS = {
+    "core": "Django backend (most product logic)",
+    "database": "volunteer database service",
+    "chats": "chat service (messages, attachments, chat lists)",
+    "integrations": "integrations service (SSO, Salesforce, calendars)",
+    "web": "React web app",
+    "mobile": "React Native mobile app",
+}
 
 
 @dataclass(frozen=True)
@@ -125,12 +146,12 @@ def _on_branch(repo: Repo, branch: str) -> Repo | str:
 # ---------------------------------------------------------------------------
 
 def _repo_property() -> dict:
+    names = sorted(repo_map())
     return {
         "type": "string",
-        "enum": sorted(repo_map()),
-        "description": "core = Django backend (most product logic), "
-                       "database = volunteer database service, "
-                       "web = React web app.",
+        "enum": names,
+        "description": ", ".join(
+            f"{n} = {REPO_DESCRIPTIONS.get(n, n)}" for n in names) + ".",
     }
 
 
@@ -142,8 +163,8 @@ def definitions(names) -> list[dict]:
             "description": (
                 "Find where a string, setting, field, error message or UI "
                 "text appears in one repository. Returns file paths and "
-                "matching lines. Frontend (web) search is unreliable; for "
-                "web, read directories instead."
+                "matching lines. For a regex, a folder filter or lines of "
+                "context, use grep_code."
             ),
             "input_schema": {
                 "type": "object",
@@ -188,6 +209,67 @@ def definitions(names) -> list[dict]:
                 "required": ["repo"],
             },
         },
+        "grep_code": {
+            "name": "grep_code",
+            "description": (
+                "Regex search over a full copy of one repository at the "
+                "live commit, like ripgrep. Returns path:line: text for "
+                "every match (up to 80). Use `path` to stay in one app or "
+                "folder (`sequence_app`, `src/views/org`, `**/*.py`) and "
+                "`context` for surrounding lines. The fastest way to trace "
+                "a field, an endpoint, a serializer or a UI string."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "repo": _repo_property(),
+                    "pattern": {"type": "string",
+                                "description": "Python regex, e.g. "
+                                               "'def (get|list)_shifts' or "
+                                               "'reservation_limit'."},
+                    "path": {"type": "string",
+                             "description": "Optional folder or glob."},
+                    "context": {"type": "integer",
+                                "description": "Lines around each match, "
+                                               "0 to 5."},
+                    "case_sensitive": {"type": "boolean"},
+                },
+                "required": ["repo", "pattern"],
+            },
+        },
+        "find_files": {
+            "name": "find_files",
+            "description": (
+                "Find files by name in a full copy of one repository: a "
+                "glob (`**/*Kiosk*.js`, `opportunity_app/*.py`) or a word "
+                "that appears in the path (`reservation`)."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "repo": _repo_property(),
+                    "pattern": {"type": "string"},
+                },
+                "required": ["repo", "pattern"],
+            },
+        },
+        "read_task": {
+            "name": "read_task",
+            "description": (
+                "Read one ClickUp task: name, status, assignees, dates, "
+                "description and its comments (newest last). Use it on a "
+                "task the existing-work search names, to see what the "
+                "engineer actually found, decided or shipped."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string",
+                             "description": "Task id (868abc123) or URL."},
+                },
+                "required": ["task"],
+            },
+        },
     }
     extra = extra_branches()
     if extra:
@@ -198,12 +280,17 @@ def definitions(names) -> list[dict]:
             "description": "Optional. Omit to read what production runs. "
                            f"Otherwise one of: {listed}.",
         }
-        for d in defs.values():
-            d["input_schema"]["properties"]["branch"] = branch
+        for name, d in defs.items():
+            if name not in NON_CODE_TOOLS:
+                d["input_schema"]["properties"]["branch"] = branch
     return [defs[n] for n in names if n in defs]
 
 
-CODE_TOOLS = ("search_code", "read_code_file", "recent_commits")
+CODE_TOOLS = ("search_code", "read_code_file", "recent_commits",
+              "grep_code", "find_files")
+# Read-only and internal, but not about the code: no repo, no branch.
+NON_CODE_TOOLS = ("read_task",)
+ALL_TOOLS = CODE_TOOLS + NON_CODE_TOOLS
 
 
 # ---------------------------------------------------------------------------
@@ -226,11 +313,10 @@ def _cap(text: str) -> str:
 
 
 def _search(repo: Repo, query: str) -> str:
-    # GitHub repos take the branch so a full-copy fallback greps the code
-    # that runs (see code_mirror.py); Bitbucket search has no such option.
-    extra = {"ref": repo.branch} if repo.host == "github" else {}
+    # The branch goes to both hosts so a full copy greps the code that runs
+    # (see code_mirror.py), not whatever the host's index holds.
     result = _client(repo).search_code(query, repo=repo.slug,
-                                       **_kwargs(repo), **extra)
+                                       **_kwargs(repo), ref=repo.branch)
     if not result.ok:
         return f"Search failed: {result.error[:200]}. This is NOT 'no match'."
     data = result.data if isinstance(result.data, dict) else {}
@@ -325,9 +411,90 @@ def _commits(repo: Repo, path: str = "") -> str:
     return "\n".join(rows) or "No commits."
 
 
+def _copy(repo: Repo):
+    """(root, sha) of the live code, or raises."""
+    from vomeos.integrations import code_mirror
+
+    # Same reach as search and read: VOMEOS_CODE_REPOS, when set, is the
+    # list of repositories an agent may see at all.
+    if not code_search._repo_permitted(repo.slug):
+        raise RuntimeError(code_search._denial(repo.slug, None))
+    if repo.host == "github":
+        headers = code_search.GitHub().headers(repo.owner)
+    else:
+        headers = code_search.Bitbucket().headers()
+    return code_mirror.local_copy(repo.host, repo.owner, repo.slug,
+                                  repo.branch, headers)
+
+
+def warm_copies() -> dict:
+    """Make sure every repo has a copy at its live commit, so no triage run
+    waits on a download (vome-react takes a couple of minutes, and Railway's
+    disk starts empty after each deploy). Only a changed head downloads."""
+    import time
+
+    out = {}
+    for alias, repo in sorted(repo_map().items()):
+        started = time.monotonic()
+        try:
+            _, sha = _copy(repo)
+            out[alias] = f"{sha[:12]} in {time.monotonic() - started:.0f}s"
+        except Exception as exc:
+            out[alias] = f"failed: {str(exc)[:160]}"
+    print(f"[VOMEOS] code copies: {out}")
+    return out
+
+
+def _grep(repo: Repo, pattern: str, path: str, context, case: bool) -> str:
+    from vomeos.integrations import code_mirror
+
+    if not pattern.strip():
+        return "Give a pattern."
+    try:
+        root, sha = _copy(repo)
+    except Exception as exc:
+        return (f"Grep failed: {str(exc)[:200]}. This is NOT 'no match'; use "
+                "search_code or read_code_file instead.")
+    lines, matches, files = code_mirror.grep(
+        root, pattern, path_glob=path, ignore_case=not case,
+        context=context or 0)
+    where = f"{repo.alias}@{repo.branch} ({sha[:12]})" + (
+        f" under {path}" if path else "")
+    if not matches:
+        return f"No match for /{pattern}/ in {where}."
+    more = (f" Showing the first {len(lines)} lines; narrow with `path`."
+            if matches > code_mirror.GREP_MAX_MATCHES else "")
+    return (f"{matches} match(es) in {files} file(s), {where}.{more}\n"
+            + "\n".join(lines))
+
+
+def _find(repo: Repo, pattern: str) -> str:
+    from vomeos.integrations import code_mirror
+
+    try:
+        root, sha = _copy(repo)
+    except Exception as exc:
+        return (f"Find failed: {str(exc)[:200]}. This is NOT 'no file'; list "
+                "the folder with read_code_file instead.")
+    paths, total = code_mirror.find(root, pattern)
+    where = f"{repo.alias}@{repo.branch} ({sha[:12]})"
+    if not total:
+        return f"No file matches {pattern!r} in {where}."
+    more = f" (first {len(paths)} of {total})" if total > len(paths) else ""
+    return f"{total} file(s) in {where}{more}:\n" + "\n".join(paths)
+
+
+def _task(ref: str) -> str:
+    from vomeos.integrations import clickup_read
+
+    return clickup_read.task_text(ref)
+
+
 def execute(name: str, arguments: dict) -> str:
     """Run one tool call. Always returns text, never raises."""
     try:
+        if name == "read_task":
+            return _cap(_task(str(arguments.get("task") or "")))
         repo = repo_map().get(str(arguments.get("repo") or ""))
         if repo is None:
             return (f"Unknown repo {arguments.get('repo')!r}. Use one of: "
@@ -343,6 +510,13 @@ def execute(name: str, arguments: dict) -> str:
                         arguments.get("end_line"))
         elif name == "recent_commits":
             out = _commits(repo, str(arguments.get("path") or ""))
+        elif name == "grep_code":
+            out = _grep(repo, str(arguments.get("pattern") or ""),
+                        str(arguments.get("path") or ""),
+                        arguments.get("context"),
+                        bool(arguments.get("case_sensitive")))
+        elif name == "find_files":
+            out = _find(repo, str(arguments.get("pattern") or ""))
         else:
             return f"No tool named {name!r}."
         return _cap(out)

@@ -13,7 +13,7 @@ To propose a change: edit a diagram or add a register row, set its status,
 and regenerate. A new AI session should read this file, `CLAUDE.md`, and the
 ClickUp handoff page (doc 3dztm-3311, page 3dztm-6351) before acting.
 
-**As of:** 2026-10-20
+**As of:** 2026-10-23
 
 ## Status key
 
@@ -34,8 +34,10 @@ flowchart TD
   B --> S["Shadow triage on the worker<br/>customer_success.shadow_triage"]:::deployed
   S --> S1["Thread + screenshots<br/>(inline images, attachments)"]:::deployed
   S --> S2["Existing work + release state<br/>(ticket no., account, symptom; Agent Fixes)"]:::deployed
-  S --> S3["Code check on the live branch<br/>(read-only tools, 10 calls)"]:::built
+  S --> S3["Code check on the live branch, 25 calls<br/>grep + find on full copies of all 6 repos, read_task"]:::built
   S1 & S2 & S3 --> T["Triage director (senior)<br/>card: category, live question, code check"]:::deployed
+  T -->|"unsure, engineer / sam_ops lane,<br/>or important client"| DP["Triage investigator (deep pass)<br/>60 calls, challenges the card; its card replaces it"]:::built
+  DP --> I
   T --> I["Incident matcher (fast)<br/>last 24h tickets + Sentry"]:::deployed
   I -->|high confidence| IA["Immediate mention to Sam<br/>in the day thread"]:::deployed
   T --> D["Reply drafter (standard)<br/>every outbound guard"]:::deployed
@@ -247,6 +249,19 @@ flowchart TD
   BU --> DL["Thread: phone link first, every format linked"]:::deployed
 ```
 
+<!-- map:diagram id=reconcile title="12. In Progress tickets, reconciled with ClickUp every night (built 2026-10-23)" -->
+```mermaid
+flowchart TD
+  Z["Every Zoho ticket at In Progress<br/>(71 on Oct 23, oldest Apr 30)"]:::built --> J["Joined to its Priority Queue task<br/>and Agent Fixes task (link field or #N in the name)"]:::built
+  J --> S{"One state per ticket"}:::built
+  S -->|fix_live / fix_on_dev| F["Fixed: release watcher owns the reply"]:::built
+  S -->|engineer_active| A["'Our team is on it'"]:::built
+  S -->|engineer_stalled, 14+ days| N["One ClickUp comment on the task<br/>(notifies the engineer, every 14 days at most)"]:::built
+  S -->|unassigned| U["Listed for Sam to assign or route"]:::built
+  S -->|"shipped, task_closed, no_task"| R["Fresh triage + deep pass (15 a night)<br/>reads the task notes, card + draft in the sprint"]:::built
+  F & A & N & U & R --> T["ticket_states in Claude.ai:<br/>each state with the line to tell the client"]:::built
+```
+
 ## Schedule (America/Montreal, run by Celery beat on `vome-os-worker`)
 
 | When | Job | Status |
@@ -262,6 +277,8 @@ flowchart TD
 | 10, 13, 16, 19 weekdays | `support.sprint_update` (retired Oct 18, replaced by batches) | built |
 | 9, 13, 17 weekdays; 11 Sat and Sun if needed | `support.sprint_batch` (+ `support.sprint_batch_weekend`) | deployed |
 | every 30 min | `support.queue_sweep` (G26) | deployed |
+| hourly :05 | `support.code_copies` (full copy of each repo at its live commit) | built |
+| 06:30 daily | `support.ticket_reconcile` (In Progress tickets vs ClickUp) | built |
 | 17:00 daily | `support.daily_digest` | live |
 | Mon 07:00, Fri 16:45 | engineering reports | live |
 | Mon 09:30 | `support.autonomy_report` | built |
@@ -333,3 +350,8 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 | G54 | director | needs_human cards carry a holding reply | built | #9501 (7000 ARR) sat five days with no draft because the card said needs_human | Push; the draft stays under NEEDS YOUR DECISION (`send N`, never `send ready`) | agent |
 | G55 | code | Code checks cannot read production data | proposed | #9501 (which records hold a field) and #9587 (a role's stored setting) both ended on data the agent could not see | A read-only, institution-scoped lookup tool for triage | Sam |
 | G56 | bugreports | Every reply in a #bug-reports thread is read: a follow-up becomes its own report in the same thread, detail goes on the task, questions are answered, corrections become live lessons | built | Ron's "one more on this" (the sequence completion email sharing the fixed template, plus its own English-only text) came after the fix merged and was dropped as "chat on a finished report" | Push; agent `engineering.bug_thread_reader` (10/10 evals). Then Ron's 7:52 PM reply needs reposting (or a manual follow-up) since it arrived before this existed | Sam |
+| G57 | triage | First pass starved: 10 tool calls, 4500 tokens, exact-string search only | built | Oct 21 backlog sweep: 40 of 64 runs hit the cap, 46 of 79 cards "unclear", 71 of 79 medium confidence, 34 said what they had not read. Sam's Claude Code re-runs (same model) kept disagreeing | Push. Director now 25 calls, 12000 tokens, grep_code / find_files / read_task | agent |
+| G58 | triage | Deep pass: the triage investigator re-checks unsure, costly-lane and important-client cards before drafting, fixing or routing | built | The card decides the draft, the fix ladder and the engineer; a wrong one sent how-to questions to OnlyG and Sanjay | Push; watch `triage_cost` (corrected share, cost per ticket) for a week. DEEP_TRIAGE_DAILY_CAP (60) bounds spend | agent |
+| G59 | code | Full copies of every repo for grep (Bitbucket archive, GitHub tarball), refreshed hourly; chats and integrations added to the repo map | built | Bitbucket's index covers the default branch (core: development, not master); chats and integrations were unreadable, so chat tickets always ended out_of_repo. Proven Oct 23 with the worker's tokens on all six repos | Push; if VOMEOS_CODE_REPO_MAP or VOMEOS_CODE_REPOS is set on the worker, add chats and integrations there | Sam |
+| G60 | intake | In Progress tickets never looked at again | built | 71 In Progress on Oct 23, 35 silent 30+ days; #9188 closed in ClickUp, #7218 queued and unassigned since May | Push; `support.ticket_reconcile` 06:30 nightly, `ticket_states` in Claude.ai | agent |
+| G61 | learning | Sam's Claude Code disagreements become eval cases | built | The triage answer key was agent-written (G15); his corrections were the best signal and were kept nowhere | Push; `railway run -s vome-os-worker py triage_cases.py add --ticket N --expect ...` (cases live in vomeos_eval_cases, not git) | Sam |
