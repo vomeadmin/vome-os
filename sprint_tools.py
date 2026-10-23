@@ -732,9 +732,10 @@ def walk_queue() -> dict:
             "yet: the 30-minute sweep picks "
             "them up, or use ticket_first_pass on one. answered_in_zoho "
             "tickets were answered by hand after the customer's last "
-            "message: nothing is owed, but Zoho still says New or "
-            "Processing, so offer to move each to Awaiting Client Response "
-            "or close it. If a line is wrong, "
+            "message: nothing is owed, and the status is moved out of New "
+            "or Processing on its own (Awaiting Client Response, or In "
+            "Progress when routed). One still listed here is a move that "
+            "failed: set it by hand, or offer to close it. If a line is wrong, "
             "that is a lesson: ask Sam for the rule and use teach_agents."),
     }
 

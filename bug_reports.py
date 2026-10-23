@@ -135,7 +135,9 @@ RESOLUTION_DECLINED = "8600a963-ab55-430f-a86f-2b1d0f911156"
 # Never `on prod`: that status emails clients through the on-prod handler.
 ENGINEER_OPEN = ("queued", "in progress", "escalated")
 COMPLETE = {"status": "Closed", "resolution": RESOLUTION_COMPLETED}
-DECLINE = {"status": "declined", "resolution": RESOLUTION_DECLINED}
+# No `declined` column (Sam, 2026-10-22): a turned-down report is Closed and
+# the Resolution field says why.
+DECLINE = {"status": "Closed", "resolution": RESOLUTION_DECLINED}
 
 # A report that keeps coming back for more information stops asking after
 # this many runs and goes to Sam.
@@ -684,8 +686,7 @@ def act(ts: str, row: dict, card: dict, dry_run: bool = False) -> dict:
         label = ("Not a bug" if verdict == "not_a_bug" else "Already fixed")
         if url and certain:
             task_change = (DECLINE if verdict == "not_a_bug" else COMPLETE)
-            done = ("declined" if verdict == "not_a_bug" else "closed")
-            text = f":white_check_mark: {label}. Marked {done} on ClickUp: " \
+            text = f":white_check_mark: {label}. Marked closed on ClickUp: " \
                    f"<{url}|task>"
         elif url:
             text = (f":white_check_mark: {label}, I think. Left open on "

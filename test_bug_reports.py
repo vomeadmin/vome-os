@@ -262,9 +262,13 @@ def test_already_fixed_closes_ron_task_as_completed(rec):
     assert "Marked closed on ClickUp" in rec.posts[-1][2]
 
 
-def test_not_a_bug_declines_ron_task(rec):
+def test_not_a_bug_closes_ron_task_as_declined(rec):
+    """No `declined` column (Sam, 2026-10-22): Closed, Resolution Declined."""
     bug_reports.act(TS, _row(), _certain("not_a_bug"))
-    assert ("PUT", "/task/868mg8nce", {"status": "declined"}) in rec.calls
+    assert ("PUT", "/task/868mg8nce", {"status": "Closed"}) in rec.calls
+    assert ("POST", f"/task/868mg8nce/field/{bug_reports.FIELD_RESOLUTION}",
+            {"value": bug_reports.RESOLUTION_DECLINED}) in rec.calls
+    assert "Marked closed on ClickUp" in rec.posts[-1][2]
 
 
 def test_unsure_close_leaves_the_task_open_for_sam(rec):

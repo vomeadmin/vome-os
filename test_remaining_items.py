@@ -581,9 +581,16 @@ def zoho_status(monkeypatch):
                         lambda: dict(PENDING))
     monkeypatch.setattr(release_resolutions, "handled_elsewhere",
                         lambda t, why: RESOLVED.append((t, why)) or 1)
+    monkeypatch.setattr(zoho_actions, "set_status",
+                        lambda t, s: MOVED.append((t, s)))
+    monkeypatch.setattr(zoho_actions, "set_in_progress",
+                        lambda t, team: MOVED.append((t, f"In Progress {team}")))
+    monkeypatch.setattr(zoho_actions, "set_agent_fixing",
+                        lambda t: MOVED.append((t, "In Progress agent")))
     EXCHANGES.clear()
     RESOLVED.clear()
     PENDING.clear()
+    MOVED.clear()
     PENDING["RES"] = None
     return statuses, decided
 
@@ -593,6 +600,8 @@ EXCHANGES: dict = {}
 # Resolutions waiting on Sam: ticket id -> when drafted.
 PENDING: dict = {}
 RESOLVED: list = []
+# Zoho status moves: (ticket id, status).
+MOVED: list = []
 
 
 def _exchange(received: str, sent: str = "") -> tuple[dict, dict]:
@@ -652,6 +661,51 @@ def test_answered_after_the_customer_finishes_the_item(zoho_status):
     assert sprint_batch.sync_handled_elsewhere([item], {"Q"}) == 1
     assert decided == [(101, sprint_store.DONE, sprint_batch.ANSWERED)]
     assert item["status"] == sprint_store.DONE
+    # #9394: answered means it no longer sits at Processing.
+    assert MOVED == [("Q", "Awaiting Client Response")]
+
+
+def test_answered_by_hand_follows_the_routing(monkeypatch, zoho_status):
+    import shadow_triage
+
+    monkeypatch.setattr(shadow_triage, "release_state",
+                        lambda n, t: {"live": False})
+    for tid in ("R", "F"):
+        EXCHANGES[tid] = _exchange("2026-10-21T18:38:00.000Z",
+                                   "2026-10-21T19:56:00.000Z")
+    items = [_item(1, ticket_id="R",
+                   eng_task={"url": "https://cu/t/1", "owner": "sanjay"}),
+             _item(2, ticket_id="F", fix_pr="https://bb/pr/3")]
+    assert sprint_batch.sync_handled_elsewhere(items, {"R", "F"}) == 2
+    assert MOVED == [("R", "In Progress frontend"), ("F", "In Progress agent")]
+
+
+def test_answered_outside_the_queue_moves_only_from_processing(zoho_status):
+    statuses, _ = zoho_status
+    statuses.update({"OLD": "Processing", "B": "In Progress"})
+    for tid in ("OLD", "B"):
+        EXCHANGES[tid] = _exchange("2026-10-10T10:00:00.000Z",
+                                   "2026-10-11T10:00:00.000Z")
+    items = [_item(1, ticket_id="OLD"),
+             _item(2, ticket_id="B", card={"backlog_sweep": "868abc"})]
+    assert sprint_batch.sync_handled_elsewhere(items, set()) == 2
+    assert MOVED == [("OLD", "Awaiting Client Response")]
+
+
+def test_a_failed_move_still_finishes_the_item(monkeypatch, zoho_status):
+    import zoho_actions
+
+    _, decided = zoho_status
+
+    def boom(t, s):
+        raise RuntimeError("Zoho 500")
+
+    monkeypatch.setattr(zoho_actions, "set_status", boom)
+    EXCHANGES["Q"] = _exchange("2026-10-21T18:38:00.000Z",
+                               "2026-10-21T19:56:00.000Z")
+    assert sprint_batch.sync_handled_elsewhere([_item(1, ticket_id="Q")],
+                                               {"Q"}) == 1
+    assert decided == [(101, sprint_store.DONE, sprint_batch.ANSWERED)]
 
 
 def test_an_out_of_office_after_our_answer_is_not_a_message(monkeypatch):

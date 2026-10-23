@@ -993,8 +993,50 @@ def sync_handled_elsewhere(items: list[dict], open_ids: set) -> int:
         ticket_id = str(item.get("ticket_id") or "")
         if ticket_id in pending:
             release_resolutions.handled_elsewhere(ticket_id, why)
+        if why == ANSWERED:
+            _move_out_of_processing(item, ticket_id in open_ids)
         finished += 1
     return finished
+
+
+def _move_out_of_processing(item: dict, in_queue: bool) -> None:
+    """A ticket answered by hand in Zoho but left at New or Processing.
+
+    Processing means the customer wrote and we still owe them; once we have
+    written back that is false, and the queue kept listing the ticket as
+    owed (Sam, #9394, 2026-10-22). Same outcome as a sprint send, short of
+    closing: routed or agent-fixing goes to In Progress, anything else waits
+    for the customer. Closing stays a person's call. Any other status (a
+    backlog-sweep ticket already In Progress) is left alone. `in_queue`: the
+    queue read already showed it at New or Processing. Never raises.
+    """
+    import zoho_actions
+
+    ticket_id = str(item.get("ticket_id") or "")
+    filed = item.get("eng_task") or {}
+    try:
+        if not in_queue and zoho_actions.ticket_status(ticket_id) not in (
+                "New", "Processing"):
+            return
+        live = False
+        if filed.get("url") or item.get("fix_pr"):
+            import shadow_triage
+
+            live = bool(shadow_triage.release_state(
+                item.get("ticket_number") or "", ticket_id).get("live"))
+        if filed.get("url") and not live:
+            from sprint_thread import ENGINEERS
+
+            team = ENGINEERS.get(filed.get("owner"),
+                                 ("", "", "backend", ""))[2]
+            zoho_actions.set_in_progress(ticket_id, team)
+        elif item.get("fix_pr") and not live:
+            zoho_actions.set_agent_fixing(ticket_id)
+        else:
+            zoho_actions.set_status(ticket_id, "Awaiting Client Response")
+    except Exception as exc:
+        print(f"[BATCH] {ticket_id} answered in Zoho but still Processing: "
+              f"{exc}")
 
 
 def reconcile_working_set() -> int:

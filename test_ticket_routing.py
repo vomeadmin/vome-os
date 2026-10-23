@@ -346,6 +346,8 @@ def test_sending_the_acknowledgment_hands_it_over(monkeypatch, world):
                         lambda n, t: {"live": False})
     monkeypatch.setattr(zoho_actions, "set_status",
                         lambda *a: pytest.fail("no Awaiting/Closed here"))
+    monkeypatch.setattr(tr, "task_state",
+                        lambda filed: {"status": "queued", "shipped": False})
     item = _item(eng_task={"id": "86x", "url": "https://cu/86x",
                            "owner": "sanjay", "reason": "mobile_unreadable"})
     out = sprint_thread._after_send(item)
@@ -353,6 +355,72 @@ def test_sending_the_acknowledgment_hands_it_over(monkeypatch, world):
                               "routed to sanjay (mobile_unreadable)")]
     assert world.zoho == [("569440000043000001", "frontend")]
     assert "In Progress with sanjay" in out
+
+
+def test_answering_a_task_the_engineer_turned_down_closes_both(monkeypatch,
+                                                              world):
+    """#9547 (2026-10-22): the routed task was declined, Sam answered, and
+    the ticket and task were both left for someone to tidy by hand."""
+    import shadow_triage
+    import zoho_actions
+
+    statuses, closed = [], []
+    monkeypatch.setattr(shadow_triage, "release_state",
+                        lambda n, t: {"live": False})
+    monkeypatch.setattr(zoho_actions, "set_status",
+                        lambda tid, s: statuses.append((tid, s)))
+    monkeypatch.setattr(sprint_thread, "_clickup_status",
+                        lambda tid, s: closed.append((tid, s)))
+    monkeypatch.setattr(tr, "task_state", lambda filed: {
+        "status": "closed", "shipped": False, "declined": True})
+    item = _item(category="needs_human",
+                 eng_task={"id": "86x", "url": "https://cu/86x",
+                           "owner": "onlyg"})
+    out = sprint_thread._after_send(item)
+    assert statuses == [("569440000043000001", "Closed")]
+    assert world.zoho == [] and world.decided == []
+    # Already Closed on ClickUp, so nothing to write there.
+    assert closed == [] and "no closure email" in out
+
+
+def test_closing_the_ticket_closes_the_routed_task(monkeypatch, world):
+    import shadow_triage
+    import zoho_actions
+
+    closed = []
+    monkeypatch.setattr(shadow_triage, "release_state",
+                        lambda n, t: {"live": True})
+    monkeypatch.setattr(zoho_actions, "set_status", lambda tid, s: None)
+    monkeypatch.setattr(sprint_thread, "_close_agent_fix", lambda item: "")
+    monkeypatch.setattr(sprint_thread, "_clickup_status",
+                        lambda tid, s: closed.append((tid, s)))
+    monkeypatch.setattr(tr, "task_state",
+                        lambda filed: {"status": "on dev", "shipped": False})
+    item = _item(eng_task={"id": "86x", "url": "https://cu/86x",
+                           "owner": "onlyg"})
+    out = sprint_thread._after_send(item)
+    assert closed == [("86x", "Closed")] and "ClickUp task closed" in out
+
+
+def test_a_closed_declined_task_is_not_read_as_shipped(monkeypatch):
+    import httpx
+
+    class R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"status": {"status": "Closed"}, "assignees": [],
+                    "custom_fields": [{
+                        "id": tr.FIELD_RESOLUTION, "value": 1,
+                        "type_config": {"options": [
+                            {"id": "c51c", "orderindex": 0},
+                            {"id": tr.RESOLUTION_DECLINED,
+                             "orderindex": 1}]}}]}
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: R())
+    state = tr._read_state("86x")
+    assert state["declined"] is True and state["shipped"] is False
 
 
 def test_acknowledging_an_agent_fix_moves_zoho_then(monkeypatch, world):

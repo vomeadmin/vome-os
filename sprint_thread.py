@@ -1418,8 +1418,14 @@ def _after_send(item: dict) -> str:
     still owe them, which stops being true the moment this email goes
     (Sam, #9394, 2026-10-22). Failures are reported, never raised: the email
     already went, and that must not look like it failed.
+
+    A routed task the engineer turned down means Sam's reply is the answer,
+    so the ticket closes. Whenever the ticket closes, the routed task closes
+    with it: #9547's task sat in `declined` after the client was answered
+    (Sam, 2026-10-22).
     """
     import shadow_triage
+    import ticket_routing
     import zoho_actions
 
     category = item.get("category") or ""
@@ -1430,7 +1436,9 @@ def _after_send(item: dict) -> str:
     # Zoho moves out of New/Processing only now that the client has been
     # told (ticket_routing): until then that status means "owed a reply".
     filed = item.get("eng_task") or {}
-    if filed.get("url") and not release.get("live"):
+    task = ticket_routing.task_state(filed) if filed.get("url") else {}
+    declined = bool(task.get("declined"))
+    if filed.get("url") and not release.get("live") and not declined:
         reason = re.sub(r"\W+", "_", str(filed.get("reason") or "auto"))
         sprint_store.decide(item["id"], sprint_store.ROUTED,
                             f"routed to {filed.get('owner')} "
@@ -1450,7 +1458,7 @@ def _after_send(item: dict) -> str:
                     "waiting on your merge).")
         except Exception as exc:
             return f":warning: Zoho status NOT set to In Progress ({exc})."
-    if release.get("live") or category in CLOSE_AFTER:
+    if release.get("live") or category in CLOSE_AFTER or declined:
         status = "Closed"
     else:
         status = "Awaiting Client Response"
@@ -1466,7 +1474,24 @@ def _after_send(item: dict) -> str:
 
     if release.get("live"):
         notes.append(_close_agent_fix(item))
+    if status == "Closed" and filed.get("id"):
+        notes.append(_close_engineer_task(filed, task))
     return " ".join(n for n in notes if n)
+
+
+def _close_engineer_task(filed: dict, task: dict) -> str:
+    """Close the task triage routed once the ticket itself is closed.
+
+    `Closed`, never `on prod`: on prod fires the on-prod handler, which
+    would email the customer a second time. A task already Closed or on
+    prod is left alone."""
+    if task.get("status") in ("closed", "on prod"):
+        return ""
+    try:
+        _clickup_status(filed["id"], "Closed")
+        return f"ClickUp task closed ({filed.get('url')})."
+    except Exception as exc:
+        return f":warning: ClickUp task NOT closed ({exc})."
 
 
 def _clickup_status(task_id: str, status: str) -> None:
