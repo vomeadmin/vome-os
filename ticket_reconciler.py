@@ -45,7 +45,15 @@ WHAT IT DOES (and does not)
     never files an engineer task on its own (`route N` does, on Sam's
     word); the fix ladder may still open a PR. A ticket is not re-triaged
     again for 7 days unless its task changed.
-  * Never writes to Zoho, never emails anyone, never closes anything.
+  * Closed in Zoho: every open Priority Queue task linked to the ticket
+    is closed, its engineers taken off, with a comment saying why. Sam,
+    2026-10-24: "if the tickets have been closed by me on Zoho ... they
+    should not be there". The Zoho webhook does the same the moment a
+    ticket closes (agent.sync_zoho_to_clickup); this catches what it
+    missed (no thread record, or a second task for the same ticket). On
+    Oct 24 there were 33. Agent Fixes and Sam's lists are left alone.
+    Closed fires no client email.
+  * Never writes to Zoho and never emails anyone.
 
 SWITCHES
 --------
@@ -54,6 +62,7 @@ SWITCHES
     RECONCILE_STALL_DAYS       14
     RECONCILE_NUDGE            default on
     RECONCILE_RETRIAGE_CAP     15 per run
+    RECONCILE_CLOSE_FOR_CLOSED default on
 """
 
 from __future__ import annotations
@@ -132,6 +141,11 @@ def _nudge_on() -> bool:
 
 def _retriage_cap() -> int:
     return int(os.environ.get("RECONCILE_RETRIAGE_CAP", "15"))
+
+
+def _close_for_closed_on() -> bool:
+    value = os.environ.get("RECONCILE_CLOSE_FOR_CLOSED", "")
+    return value.strip().lower() not in ("false", "0", "no", "off")
 
 
 def _now() -> datetime:
@@ -454,6 +468,105 @@ def retriage(record: dict) -> str:
 # The job
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Closed in Zoho -> off the engineer queue
+# ---------------------------------------------------------------------------
+
+ENGINEER_IDS = {49257687, 4434086}  # OnlyG, Sanjay
+CLOSED_NOTE = ("The Zoho ticket is Closed, so this comes off the engineer "
+               "queue (Sam's rule: a ticket closed in Zoho has no task left "
+               "in ClickUp). Reopen it if there is still engineering work "
+               "here.")
+
+
+def _open_queue_tasks() -> list[dict]:
+    tasks: list[dict] = []
+    for page in range(30):
+        resp = httpx.get(
+            f"{CLICKUP}/list/{PRIORITY_QUEUE}/task", headers=_headers(),
+            params={"page": page, "include_closed": "false",
+                    "subtasks": "true"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        batch = resp.json().get("tasks") or []
+        tasks.extend(batch)
+        if len(batch) < PAGE_SIZE:
+            break
+    return tasks
+
+
+def close_task(task: dict, note: str = CLOSED_NOTE) -> bool:
+    """A comment saying why, the engineers taken off, status Closed."""
+    try:
+        httpx.post(f"{CLICKUP}/task/{task['id']}/comment",
+                   headers=_headers(),
+                   json={"comment_text": note, "notify_all": False},
+                   timeout=30).raise_for_status()
+        remove = [a["id"] for a in task.get("assignees") or []
+                  if a.get("id") in ENGINEER_IDS]
+        httpx.put(f"{CLICKUP}/task/{task['id']}", headers=_headers(),
+                  json={"status": "Closed",
+                        "assignees": {"add": [], "rem": remove}},
+                  timeout=30).raise_for_status()
+        return True
+    except Exception as exc:
+        print(f"[RECONCILE] could not close {task.get('id')}: {exc}")
+        return False
+
+
+def close_tasks_for_ticket(ticket_id: str,
+                           tasks: list[dict] | None = None) -> list[str]:
+    """Close every open Priority Queue task whose Zoho Ticket Link is this
+    ticket. The caller has already seen the ticket Closed."""
+    from zoho_links import extract_zoho_ticket_id
+
+    if tasks is None:
+        tasks = _open_queue_tasks()
+    return [t["id"] for t in tasks
+            if _status(t) not in CLOSED_TASK | ON_PROD
+            and not is_feature_request(t)
+            and extract_zoho_ticket_id(t) == str(ticket_id)
+            and close_task(t)]
+
+
+_FEATURE_REQUEST = re.compile(r"feature request|request to review", re.I)
+
+
+def is_feature_request(task: dict) -> bool:
+    """A feature request outlives its ticket: closing the task would lose
+    the request, so it goes to Raw Intake on Sam's word, never closed."""
+    return bool(_FEATURE_REQUEST.search(task.get("name") or ""))
+
+
+def close_for_closed_tickets(act: bool = True) -> dict:
+    """Every open Priority Queue task whose Zoho ticket is Closed."""
+    import zoho_actions
+    from zoho_links import extract_zoho_ticket_id
+
+    tasks = _open_queue_tasks()
+    by_ticket: dict[str, list[dict]] = {}
+    for task in tasks:
+        tid = extract_zoho_ticket_id(task) or ""
+        if tid and _status(task) not in CLOSED_TASK | ON_PROD \
+                and not is_feature_request(task):
+            by_ticket.setdefault(tid, []).append(task)
+    closed: list[str] = []
+    for tid, linked in by_ticket.items():
+        try:
+            status = zoho_actions.ticket_status(tid)
+        except Exception:
+            # Unreadable is not Closed: leave the task where it is.
+            continue
+        if status != "Closed":
+            continue
+        if not act:
+            closed += [t["id"] for t in linked]
+            continue
+        closed += close_tasks_for_ticket(tid, linked)
+    return {"checked": len(by_ticket), "closed": closed}
+
+
 def run(retriage_cap: int | None = None, act: bool = True) -> dict:
     if not enabled():
         return {"status": "disabled"}
@@ -488,6 +601,12 @@ def run(retriage_cap: int | None = None, act: bool = True) -> dict:
 
     nudged = 0
     retriaged: list[str] = []
+    closed_for_closed: list[str] = []
+    if act and _close_for_closed_on():
+        try:
+            closed_for_closed = close_for_closed_tickets()["closed"]
+        except Exception as exc:
+            print(f"[RECONCILE] closed-ticket sweep failed: {exc}")
     if act:
         for record in records:
             if _nudge_on() and nudge(record, previous.get(
@@ -513,6 +632,7 @@ def run(retriage_cap: int | None = None, act: bool = True) -> dict:
         counts[r["state"]] = counts.get(r["state"], 0) + 1
     out = {"status": "ok", "tickets": len(records), "states": counts,
            "nudged": nudged, "retriaged": retriaged,
+           "closed_for_closed_tickets": closed_for_closed,
            "retriage_waiting": max(0, len(
                [r for r in records if r["state"] in RETRIAGE_STATES])
                - len(retriaged))}
