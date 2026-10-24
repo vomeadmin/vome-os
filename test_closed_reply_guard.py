@@ -89,6 +89,73 @@ def test_confident_ack_still_allows_a_genuine_thanks(monkeypatch):
     assert agent._is_confident_ack("Thank you so much!", has_attachment=True) is False
 
 
+# #9526 (2026-10-20): our answer closed the ticket, Allie's out-of-office came
+# back, and Zoho's reply workflow flipped it Closed -> Processing.
+OOO_REPLY = {"createdTime": "2026-10-20T10:38:22.000Z",
+             "summary": "I will be out of the office Oct 20-21"}
+REPLY_WORKFLOW_FLIP = {"time": "2026-10-20T10:38:31.000Z", "from": "Closed",
+                       "to": "Processing", "actor_type": "Workflow",
+                       "actor": "Customer Reply to Processing Status"}
+OUR_CLOSE = {"time": "2026-10-20T10:38:14.000Z", "from": "In Progress",
+             "to": "Closed", "actor_type": "Agent", "actor": "Support Agent"}
+
+
+def _restore_with(monkeypatch, changes):
+    import zoho_desk_api
+
+    set_to = []
+    monkeypatch.setattr(zoho_desk_api, "status_history", lambda t: changes)
+    monkeypatch.setattr(agent, "_set_zoho_ticket_status",
+                        lambda t, s: set_to.append(s) or True)
+    return agent._restore_status_after_auto_reply("T", OOO_REPLY), set_to
+
+
+def test_an_out_of_office_gets_its_status_back(monkeypatch):
+    restored, set_to = _restore_with(monkeypatch,
+                                     [REPLY_WORKFLOW_FLIP, OUR_CLOSE])
+    assert restored == "Closed"
+    assert set_to == ["Closed"]
+
+
+def test_awaiting_client_response_comes_back_too(monkeypatch):
+    flip = dict(REPLY_WORKFLOW_FLIP, **{"from": "Awaiting Client Response"})
+    restored, set_to = _restore_with(monkeypatch, [flip])
+    assert set_to == ["Awaiting Client Response"]
+
+
+def test_a_status_a_person_set_since_is_left_alone(monkeypatch):
+    sam = {"time": "2026-10-20T10:40:00.000Z", "from": "Processing",
+           "to": "In Progress", "actor_type": "Agent", "actor": "Sam"}
+    restored, set_to = _restore_with(monkeypatch,
+                                     [sam, REPLY_WORKFLOW_FLIP, OUR_CLOSE])
+    assert restored is None and set_to == []
+
+
+def test_an_older_workflow_change_is_not_undone(monkeypatch):
+    # The workflow had not run for this reply; its newest change is a day old.
+    old = dict(REPLY_WORKFLOW_FLIP, time="2026-10-19T09:00:00.000Z")
+    restored, set_to = _restore_with(monkeypatch, [old])
+    assert restored is None and set_to == []
+
+
+def test_unreadable_history_changes_nothing(monkeypatch):
+    restored, set_to = _restore_with(monkeypatch, None)
+    assert restored is None and set_to == []
+
+
+def test_the_out_of_office_guard_schedules_the_restore(monkeypatch):
+    conversations = {"data": [dict(OOO_REPLY, author={"type": "END_USER",
+                                                      "email": "a@b.org"})]}
+    scheduled = []
+    monkeypatch.setattr(agent, "fetch_ticket_conversations",
+                        lambda t: conversations)
+    monkeypatch.setattr(agent, "_restore_status_after_auto_reply_later",
+                        lambda t, r: scheduled.append(t))
+    monkeypatch.setattr(agent, "_processing_updates", {})
+    assert agent.process_ticket_update("T9526") is None
+    assert scheduled == ["T9526"]
+
+
 if __name__ == "__main__":
     # Minimal runner so this works without pytest installed.
     class _MP:

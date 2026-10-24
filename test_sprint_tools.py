@@ -540,3 +540,62 @@ def test_view_header_without_recipient_still_names_the_client():
     view = sprint_tools.view(_item(recipients={}))
     assert view["contact"] == ""
     assert "Mustard Seed (Pro)" in view["header"]
+
+
+def _clickup(monkeypatch, linked=(), live=None):
+    import clickup_search
+    import ticket_routing
+
+    monkeypatch.setattr(clickup_search, "linked_tasks",
+                        lambda n, t: list(linked))
+    monkeypatch.setattr(ticket_routing, "task_state",
+                        lambda filed: (live or {}).get(
+                            filed["id"], {"status": "unreadable"}))
+
+
+def test_links_line_opens_zoho_and_clickup_and_names_the_list(monkeypatch):
+    # Sam (2026-10-24): every card should say where the task lives now
+    # (Sam Accepted (Build Now), Priority Queue...) with one click to the
+    # Zoho ticket and the ClickUp task.
+    _clickup(monkeypatch, live={"868mgyqdm": {
+        "status": "queued", "name": "Board: sort by opportunity",
+        "list": "Sam Accepted (Build Now)", "assignee": "Sam",
+        "url": "https://app.clickup.com/t/868mgyqdm"}})
+    view = sprint_tools.view(_item(card={
+        "live_question": "Sort the Board by opportunity",
+        "existing_work": "This is already logged on 868mgyqdm."}))
+    assert view["links"].startswith("[Zoho #9604](")
+    assert view["links"].endswith(
+        "| [ClickUp](https://app.clickup.com/t/868mgyqdm) in Sam Accepted "
+        "(Build Now), queued, assigned Sam")
+    assert view["clickup_tasks"][0]["list"] == "Sam Accepted (Build Now)"
+
+
+def test_links_line_lists_the_engineer_task_first_then_linked(monkeypatch):
+    _clickup(monkeypatch, linked=[{
+        "id": "86linked1", "name": "x", "list": "Raw Intake",
+        "status": "queued", "assignee": "",
+        "url": "https://app.clickup.com/t/86linked1"}], live={"86engtask": {
+            "status": "in progress", "list": "Priority Queue",
+            "assignee": "Ron", "url": "https://app.clickup.com/t/86engtask"}})
+    view = sprint_tools.view(_item(eng_task={
+        "id": "86engtask", "url": "https://app.clickup.com/t/86engtask"}))
+    first, second = view["links"].split(" | ")[1:]
+    assert first.endswith("in Priority Queue, in progress, assigned Ron")
+    assert second.endswith("in Raw Intake, queued, unassigned")
+
+
+def test_links_line_never_says_none_when_clickup_was_not_read(monkeypatch):
+    import clickup_search
+
+    _clickup(monkeypatch)
+
+    def down(n, t):
+        raise RuntimeError("429")
+
+    monkeypatch.setattr(clickup_search, "linked_tasks", down)
+    view = sprint_tools.view(_item())
+    assert "no ClickUp task" not in view["links"]
+    assert "could not be searched" in view["links"]
+    _clickup(monkeypatch)
+    assert sprint_tools.view(_item())["links"].endswith("| no ClickUp task")

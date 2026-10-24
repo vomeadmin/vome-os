@@ -117,6 +117,78 @@ def _engineer(item: dict) -> dict:
             "filed": filed.get("how") or ""}
 
 
+# A ClickUp task id as cards name it ("already logged on 868mgyqdm") or as a
+# link.
+_TASK_ID = re.compile(r"(?:app\.clickup\.com/t/|\b)(86[a-z0-9]{7})\b")
+_MAX_TASKS = 3
+
+
+def _tasks(item: dict, card: dict) -> tuple[list[dict], str]:
+    """The ClickUp tasks behind this ticket and the list each sits in now,
+    so Sam can open the work and see whose list it is on without searching
+    (Sam, 2026-10-24). The engineer task and the agent fix parent are read
+    live; tasks linked to the ticket come from the cached list search.
+    Returns (tasks, problem); a problem means a task may exist unseen."""
+    import clickup_search
+    import ticket_routing
+
+    found: dict[str, dict] = {}
+    problem = ""
+
+    def live(task_id: str) -> None:
+        if not task_id or task_id in found:
+            return
+        state = ticket_routing.task_state({"id": task_id})
+        if state.get("status") == "unreadable":
+            nonlocal problem
+            problem = f"ClickUp task {task_id} could not be read"
+            return
+        found[task_id] = {
+            "id": task_id, "name": state.get("name") or "",
+            "list": state.get("list") or "", "status": state.get("status"),
+            "assignee": state.get("assignee") or "",
+            "url": state.get("url") or f"https://app.clickup.com/t/{task_id}"}
+
+    live((item.get("eng_task") or {}).get("id") or "")
+    if item.get("fix_pr"):
+        try:
+            live(str(_ledger(str(item.get("ticket_id") or ""))
+                     .get("parent_task") or ""))
+        except Exception:
+            pass
+    try:
+        for task in clickup_search.linked_tasks(
+                str(item.get("ticket_number") or ""),
+                str(item.get("ticket_id") or "")):
+            found.setdefault(task["id"], {
+                k: task.get(k) or "" for k in
+                ("id", "name", "list", "status", "assignee", "url")})
+    except Exception as exc:
+        problem = f"ClickUp could not be searched ({exc})"
+    for task_id in _TASK_ID.findall(str(card.get("existing_work") or "")):
+        live(task_id)
+    return list(found.values())[:_MAX_TASKS], problem
+
+
+def _links(item: dict, zoho_url: str, tasks: list[dict],
+           problem: str) -> str:
+    """'[Zoho #9557](..) | [ClickUp](..) in Sam Accepted (Build Now),
+    queued, assigned Sam': where the ticket and its work live, one click
+    each."""
+    parts = [f"[Zoho #{item.get('ticket_number')}]({zoho_url})"]
+    for task in tasks:
+        where = ", ".join(p for p in (
+            task.get("list") or "unknown list", task.get("status") or "",
+            f"assigned {task['assignee']}" if task.get("assignee")
+            else "unassigned") if p)
+        parts.append(f"[ClickUp]({task['url']}) in {where}")
+    if problem:
+        parts.append(f"{problem}, so a task may exist that is not shown")
+    elif not tasks:
+        parts.append("no ClickUp task")
+    return " | ".join(parts)
+
+
 def _deep_view(card: dict) -> dict:
     deep = card.get("deep") or {}
     if not deep:
@@ -158,13 +230,19 @@ def view(item: dict) -> dict:
         f"waiting {sprint_batch.age(item)}",
         "IMPORTANT" if item.get("important") else "",
     ) if p)
+    zoho_url = zoho_actions.ticket_url(item.get("ticket_id"))
+    tasks, problem = _tasks(item, card)
     return {
         "item": item.get("number"),
         "ticket": f"#{item.get('ticket_number')}",
         "header": header,
+        # The second line on every card: Zoho and ClickUp one click away,
+        # and the list the work sits in now.
+        "links": _links(item, zoho_url, tasks, problem),
         "client": client,
         "contact": contact,
-        "zoho_url": zoho_actions.ticket_url(item.get("ticket_id")),
+        "zoho_url": zoho_url,
+        "clickup_tasks": tasks,
         "account": item.get("account"),
         "important": bool(item.get("important")),
         "status": item.get("status"),
@@ -267,8 +345,12 @@ def sprint_queue(include_finished: bool = False) -> dict:
         "held": groups["held"],
         "agent_fixing": groups["in_flight"],
         "how_to_use_this": (
-            "ready_to_send drafts are complete; show each one in full and "
-            "send only on Sam's explicit word. An item with agent_fix set "
+            "Every card opens with two lines given exactly: header, then "
+            "links (the Zoho ticket and each ClickUp task as clickable "
+            "links, with the list each task sits in, its status and "
+            "assignee). ready_to_send drafts are complete; show each one "
+            "in full and send only on Sam's explicit word. An item with "
+            "agent_fix set "
             "is one the agent is fixing: say so plainly (the agent is "
             "fixing this, here is the acknowledgment to send). "
             "agent_fixing lists tickets already acknowledged that the agent "

@@ -1818,6 +1818,82 @@ def _looks_like_auto_reply(text: str) -> bool:
     return bool(_AUTO_REPLY_RE.search(text or ""))
 
 
+# Zoho's "Customer Reply to Processing Status" workflow moves a ticket to
+# Processing on ANY customer email, an out-of-office included. The webhook
+# can reach us before that workflow has run, so the restore waits a moment.
+AUTO_REPLY_SETTLE_SECONDS = 20
+# Clock skew between the reply's createdTime and the workflow's eventTime
+# (#9526: reply 10:38:22, workflow 10:38:31).
+AUTO_REPLY_WORKFLOW_SKEW_SECONDS = 120
+
+
+def _zoho_time(value: str):
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat((value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _restore_status_after_auto_reply(ticket_id: str, reply: dict) -> str | None:
+    """Put back the status Zoho's reply workflow overwrote for an
+    out-of-office. Returns the restored status, or None if nothing changed.
+
+    #9526 (2026-10-20): our answer closed the ticket, Allie's out-of-office
+    arrived 10 seconds later, the workflow flipped Closed -> Processing, and
+    the ticket sat there looking owed for days. Only the newest status change
+    is undone, and only when a workflow made it, to Processing, around the
+    time of the auto-reply: a status a person set since is never overridden.
+    """
+    from datetime import timedelta
+    from zoho_desk_api import status_history
+
+    changes = status_history(ticket_id)
+    if not changes:
+        print(f"[NO-ACTION] OOO on ticket {ticket_id}: no status history "
+              "read -- status left as is")
+        return None
+    newest = changes[0]
+    replied = _zoho_time(reply.get("createdTime") or "")
+    changed = _zoho_time(newest["time"])
+    by_reply_workflow = (
+        newest["actor_type"].lower() == "workflow"
+        and newest["to"].lower() == ZOHO_PROCESSING.lower()
+        and replied is not None and changed is not None
+        and changed >= replied - timedelta(
+            seconds=AUTO_REPLY_WORKFLOW_SKEW_SECONDS)
+    )
+    if not by_reply_workflow or not newest["from"] \
+            or newest["from"].lower() == newest["to"].lower():
+        print(f"[NO-ACTION] OOO on ticket {ticket_id}: newest status change "
+              f"({newest['actor']}: {newest['from']} -> {newest['to']}) is "
+              "not the reply workflow -- status left as is")
+        return None
+    if not _set_zoho_ticket_status(ticket_id, newest["from"]):
+        return None
+    print(f"[NO-ACTION] OOO on ticket {ticket_id}: status restored "
+          f"{newest['to']} -> {newest['from']}")
+    return newest["from"]
+
+
+def _restore_status_after_auto_reply_later(ticket_id: str, reply: dict) -> None:
+    """_restore_status_after_auto_reply once Zoho's workflow has run. The
+    webhook handler runs inline, so this never sleeps on it."""
+    import threading
+
+    def _run():
+        try:
+            _restore_status_after_auto_reply(ticket_id, reply)
+        except Exception as exc:
+            print(f"[NO-ACTION] OOO status restore failed on ticket "
+                  f"{ticket_id}: {exc}")
+
+    timer = threading.Timer(AUTO_REPLY_SETTLE_SECONDS, _run)
+    timer.daemon = True
+    timer.start()
+
+
 def _classify_no_action_reply(reply_content: str) -> bool:
     """Cheap Claude classifier: True ONLY for a pure courtesy ack that needs
     no response. Conservative -- returns False on anything substantive or on
@@ -2057,12 +2133,14 @@ def process_ticket_update(ticket_id: str) -> str | None:
         # without the fallback every classifier below would judge empty text.
         reply_content_clean = _extract_reply_text(latest)
 
-        # OOO / autoresponder guard -- never treat an out-of-office as a reply.
+        # OOO / autoresponder guard -- never treat an out-of-office as a reply,
+        # and undo the Processing flip Zoho's reply workflow made for it.
         if _looks_like_auto_reply(reply_content_clean):
             print(
                 f"[NO-ACTION] OOO/autoresponder on ticket {ticket_id}"
-                " -- not treating as a reply"
+                " -- not treating as a reply, restoring its status"
             )
+            _restore_status_after_auto_reply_later(ticket_id, latest)
             return None
 
         # NO-ACTION fast path. A pure courtesy ack needs no response: realign

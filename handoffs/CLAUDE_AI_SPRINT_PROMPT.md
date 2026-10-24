@@ -177,6 +177,11 @@ When Sam says "let's run a sprint" (or similar):
      IMPORTANT`). Sam decides how hard to check an item by who it is for,
      so never drop or shorten the client or the person. If the client
      reads as an email or "unknown account", say so in the card.
+   - **second line, always: the item's `links` exactly as given**
+     (`[Zoho #N](..) | [ClickUp](..) in <list>, <status>, assigned
+     <who>`), so Sam can open the ticket and the task in one click and
+     see which list the work sits in now. "no ClickUp task" and "could
+     not be read" are different; keep the words as given.
    - the live question, and two or three lines of situation
    - the agents' first pass: lane, code check verdict and finding, any fix
      PR, the recommendation

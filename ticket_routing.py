@@ -461,7 +461,11 @@ def _read_state(task_id: str) -> dict:
     declined = status == "declined" or _resolution(task) == RESOLUTION_DECLINED
     return {"status": status, "shipped": status in SHIPPED and not declined,
             "declined": declined,
-            "assignee": ", ".join(n for n in names if n)}
+            "assignee": ", ".join(n for n in names if n),
+            # Where the task sits now, for the sprint card's links line.
+            "name": task.get("name") or "",
+            "list": (task.get("list") or {}).get("name") or "",
+            "url": task.get("url") or ""}
 
 
 def _resolution(task: dict) -> str:

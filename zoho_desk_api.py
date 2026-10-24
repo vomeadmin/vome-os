@@ -418,6 +418,43 @@ def _normalize_ticket_list(items: list) -> list[dict]:
     return tickets
 
 
+def status_history(ticket_id: str, limit: int = 20) -> list[dict] | None:
+    """The ticket's status changes, newest first, from its History tab.
+
+    Each is {"time", "from", "to", "actor_type", "actor"}; actor_type is
+    Zoho's ("Agent", "Workflow", "Contact", "System"). None when Zoho
+    cannot be read, so a caller never mistakes "unreadable" for "no change".
+    """
+    if not ZOHO_DESK_REFRESH_TOKEN:
+        return None
+
+    resp = _api_request(
+        "GET",
+        f"/tickets/{ticket_id}/History",
+        params={"limit": str(limit)},
+    )
+    if not resp or resp.status_code != 200:
+        return None
+
+    changes = []
+    for event in resp.json().get("data") or []:
+        if event.get("eventName") != "TicketUpdated":
+            continue
+        actor = event.get("actor") or {}
+        for prop in event.get("eventInfo") or []:
+            if prop.get("propertyName") != "Status":
+                continue
+            value = prop.get("propertyValue") or {}
+            changes.append({
+                "time": event.get("eventTime") or "",
+                "from": value.get("previousValue") or "",
+                "to": value.get("updatedValue") or "",
+                "actor_type": actor.get("type") or "",
+                "actor": actor.get("name") or "",
+            })
+    return changes
+
+
 def upload_attachment(
     ticket_id: str,
     file_url: str,
