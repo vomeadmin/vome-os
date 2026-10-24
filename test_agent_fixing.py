@@ -548,3 +548,74 @@ def test_a_retry_is_stamped_with_its_own_time(db):
     row = db.query(f"SELECT attempted_at, reason FROM {ticket_fix.LEDGER}")[0]
     assert row["reason"] == "window too narrow"
     assert row["attempted_at"] > first["attempted_at"]
+
+
+# ---------------------------------------------------------------------------
+# Filing: the ticket's own task is moved in, never copied (2026-10-24)
+# ---------------------------------------------------------------------------
+
+LINK = ("https://desk.zoho.com/agent/vomevolunteer/vome-volunteer/tickets/"
+        "details/569440000043239739")
+
+
+def _filing(monkeypatch, pq_tasks, takes_parent=True):
+    from types import SimpleNamespace
+
+    calls = []
+
+    def fake(method, path, body=None):
+        calls.append((method, path, body))
+        if method == "POST" and path.endswith("/task") and body.get(
+                "parent") is None:
+            return {"id": "P1"}
+        if method == "POST" and path.endswith("/task"):
+            return {"id": "NEWCHILD"}
+        if method == "GET" and path.startswith("/list/"):
+            return {"tasks": pq_tasks}
+        if method == "GET" and path.startswith("/task/"):
+            return {"parent": "P1" if takes_parent else None,
+                    "list": {"id": ticket_fix.AGENT_FIXES_LIST}}
+        return {}
+
+    monkeypatch.setattr(ticket_fix, "_clickup", fake)
+    repo = SimpleNamespace(alias="mobile", slug="VomeApp")
+    out = ticket_fix._file_tasks(
+        "9594", "North Sky Raptor Sanctuary", {"live_question": "crash"},
+        repo, PR, LINK, ticket_fix.MERGE_OWNER, "569440000043239739")
+    return out, calls
+
+
+def _pq_task(task_id="868eng", link=LINK, name="[#9594] North Sky -- crash"):
+    fields = ([{"id": ticket_fix.FIELD_ZOHO_TICKET_LINK, "value": link}]
+              if link else [])
+    return {"id": task_id, "name": name, "custom_fields": fields,
+            "assignees": [{"id": 4434086}], "date_updated": "1"}
+
+
+def test_the_engineers_own_task_becomes_the_child(monkeypatch):
+    # #9594: Sanjay's 868mk9g2j stayed open beside a fresh copy, 868mmwxv4.
+    (parent, child), calls = _filing(monkeypatch, [_pq_task()])
+    assert (parent, child) == ("P1", "868eng")
+    assert not [c for c in calls if c[2] and c[2].get("parent")
+                and c[0] == "POST"]
+    assert ("PUT", "/task/868eng", {"parent": "P1"}) in calls
+    tidy = next(b for m, p, b in calls if m == "PUT" and p == "/task/868eng"
+                and "assignees" in (b or {}))
+    assert tidy["assignees"]["rem"] == [4434086]
+    assert tidy["status"] == "in progress"
+    assert not any((b or {}).get("status") == "on prod" for _, _, b in calls)
+
+
+def test_a_task_that_only_names_the_number_is_not_moved(monkeypatch):
+    (parent, child), calls = _filing(monkeypatch, [_pq_task(link="")])
+    assert child == "NEWCHILD"
+    assert not any(p == "/task/868eng" for _, p, _ in calls)
+
+
+def test_a_refused_parent_files_a_child_and_leaves_the_task_alone(
+        monkeypatch):
+    (parent, child), calls = _filing(monkeypatch, [_pq_task()],
+                                     takes_parent=False)
+    assert child == "NEWCHILD"
+    assert not any(m == "PUT" and p == "/task/868eng"
+                   and "assignees" in (b or {}) for m, p, b in calls)

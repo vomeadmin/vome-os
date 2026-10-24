@@ -68,6 +68,7 @@ import sprint_store
 from vomeos import store
 
 AGENT_FIXES_LIST = "901115573468"
+PRIORITY_QUEUE = "901113386257"
 FIELD_ZOHO_TICKET_LINK = "4776215b-c725-4d79-8f20-c16f0f0145ac"
 FIELD_FIX_COMMIT = "ee6d6f9b-2093-40df-846c-4c5e7003f2c5"
 FIELD_MERGE_OWNER = "12682083-5a03-4f27-a6b6-5c716aa5dd73"
@@ -349,7 +350,7 @@ def _propose(ticket_id, ticket_number, account, card, zoho_url,
 
     owner = ENGINEERS[reviewer]["clickup"] if reviewer else MERGE_OWNER
     parent, child = _file_tasks(ticket_number, account, card, repo, pr["url"],
-                                zoho_url, owner)
+                                zoho_url, owner, ticket_id)
     _record(ticket_id, ticket_number, "pr_opened", "", pr["url"], parent,
             child, thread_id=thread_id)
     # Zoho says so straight away: In Progress on the Agent Fixes team,
@@ -594,7 +595,7 @@ def _clickup(method: str, path: str, body: dict | None = None) -> dict:
 
 
 def _file_tasks(ticket_number, account, card, repo, pr_url, zoho_url,
-                owner=MERGE_OWNER):
+                owner=MERGE_OWNER, ticket_id=""):
     code = card.get("code_check") or {}
     summary = (card.get("live_question") or "").strip()[:90]
     description = "\n".join([
@@ -628,15 +629,95 @@ def _file_tasks(ticket_number, account, card, repo, pr_url, zoho_url,
             {"id": FIELD_RELEASE_CHECK, "value": RELEASE_WAITING},
         ],
     })
+    child_name = (f"[#{ticket_number}] {account.split('(')[0].strip()} -- "
+                  f"{summary} (linked to fix)")
+    own = _own_task(ticket_id)
+    if own and _move_in(own, str(parent.get("id") or ""), child_name,
+                        pr_url):
+        return str(parent.get("id") or ""), own["id"]
     child = _clickup("POST", f"/list/{AGENT_FIXES_LIST}/task", {
-        "name": f"[#{ticket_number}] {account.split('(')[0].strip()} -- "
-                f"{summary} (linked to fix)",
+        "name": child_name,
         "parent": parent.get("id"),
         "status": "in progress",
         "custom_fields": [{"id": FIELD_ZOHO_TICKET_LINK,
                            "value": zoho_url}],
     })
     return str(parent.get("id") or ""), str(child.get("id") or "")
+
+
+def _own_task(ticket_id: str) -> dict:
+    """The ticket's own open Priority Queue task, or {}.
+
+    Only a task whose Zoho Ticket Link names this ticket counts. One that
+    merely mentions the number, or that an incident match joined to it, is
+    someone else's work and is never moved (Sam's recipe, 2026-10-22).
+    """
+    if not ticket_id:
+        return {}
+    from zoho_links import extract_zoho_ticket_id
+
+    found = []
+    for page in range(20):
+        body = _clickup("GET", f"/list/{PRIORITY_QUEUE}/task?page={page}"
+                               "&include_closed=false&subtasks=true")
+        batch = body.get("tasks") or []
+        found += [t for t in batch
+                  if extract_zoho_ticket_id(t) == str(ticket_id)]
+        if len(batch) < 100:
+            break
+    engineer_ids = {e["clickup"] for e in ENGINEERS.values()}
+    # The engineer's task first (that is the queue the fix takes it off),
+    # then the most recently touched.
+    found.sort(key=lambda t: (
+        any(a.get("id") in engineer_ids for a in t.get("assignees") or []),
+        int(t.get("date_updated") or 0)), reverse=True)
+    return found[0] if found else {}
+
+
+def _move_in(task: dict, parent_id: str, name: str, pr_url: str) -> bool:
+    """Move the ticket's own task under the fix as its child: moved, never
+    copied, so the engineer's queue loses it and only one child per ticket
+    can email the client when the fix is live (release_resolutions keys
+    on the child). False, with nothing changed, when ClickUp refuses the
+    new parent; the caller then files a fresh child as before."""
+    if not parent_id:
+        return False
+    engineer_ids = {e["clickup"] for e in ENGINEERS.values()}
+    try:
+        _clickup("PUT", f"/task/{task['id']}", {"parent": parent_id})
+        moved = _clickup("GET", f"/task/{task['id']}")
+        if str(moved.get("parent") or "") != parent_id:
+            print(f"[TICKET FIX] {task['id']} did not take parent "
+                  f"{parent_id}; filing a new child")
+            return False
+    except Exception as exc:
+        print(f"[TICKET FIX] could not move {task['id']} in: {exc}")
+        return False
+    # The parent is set, so it is the fix's child from here on. The rest
+    # is tidying, and a failure in it is said, not undone.
+    try:
+        _clickup("PUT", f"/task/{task['id']}", {
+            "name": name, "status": "in progress",
+            "assignees": {"add": [], "rem": [
+                a["id"] for a in task.get("assignees") or []
+                if a.get("id") in engineer_ids]},
+        })
+        if str((moved.get("list") or {}).get("id") or "") != AGENT_FIXES_LIST:
+            import clickup_tasks
+
+            clickup_tasks.move_clickup_task(task["id"], AGENT_FIXES_LIST)
+        _clickup("POST", f"/task/{task['id']}/comment", {
+            "comment_text": (
+                "The agent opened a fix for this ticket and took this task "
+                f"over as the child of https://app.clickup.com/t/{parent_id}"
+                f".\nFix PR: {pr_url}\nSam merges it into the dev branch; "
+                "the release watcher tells the client when it is live. "
+                "Reassign yourself if this is wrong."),
+            "notify_all": False,
+        })
+    except Exception as exc:
+        print(f"[TICKET FIX] {task['id']} moved in, tidying failed: {exc}")
+    return True
 
 
 # ---------------------------------------------------------------------------
