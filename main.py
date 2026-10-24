@@ -405,6 +405,45 @@ _scheduler.add_job(
     max_instances=1,
 )
 
+# Dependency watch. Mirrors engineering.dependency_scan (daily 07:45) and
+# engineering.dependency_digest (Wednesday 10:00). Imported here rather than
+# at the top so a slow import never delays the web app's boot.
+def _run_dependency_scan():
+    from dependency_watch import run_daily_scan
+
+    return run_daily_scan()
+
+
+def _run_dependency_digest():
+    from dependency_watch import run_weekly_digest
+
+    return run_weekly_digest()
+
+
+_scheduler.add_job(
+    _run_dependency_scan,
+    CronTrigger(
+        hour=int(os.environ.get("DEPENDENCY_SCAN_HOUR", "7")),
+        minute=int(os.environ.get("DEPENDENCY_SCAN_MINUTE", "45")),
+        timezone="America/Montreal",
+    ),
+    misfire_grace_time=3600,
+    coalesce=True,
+    max_instances=1,
+)
+_scheduler.add_job(
+    _run_dependency_digest,
+    CronTrigger(
+        day_of_week="wed",
+        hour=int(os.environ.get("DEPENDENCY_DIGEST_HOUR", "10")),
+        minute=int(os.environ.get("DEPENDENCY_DIGEST_MINUTE", "0")),
+        timezone="America/Montreal",
+    ),
+    misfire_grace_time=3600,
+    coalesce=True,
+    max_instances=1,
+)
+
 # Credential watch, 08:00. Mirrors engineering.code_access. Runs before the
 # Sentry report so a dead token is known about before the report that depends
 # on it goes out. Silent unless something is broken or expiring.

@@ -86,6 +86,11 @@ zoho_actions.py    recipients, sendReply, silent status changes
 ticket_images.py   inline screenshots + attachments (images, text logs) for the agents
 ticket_fix.py      code-check bug -> fix PR -> Agent Fixes -> on dev on merge
 release_watcher.py proves an Agent Fix live, posts "Fix live, N clients"
+dependency_watch.py live lockfiles vs OSV.dev, CISA KEV, EPSS, endoflife.date:
+                   07:45 alerts in #eng-infra only for what is new, Wed
+                   10:00 digest. Unread repos are "not checked", never clean.
+                   Code decides the tiers; Claude only adds a thread note.
+                   NVD (optional key) fills missing severities, never finds
 release_resolutions.py  a live fix -> one resolution draft per client, as a
                    card in the day thread (RELEASE_AUTO_SEND sends clean ones)
 sentry_agent_fixes.py  actionable Sentry issue -> one Agent Fixes task/cause

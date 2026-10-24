@@ -29,6 +29,7 @@ import os
 from vomeos.worker import (
     CLAIM_DAILY,
     CLAIM_NONE,
+    CLAIM_WEEKLY,
     register_event_handler,
     register_job,
 )
@@ -242,6 +243,43 @@ def _register_feature_desk() -> None:
     )
 
 
+def _register_dependency_watch() -> None:
+    """Known vulnerabilities in what we run, into #eng-infra
+    (dependency_watch.py). Sam, 2026-10-24: monthly is too late."""
+    from dependency_watch import run_daily_scan, run_weekly_digest
+
+    # 07:45, before the 08:00 credential watch and the Sentry morning. Daily
+    # because CISA KEV and new critical advisories land any day, and a
+    # Pillow-class bug should not wait for the digest. Silent unless
+    # something new needs a look; the ledger says each thing once.
+    register_job(
+        "engineering.dependency_scan",
+        run_daily_scan,
+        cron=(
+            f"{os.environ.get('DEPENDENCY_SCAN_MINUTE', '45')} "
+            f"{os.environ.get('DEPENDENCY_SCAN_HOUR', '7')} * * *"
+        ),
+        queue=QUEUE,
+        claim=CLAIM_DAILY,
+        time_limit=1200,
+        description="Check every repo's lockfile for new vulnerabilities",
+    )
+    # Wednesday 10:00, clear of the Monday reports and the 09:00 Sentry
+    # report. DEPENDENCY_WATCH_DIGEST_EVERY_WEEKS=2 skips odd weeks.
+    register_job(
+        "engineering.dependency_digest",
+        run_weekly_digest,
+        cron=(
+            f"{os.environ.get('DEPENDENCY_DIGEST_MINUTE', '0')} "
+            f"{os.environ.get('DEPENDENCY_DIGEST_HOUR', '10')} * * wed"
+        ),
+        queue=QUEUE,
+        claim=CLAIM_WEEKLY,
+        time_limit=1800,
+        description="Weekly dependency and end-of-life digest in #eng-infra",
+    )
+
+
 def register_all() -> None:
     """Register everything engineering owns. Idempotent."""
     _register_sentry()
@@ -249,6 +287,7 @@ def register_all() -> None:
     _register_bug_reports()
     _register_workflow_log()
     _register_feature_desk()
+    _register_dependency_watch()
 
 
 # Importing this module registers the work, which is what

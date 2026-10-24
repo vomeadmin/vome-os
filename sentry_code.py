@@ -343,7 +343,8 @@ def _commit_rows(data) -> list[str]:
 # reference, under a larger budget.
 
 FEATURE_WINDOW = int(os.environ.get("FEATURE_BUILD_WINDOW", "100"))
-FEATURE_MAX_CHARS = int(os.environ.get("FEATURE_BUILD_MAX_CHARS", "60000"))
+# Six anchors at 200 lines each, plus import blocks and precedent.
+FEATURE_MAX_CHARS = int(os.environ.get("FEATURE_BUILD_MAX_CHARS", "100000"))
 FEATURE_MAX_REFERENCES = int(os.environ.get("FEATURE_BUILD_MAX_REFS", "4"))
 
 # A reference as the architect writes it: "core:path/file.py:123", the repo

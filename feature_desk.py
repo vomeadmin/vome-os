@@ -651,11 +651,22 @@ def _can_build(item: dict) -> tuple[bool, str]:
         return False, (f"repo {build.get('repo')!r} is not one an agent "
                        "builds in (core, database)")
     anchors = [a for a in build.get("anchors") or [] if isinstance(a, str)]
-    if not anchors or len(anchors) > 3:
-        return False, "needs one to three exact file:line anchors"
+    if not anchors or len(anchors) > MAX_ANCHORS:
+        return False, (f"needs one to {MAX_ANCHORS} exact file:line "
+                       "anchors")
     if not all(re.match(r"^[\w./-]+\.py:\d+$", a) for a in anchors):
         return False, f"anchors are not exact path:line ({anchors})"
+    if len({a.rsplit(":", 1)[0] for a in anchors}) > MAX_BUILD_FILES:
+        return False, f"edits more than {MAX_BUILD_FILES} files"
     return True, ""
+
+
+# The envelope is three files, not three edits. A helper and its call site
+# can sit 600 lines apart in one file, and the builder only sees a window
+# around each anchor (2026-10-24: three anchors spread over three files
+# left the V4 _get_shifts call site unseen, and every `go 1` refused).
+MAX_BUILD_FILES = 3
+MAX_ANCHORS = 6
 
 
 # The architect's own words for something it has not looked at yet. An
@@ -727,6 +738,16 @@ def _build(ts: str, row: dict, items: dict, n: str,
             # Sam's `go 1` on profile status was logged over missing imports).
             item["state"] = HELD
             item["build_stopped"] = reason
+            # Every path:line the builder asked for comes with the next
+            # `go N`, or the retry is shown the same source and refuses the
+            # same way (2026-10-24: it named v4/api.py:1328 and the second
+            # `go 1` still stopped short of it).
+            import sentry_code
+            asked = item.get("source_asked") or []
+            for path, line in sentry_code.references(reason):
+                if f"{path}:{line}" not in asked:
+                    asked.append(f"{path}:{line}")
+            item["source_asked"] = asked
             _save(ts, items=json.dumps(items))
             _post(f"*{n}* needs more source than the builder was given: "
                   f"{reason.rstrip('. ')}. <@{SAM_SLACK}> say `go {n}` to "
@@ -803,7 +824,9 @@ def _propose(ts: str, item: dict):
     ref = sentry_projects.fix_target(repo.slug) or repo.branch
     anchors = [a.rsplit(":", 1) for a in build.get("anchors") or []]
     refs = sentry_code.references(
-        f"{item.get('evidence') or ''}\n{build.get('plan') or ''}")
+        f"{item.get('evidence') or ''}\n{build.get('plan') or ''}\n"
+        f"{item.get('build_stopped') or ''}\n"
+        + " ".join(item.get("source_asked") or []))
     gathered = sentry_code.gather_for_build(
         [(path, int(line)) for path, line in anchors], repo.slug, ref,
         host=repo.host, owner=repo.owner, refs=refs)

@@ -203,6 +203,8 @@ def test_with_prs_off_the_reply_says_ready_not_building(monkeypatch, desk):
     ({"repo": "web", "anchors": ["src/a.py:1"], "plan": "x"}, "repo"),
     ({"repo": "core", "anchors": [], "plan": "x"}, "anchors"),
     ({"repo": "core", "anchors": ["a.py:1", "b.py:2", "c.py:3", "d.py:4"],
+      "plan": "x"}, "more than 3 files"),
+    ({"repo": "core", "anchors": [f"a.py:{n}" for n in range(1, 8)],
       "plan": "x"}, "anchors"),
     ({"repo": "core", "anchors": ["volunteer_app/serializers.py"],
       "plan": "x"}, "anchors"),
@@ -218,6 +220,19 @@ def test_a_plan_that_cannot_be_written_is_logged(monkeypatch, desk, build,
     assert items["1"]["verdict"] == "log"
     assert items["1"]["state"] == fd.LOGGED
     assert why in items["1"]["analysis"]
+
+
+def test_a_helper_and_its_call_site_get_their_own_anchors():
+    """2026-10-24: site and category filters needed _parse_request_data,
+    a new helper and the _get_shifts call site 650 lines later in V4, plus
+    Insights and V5. Three anchors could not reach the call site."""
+    v4 = "opportunity_app/api_version/v4/api.py"
+    item = _build_item(build={
+        "repo": "core", "plan": "x",
+        "anchors": [f"{v4}:680", f"{v4}:862", f"{v4}:1328",
+                    "opportunity_app/api_version/v4/insights_api.py:362",
+                    "opportunity_app/api_version/v5/api.py:1693"]})
+    assert fd._can_build(item) == (True, "")
 
 
 def test_log_with_a_linked_task_goes_on_that_task(desk):
@@ -395,6 +410,44 @@ def test_a_builder_short_of_source_waits_for_go(monkeypatch, desk, proposal):
     assert desk["comments"] == [] and desk["tasks"] == []
     assert "needs more source" in desk["posts"][-1]
     assert "say `go 1` to try again, or `log 1`" in desk["posts"][-1]
+
+
+def test_the_source_a_builder_asks_for_comes_with_the_next_go(monkeypatch,
+                                                              desk):
+    """2026-10-24: the builder named v4/api.py:1328 as the span it needed,
+    and the second `go 1` was shown the same windows and refused again."""
+    import sentry_projects
+    import vomeos.tools
+
+    class Repo:
+        slug, host, owner, branch, alias = "core-slug", "bitbucket", "", \
+            "master", "core"
+
+    v4 = "opportunity_app/api_version/v4/api.py"
+    reasons = iter([
+        f"The central edit is in source I was not shown: {v4}:1328-1330.",
+        f"Still not shown: {v4}:1500 and {v4}:1328.",
+    ])
+    propose = fd._propose
+    monkeypatch.setattr(fd, "_propose", lambda ts, item: (
+        {"reason": next(reasons), "needs_context": True}, None))
+    items = {"1": {**_build_item(), "state": fd.HELD}}
+    fd._build("1.1", {"task_id": "T1"}, items, "1", sam_approved=True)
+    fd._build("1.1", {"task_id": "T1"}, items, "1", sam_approved=True)
+    assert items["1"]["source_asked"] == [f"{v4}:1328", f"{v4}:1500"]
+
+    seen = {}
+    monkeypatch.setattr(fd, "_propose", propose)
+    monkeypatch.setattr(vomeos.tools, "repo_map", lambda: {"core": Repo})
+    monkeypatch.setattr(sentry_projects, "fix_target",
+                        lambda slug: "development")
+    monkeypatch.setattr(sentry_code, "gather_for_build",
+                        lambda edits, repo, ref, **k: seen.update(
+                            refs=k["refs"]) or {"files": "SOURCE"})
+    import sentry_fix
+    monkeypatch.setattr(sentry_fix, "propose", lambda a, c: {"diff": ""})
+    fd._propose("1.1", items["1"])
+    assert (v4, 1328) in seen["refs"] and (v4, 1500) in seen["refs"]
 
 
 def test_a_real_refusal_is_still_logged(monkeypatch, desk):

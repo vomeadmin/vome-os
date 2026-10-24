@@ -480,18 +480,25 @@ class GitHub(Connector):
 
     def read_file(
         self, repo: str, path: str, ref: str = "", owner: str = "",
-        max_bytes: int = 0,
+        max_bytes: int = 0, raw: bool = False,
     ) -> IntegrationResult:
+        """`raw` asks for the file itself rather than base64 in JSON. The
+        JSON form stops at 1 MB ("encoding": "none"), and vome-react's
+        package-lock.json is several times that; the raw form goes to 100 MB.
+        A JSON file comes back parsed, anything else as text."""
         if not _repo_permitted(repo, self.allowlist):
             return self._denied("read_file", repo)
         who = owner or self.owner
         params = {"ref": ref} if ref else None
+        headers = self.headers(who)
+        if raw:
+            headers = {**headers, "Accept": "application/vnd.github.raw"}
         result = self._call(
             "read_file",
             "GET",
             f"/repos/{who}/{repo}/contents/{path}",
             params=params,
-            headers=self.headers(who),
+            headers=headers,
         )
         # A file comes back as JSON with the text base64 encoded. Hand back
         # the text, as Bitbucket does: callers that only accept text (the
