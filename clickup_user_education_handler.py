@@ -65,7 +65,7 @@ from status_constants import (
     CU_WRITE_CLOSED_TITLE,
     ZOHO_CLOSED,
 )
-from signatures import signature, sign_message
+from signatures import AUTO_SENDER, signature, sign_message
 from outbound_guard import (
     guard_failure_notice,
     validate_client_message,
@@ -157,8 +157,10 @@ def _generate_education_message(
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": prompt}],
     )
-    # Auto-send category: user-education explanations are signed "Vic".
-    return sign_message(response.content[0].text.strip(), "sam", language)
+    # Sent without Sam's approval, so signed "Vome team", never with his
+    # name (Sam, 2026-10-23).
+    return sign_message(response.content[0].text.strip(), AUTO_SENDER,
+                        language)
 
 
 def _assess_education_state(
@@ -431,7 +433,7 @@ def handle_user_education(task_id: str, engineer_name: str) -> bool:
             " this and wanted to walk you through how this part of Vome"
             " works so you can get what you need. If anything is still"
             " unclear after this, just reply and we'll be glad to help.\n"
-            + signature("sam")
+            + signature(AUTO_SENDER)
         )
 
     # 7a. Outbound guard. This is the check that was missing when ticket

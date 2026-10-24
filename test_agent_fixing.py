@@ -131,7 +131,7 @@ def sends(monkeypatch):
                         lambda i, s, d: S.decided.append(s))
     monkeypatch.setattr(sprint_store, "keep_fixing",
                         lambda i: S.kept.append(i))
-    monkeypatch.setattr(sprint_store, "record_sent", lambda i, t: None)
+    monkeypatch.setattr(sprint_store, "record_sent", lambda i, t, **k: None)
     monkeypatch.setattr(sprint_thread, "_post", lambda *a, **k: "ts")
     monkeypatch.setattr(shadow_triage, "release_state",
                         lambda n, t: {"live": S.live})

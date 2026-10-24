@@ -265,7 +265,8 @@ def open_pull_request(issue: dict, proposal: dict, context: dict) -> dict:
             return {"opened": False,
                     "reason": f"could not branch: {created.error[:140]}"}
 
-        message = f"Fix: {issue.get('triage_summary') or issue_id}"[:100]
+        message = _clip(f"Fix: {issue.get('triage_summary') or issue_id}",
+                        100)
         for path, body in contents.items():
             written = writer.commit_file(
                 repo, branch, path, body, message, **kwargs
@@ -303,6 +304,16 @@ def open_pull_request(issue: dict, proposal: dict, context: dict) -> dict:
         reviewer_added = bool(named)
     return {"opened": True, "url": url, "branch": branch,
             "reviewer_added": reviewer_added}
+
+
+def _clip(text: str, limit: int) -> str:
+    """Shorten a title at the last whole word, so it never ends "and when h"."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit - 3]
+    if " " in cut:
+        cut = cut[:cut.rindex(" ")]
+    return cut.rstrip(" ,;:") + "..."
 
 
 def _reviewer_args(writer, host, reviewer: dict) -> dict:

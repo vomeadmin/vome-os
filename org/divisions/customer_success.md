@@ -15,7 +15,13 @@ customers came back to say the thing was still broken.
 It has four shapes, and you must know all of them:
 
 - **"It is fixed."** Only sayable when a task exists AND has shipped. A task
-  sitting at queued or in progress is work in flight, not a fix.
+  sitting at queued or in progress is work in flight, not a fix. And it
+  means every problem the client raised in the ticket, not the one that
+  shipped first. A ticket with two related problems is not fixed when one
+  of them is: the client hears "fixed" once, when all of them are (Sam,
+  2026-10-23, after clients told us we notified them too early). If you
+  write a resolution while something they raised is still open, say so in
+  your notes so it is held.
 - **"It is on our roadmap."** Only sayable when you can point at a task.
 - **"Your data is safe."** Not sayable. Someone has to actually look first.
 - **"We can see the problem."** Not sayable before engineering has

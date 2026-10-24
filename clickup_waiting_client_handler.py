@@ -45,7 +45,7 @@ from status_constants import (
     ZOHO_AWAITING_CLIENT_RESPONSE,
     ZOHO_TAG_WAITING_CLIENT,
 )
-from signatures import signature, sign_message
+from signatures import AUTO_SENDER, signature, sign_message
 from outbound_guard import guard_failure_notice, validate_client_message
 from model_config import SUPPORT_MODEL
 from zoho_links import extract_zoho_ticket_id, alert_missing_ticket_link
@@ -239,8 +239,10 @@ def _generate_need_info_message(
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": prompt}],
     )
-    # Auto-send category: needs-client-info requests are signed "Vic".
-    return sign_message(response.content[0].text.strip(), "sam", language)
+    # Sent without Sam's approval, so signed "Vome team", never with his
+    # name (Sam, 2026-10-23).
+    return sign_message(response.content[0].text.strip(), AUTO_SENDER,
+                        language)
 
 
 # ---------------------------------------------------------------------------
@@ -922,7 +924,7 @@ def handle_needs_client_info(
             " continue. Could you provide any additional"
             " details, such as screenshots, steps to"
             " reproduce, or the affected user's email?\n"
-            + signature("sam")
+            + signature(AUTO_SENDER)
         )
 
     # 7a. Outbound guard. Deterministic check that the draft is actually a

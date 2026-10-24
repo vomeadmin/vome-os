@@ -42,7 +42,8 @@ Client emails are signed by one of two "senders":
   before it goes out** (new-ticket drafts, client-reply drafts, clarifying or
   feature replies in a sprint).
 
-Effectively: *if it auto-sends, it's from Vic; if a human reviews it, it's from
+Effectively: *if it auto-sends, it's from the Vome team ("Vome team", since
+2026-10-23); if a human reviews it, it's from
 Sam.* A small set of pre-existing automated emails keep their legacy
 signatures (see [§4](#4-signatures-signaturespy)).
 
@@ -118,6 +119,10 @@ One sender-keyed source for the client-facing closing block.
 - `signature(sender, lang="en")` → full closing block. Senders:
   - `vic` → `Best,\n\nVic\nsupport.vomevolunteer.com` (FR uses `Cordialement,`)
   - `sam` → `Best,\n\nSam | Vome team\nsupport.vomevolunteer.com` (FR `Cordialement,`)
+  - `team` (`AUTO_SENDER`) → `Best,\n\nVome team\nsupport.vomevolunteer.com` (FR
+    `Cordialement,\n\nÉquipe Vome`). Since 2026-10-23, every email sent without
+    Sam's explicit approval uses it; `team_signed()` re-signs a sprint draft
+    at an automatic send.
   - `legacy_vome_team` → `Best,\n\nVome team\n…` — preserves the old auto-ack /
     completeness-gate signature byte-for-byte.
   - `legacy_sam_support` → `Best,\n\nSam | Vome support\n…` — legacy.

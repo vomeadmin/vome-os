@@ -99,6 +99,7 @@ def proposing(monkeypatch):
                 "risks": "deletes removed steps"}
 
     def open_pr(issue, proposal, context):
+        seen["issue"] = issue
         seen["pr_context"] = context
         return {"opened": True, "url": "https://bb/pr/9",
                 "reviewer_added": True}
@@ -119,6 +120,15 @@ def test_the_fix_author_is_told_where_the_pr_goes(proposing):
     branch = proposing["context"]["branch"]
     assert "development" in branch and "never" in branch
     assert "medium" in proposing["allow_risk"]
+
+
+def test_what_broke_is_the_whole_question(proposing):
+    # #9637: clipped at 60, the PR's "What broke" read "...and when h".
+    question = ("Why the app crashes when they tap I'm attending, and when "
+                "they tap Not attending the shift does not refresh")
+    card = {**MEDIUM, "live_question": question}
+    ticket_fix.propose_for_ticket("T1", "9637", "X", card, "z")
+    assert proposing["issue"]["triage_summary"] == question
 
 
 def test_a_medium_backend_fix_goes_to_onlyg(proposing):

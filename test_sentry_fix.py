@@ -590,3 +590,20 @@ def test_a_truncated_read_is_refused_not_committed(monkeypatch):
         "--- a/a.py\n+++ b/a.py\n@@ -1,1 +1,1 @@\n-x = 1\n+x = 2\n")
     assert contents == {}
     assert "larger than" in error
+
+
+# ---------------------------------------------------------------------------
+# The PR title
+# ---------------------------------------------------------------------------
+
+def test_a_short_title_is_left_alone():
+    assert sentry_fix._clip("Fix: birthday emails", 100) == "Fix: birthday emails"
+
+
+def test_a_long_title_ends_on_a_whole_word():
+    # #9637's title stopped mid-word.
+    text = ("Fix: Why the app crashes when they tap I'm attending, and when "
+            "they tap Not attending the shift does not refresh")
+    out = sentry_fix._clip(text, 100)
+    assert len(out) <= 100 and out.endswith("...")
+    assert text.startswith(out[:-3]) and text[len(out) - 3] == " "

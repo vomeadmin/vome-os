@@ -22,7 +22,9 @@ WHAT HAPPENS, PER CLIENT TICKET OF A LIVE FIX
 3. A draft that passed every guard on a ticket that does not need a person
    is sent at once, and the ticket and tasks close. On by default since
    2026-10-19 (Sam); RELEASE_AUTO_SEND=false puts every resolution back in
-   front of him.
+   front of him. Only when every problem the client raised is fixed
+   (resolution_scope, 2026-10-23): otherwise the draft is held with what is
+   still open, and the last fix to go live sends it.
 
 Each client ticket is prepared once per fix (`vomeos_release_resolutions`),
 so a restart or the next 15-minute pass never drafts or sends twice. A
@@ -133,6 +135,22 @@ def _live_release(parent: dict) -> dict:
     }
 
 
+def _scope(parent: dict, children: list[dict], child: dict, ticket_id: str,
+           number: str) -> dict:
+    """Is every problem on this ticket fixed, or only this one? A client
+    hears "fixed" once, when all of them are (Sam, 2026-10-23). Held
+    otherwise, and the last fix to go live sends it."""
+    import resolution_scope
+
+    family = {parent.get("id") or ""} | {c.get("id") or "" for c in children}
+    return resolution_scope.check(
+        ticket_id, number,
+        [{"id": parent.get("id") or child["id"],
+          "name": parent.get("name") or child.get("name") or ""}],
+        exclude=family - {""},
+    )
+
+
 def prepare(parent: dict, children: list[dict]) -> list[dict]:
     """Draft (and maybe send) the resolution for each new client ticket.
 
@@ -181,10 +199,15 @@ def prepare(parent: dict, children: list[dict]) -> list[dict]:
                 result, detail = "drafted", ""
                 if (auto_send_enabled()
                         and item.get("category") not in NEVER_AUTO):
-                    import sprint_thread
+                    scope = _scope(parent, children, child, ticket_id,
+                                   number)
+                    if scope["complete"]:
+                        import sprint_thread
 
-                    detail = sprint_thread._send(item)
-                    result = "sent" if "sent to" in detail else "drafted"
+                        detail = sprint_thread._send(item, automatic=True)
+                        result = "sent" if "sent to" in detail else "drafted"
+                    else:
+                        result, detail = "held", scope["reason"]
             elif status == "blocked":
                 result, detail = "held", item.get("draft_why") or ""
             else:

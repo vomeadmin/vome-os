@@ -1286,12 +1286,17 @@ def _redraft(item: dict, notes: str) -> str:
             f"```{draft['text']}```")
 
 
-def _send(item: dict, sam_wrote: bool = False) -> str:
+def _send(item: dict, sam_wrote: bool = False,
+          automatic: bool = False) -> str:
     """`sam_wrote`: the text is Sam's own (send_ticket_reply with `text`).
     It still passed every outbound guard in _check_draft; only the stale
     acknowledgment check is skipped, because Sam writing the reply is the
     outcome that check waits for (#9549, #9575 on 2026-10-23: corrected
-    answers refused as "the team is on it")."""
+    answers refused as "the team is on it").
+
+    `automatic`: no person approved this send (release watcher, shipped
+    untold). It goes out signed "Vome team" instead of Sam's name (Sam,
+    2026-10-23)."""
     import zoho_actions
 
     n = item.get("number")
@@ -1324,19 +1329,27 @@ def _send(item: dict, sam_wrote: bool = False) -> str:
         return (f"*{n}.* has no recipient (no sender on the latest customer "
                 "message), so nothing was sent. Reply from Zoho, or say "
                 f"`retriage {n}`.")
+    approved = draft
+    if automatic:
+        from signatures import team_signed
+
+        draft = team_signed(draft)
     zoho_actions.send_reply(item["ticket_id"], to, cc, draft)
     if _still_fixing(item):
         # The acknowledgment went; the agent still owns the fix, so the item
         # stays in flight instead of finishing (#9582).
         sprint_store.keep_fixing(item["id"])
     else:
+        by = "automatically" if automatic else "by Sam"
         sprint_store.decide(item["id"], sprint_store.SENT,
-                            f"sent by Sam after {item.get('decision')}"
-                            if owed else "sent by Sam")
-    sprint_store.record_sent(item["id"], draft)
+                            f"sent {by} after {item.get('decision')}"
+                            if owed else f"sent {by}")
+    sprint_store.record_sent(item["id"], draft, compared=approved)
     copied = f" cc {', '.join(cc)}" if cc else ""
-    _post(f"Sent #{item.get('ticket_number')} to {to}{copied} on Sam's "
-          "approval in the sprint.", channel=AGENT_LOG)
+    how = ("automatically, signed Vome team" if automatic
+           else "on Sam's approval in the sprint")
+    _post(f"Sent #{item.get('ticket_number')} to {to}{copied} {how}.",
+          channel=AGENT_LOG)
     after = _after_send(item)
     return f"*{n}.* sent to {to}{copied}." + (f" {after}" if after else "")
 

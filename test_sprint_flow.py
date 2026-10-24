@@ -776,3 +776,26 @@ def test_no_database_means_no_header_spam(monkeypatch):
     assert sprint_thread.ensure_thread() == ""
     assert sprint_thread.ensure_thread() == ""
     assert posts == []
+
+
+def test_an_automatic_send_is_signed_vome_team(world, monkeypatch):
+    """Sam, 2026-10-23: nothing he did not approve goes out in his name."""
+    recorded = []
+    monkeypatch.setattr(sprint_store, "record_sent",
+                        lambda i, t, compared=None: recorded.append(
+                            (t, compared)))
+    sprint_thread._send(_item(), automatic=True)
+    content = world.zoho[0][4]
+    assert "Sam" not in content
+    assert content.endswith("Best,\n\nVome team\nsupport.vomevolunteer.com")
+    assert content.startswith("Hi Dalena")
+    # Measured against the agent's draft, so the swap is not an "edit".
+    assert recorded[0][1] == _item()["draft"]
+    assert world.decided[0][2] == "sent automatically"
+    assert any("automatically" in text for _, text in world.posts)
+
+
+def test_sams_own_send_keeps_his_name(world):
+    sprint_thread._send(_item())
+    assert "Sam | Vome team" in world.zoho[0][4]
+    assert world.decided[0][2] == "sent by Sam"

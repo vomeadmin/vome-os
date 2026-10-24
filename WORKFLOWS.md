@@ -71,7 +71,9 @@ flowchart TD
   LIVE --> RD["Resolution draft per client,<br/>as a numbered card (retry on error)"]:::broken
   RD --> AUTO{"RELEASE_AUTO_SEND on?<br/>(off; never needs_human)"}:::decide
   AUTO -->|off| SEND["Sam says 'send N'<br/>in the thread"]:::deployed
-  AUTO -->|on, draft passed guards| AS["Sent automatically"]:::decide
+  AUTO -->|on, draft passed guards| SCOPE{"Every problem on the ticket fixed?<br/>(other tasks shipped + scope check)"}:::built
+  SCOPE -->|yes| AS["Sent automatically"]:::decide
+  SCOPE -->|no| HELD["Held for Sam with what is still open;<br/>the last fix to ship sends it"]:::built
   SEND & AS --> CLOSE["Zoho Closed (no closure email)<br/>child + parent Closed"]:::built
 ```
 
@@ -355,3 +357,4 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 | G59 | code | Full copies of every repo for grep (Bitbucket archive, GitHub tarball), refreshed hourly; chats and integrations added to the repo map | built | Bitbucket's index covers the default branch (core: development, not master); chats and integrations were unreadable, so chat tickets always ended out_of_repo. Proven Oct 23 with the worker's tokens on all six repos | Push; if VOMEOS_CODE_REPO_MAP or VOMEOS_CODE_REPOS is set on the worker, add chats and integrations there | Sam |
 | G60 | intake | In Progress tickets never looked at again | built | 71 In Progress on Oct 23, 35 silent 30+ days; #9188 closed in ClickUp, #7218 queued and unassigned since May | Push; `support.ticket_reconcile` 06:30 nightly, `ticket_states` in Claude.ai | agent |
 | G61 | learning | Sam's Claude Code disagreements become eval cases | built | The triage answer key was agent-written (G15); his corrections were the best signal and were kept nowhere | Push; `railway run -s vome-os-worker py triage_cases.py add --ticket N --expect ...` (cases live in vomeos_eval_cases, not git) | Sam |
+| G62 | release | No "fixed" email until every problem on the ticket is fixed | built | Clients told us we notified them too early: one of two related problems shipped and the email went (Sam, 2026-10-23). `resolution_scope.py` + `customer_success.resolution_scope_check` hold all three automatic paths (on prod, release watcher, shipped-untold) | Push; watch the first held cards in the day thread | Sam |

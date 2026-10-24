@@ -329,7 +329,9 @@ def _propose(ticket_id, ticket_number, account, card, zoho_url,
                 "pr_url": ""}
 
     reviewer = engineer_for(alias) if risk == "medium" else ""
-    summary = (card.get("live_question") or "")[:60]
+    # Whole, not clipped: it is the PR's "What broke" (#9637 read "...and
+    # when h"). sentry_fix shortens it for the branch and title itself.
+    summary = (card.get("live_question") or "").strip()
     pr = sentry_fix.open_pull_request(
         {"issue_id": issue_key, "triage_summary": summary,
          "source_label": f"Zoho ticket #{ticket_number} ({account})",

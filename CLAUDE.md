@@ -289,8 +289,10 @@ needs go on `vome-os-worker`, not the web service.
   get work through `ticket_routing` (or Sam's `route`). Reply handling
   (`process_ticket_update`) is unchanged.
 - Retired: email
-  completeness gate (removed), "Vic" signatures (engineer-triggered replies
-  sign "Sam | Vome team").
+  completeness gate (removed), "Vic" signatures. Since 2026-10-23 anything sent
+  without Sam's explicit approval (on prod, release watcher, shipped untold,
+  user education, needs client info) is signed "Vome team"
+  (`signatures.AUTO_SENDER`); only what Sam approves carries "Sam | Vome team".
 
 **Kernel additions:** `vomeos/images.py` (manifest `job.images`),
 `vomeos/tools.py` + runner tool loop (manifest `job.tools`,

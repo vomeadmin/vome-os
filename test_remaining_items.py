@@ -296,8 +296,13 @@ def _untold(monkeypatch, kind, item):
                         lambda tid, reason, **k: {"status": "ok"})
     monkeypatch.setattr(sprint_store, "by_ticket", lambda t: dict(item))
     monkeypatch.setattr(sprint_thread, "_send",
-                        lambda i: sent.append(i["number"])
+                        lambda i, **k: sent.append(i["number"])
                         or "*32.* sent to a@b.org.")
+    import resolution_scope
+
+    monkeypatch.setattr(resolution_scope, "check",
+                        lambda *a, **k: {"complete": True, "open": [],
+                                         "reason": ""})
     shipped_untold.run_shipped_untold()
     return sent, finished
 
