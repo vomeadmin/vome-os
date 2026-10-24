@@ -1431,6 +1431,25 @@ def _find_clickup_task_by_zoho_ticket(ticket_id: str) -> str | None:
         return None
 
 
+def _close_queue_tasks_if_closed(ticket_id: str,
+                                 status_known: bool = False) -> None:
+    """Close every open Priority Queue task linked to a Closed ticket, with
+    the engineers taken off and a comment (ticket_reconciler.close_task)."""
+    try:
+        import ticket_reconciler
+        import zoho_actions
+
+        if not status_known and \
+                zoho_actions.ticket_status(ticket_id) != ZOHO_CLOSED:
+            return
+        closed = ticket_reconciler.close_tasks_for_ticket(ticket_id)
+        if closed:
+            print(f"[ZOHO->CU] ticket {ticket_id} Closed -- closed "
+                  f"{', '.join(closed)}")
+    except Exception as e:
+        print(f"[ZOHO->CU] closing tasks for {ticket_id} failed: {e}")
+
+
 def sync_zoho_to_clickup(ticket_id: str) -> None:
     """Sync a Zoho ticket's status/assignee changes to ClickUp.
 
@@ -1452,6 +1471,9 @@ def sync_zoho_to_clickup(ticket_id: str) -> None:
             f"cannot sync (ticket may predate the link, or never got a "
             f"ClickUp task). Skipping."
         )
+        # A ticket Sam closed still has no engineer task left (2026-10-24):
+        # find them by their Zoho Ticket Link instead.
+        _close_queue_tasks_if_closed(ticket_id)
         return
     thread_ts, thread_data = thread_info
     clickup_task_id = thread_data.get("clickup_task_id")
@@ -1501,6 +1523,8 @@ def sync_zoho_to_clickup(ticket_id: str) -> None:
         print(f"[ZOHO->CU] ticket {ticket_id} is {status} -- closing ClickUp task {clickup_task_id}")
         close_clickup_task(clickup_task_id)
         update_thread(thread_ts, status=THREAD_CLOSED)
+        # A second Priority Queue task for the same ticket goes too.
+        _close_queue_tasks_if_closed(ticket_id, status_known=True)
         return
 
     # Awaiting Client Response on Zoho -> mirror on ClickUp (parked).

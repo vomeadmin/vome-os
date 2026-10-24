@@ -442,3 +442,81 @@ def test_an_ignored_status_filter_stops_the_run(monkeypatch):
         "data": {"data": [{"status": "Closed"}]}})
     with pytest.raises(RuntimeError, match="ignored"):
         ticket_reconciler.zoho_tickets("In Progress")
+
+
+# Sam, 2026-10-24: a ticket closed in Zoho has no engineer task left in
+# ClickUp. 33 were still open that day.
+def _linked(task_id, ticket_id, status="queued"):
+    import zoho_links
+
+    task = _task(status, id=task_id)
+    task["assignees"] = [{"id": 49257687, "username": "OnlyGod"},
+                         {"id": 3691763, "username": "Sam"}]
+    task["custom_fields"] = [{"id": zoho_links.FIELD_ZOHO_TICKET_LINK,
+                              "value": f"https://desk.zoho.com/agent/vome/"
+                                       f"tickets/details/{ticket_id}"}]
+    return task
+
+
+@pytest.fixture
+def queue(monkeypatch):
+    import ticket_reconciler as tr
+    import zoho_actions
+
+    tasks = [_linked("a", "111"), _linked("b", "111"), _linked("c", "222"),
+             _linked("d", "333"), _linked("e", "111", status="on prod"),
+             _linked("f", "111")]
+    tasks[-1]["name"] = "Preview mode (request to review)"
+    statuses = {"111": "Closed", "222": "In Progress"}
+    closed = []
+
+    def status(tid):
+        if tid not in statuses:
+            raise httpx.HTTPError("unreadable")
+        return statuses[tid]
+
+    monkeypatch.setattr(tr, "_open_queue_tasks", lambda: tasks)
+    monkeypatch.setattr(zoho_actions, "ticket_status", status)
+    monkeypatch.setattr(tr, "close_task",
+                        lambda t, note=tr.CLOSED_NOTE: closed.append(
+                            t["id"]) or True)
+    return closed
+
+
+def test_every_task_of_a_closed_ticket_comes_off_the_queue(queue):
+    import ticket_reconciler as tr
+
+    out = tr.close_for_closed_tickets()
+    # Both tasks for the closed ticket; not the open ticket, not the one
+    # Zoho could not read, not the on prod task the release flow owns, and
+    # not a feature request (it goes to Raw Intake, never closed).
+    assert queue == ["a", "b"]
+    assert out["closed"] == ["a", "b"]
+
+
+def test_a_dry_run_closes_nothing(queue):
+    import ticket_reconciler as tr
+
+    assert tr.close_for_closed_tickets(act=False)["closed"] == ["a", "b"]
+    assert queue == []
+
+
+def test_closing_takes_the_engineers_off_and_says_why(monkeypatch):
+    import ticket_reconciler as tr
+
+    calls = []
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(tr, "_headers", lambda: {})
+    monkeypatch.setattr(tr.httpx, "post",
+                        lambda url, **k: calls.append(("post", k)) or _Resp())
+    monkeypatch.setattr(tr.httpx, "put",
+                        lambda url, **k: calls.append(("put", k)) or _Resp())
+    assert tr.close_task(_linked("a", "111"))
+    assert "Zoho ticket is Closed" in calls[0][1]["json"]["comment_text"]
+    body = calls[1][1]["json"]
+    assert body["status"] == "Closed"
+    assert body["assignees"] == {"add": [], "rem": [49257687]}

@@ -203,3 +203,45 @@ def test_an_unassigned_ticket_off_the_team_still_closes(monkeypatch):
     closed, _ = _sync_with(monkeypatch, {
         "status": "In Progress", "assigneeId": None, "teamId": None})
     assert closed == ["CU1"]
+
+
+# 2026-10-24: a ticket closed in Zoho takes every engineer task with it,
+# also when it has no thread record or a second task.
+def test_a_closed_ticket_closes_its_other_queue_tasks(monkeypatch):
+    import ticket_reconciler
+
+    swept = []
+    monkeypatch.setattr(ticket_reconciler, "close_tasks_for_ticket",
+                        lambda t: swept.append(t) or [])
+    closed, _ = _sync_with(monkeypatch, {"status": "Closed"})
+    assert closed == ["CU1"]
+    assert swept == ["T"]
+
+
+def test_a_closed_ticket_with_no_thread_still_closes_its_tasks(monkeypatch):
+    import database
+    import ticket_reconciler
+    import zoho_actions
+
+    swept = []
+    monkeypatch.setattr(database, "get_thread_by_ticket_id", lambda t: None)
+    monkeypatch.setattr(zoho_actions, "ticket_status", lambda t: "Closed")
+    monkeypatch.setattr(ticket_reconciler, "close_tasks_for_ticket",
+                        lambda t: swept.append(t) or [])
+    agent.sync_zoho_to_clickup("T")
+    assert swept == ["T"]
+
+
+def test_an_open_ticket_with_no_thread_closes_nothing(monkeypatch):
+    import database
+    import ticket_reconciler
+    import zoho_actions
+
+    swept = []
+    monkeypatch.setattr(database, "get_thread_by_ticket_id", lambda t: None)
+    monkeypatch.setattr(zoho_actions, "ticket_status",
+                        lambda t: "In Progress")
+    monkeypatch.setattr(ticket_reconciler, "close_tasks_for_ticket",
+                        lambda t: swept.append(t) or [])
+    agent.sync_zoho_to_clickup("T")
+    assert swept == []
