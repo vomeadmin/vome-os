@@ -246,3 +246,152 @@ def test_a_feature_task_with_no_ticket_is_planned_work_not_sams_call():
     record = _record(lane="feature", category="feature_request")
     assert bs.bucket(_entry(zoho_ticket_id=""), record)[0] == "planned"
     assert bs.bucket(_entry(), record)[0] == "sam_decides"
+
+
+# ---------------------------------------------------------------------------
+# The audit (Sam, 2026-10-24: Zoho and ClickUp in sync)
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timezone  # noqa: E402
+
+NOW = datetime(2026, 10, 24, 18, 0, tzinfo=timezone.utc)
+DAY_MS = 86400 * 1000
+NOW_MS = int(NOW.timestamp() * 1000)
+
+
+def _audit_row(**over):
+    row = {"ticket_id": "5694", "ticket_number": "9600",
+           "zoho_status": "In Progress", "zoho_owner": "onlyg",
+           "pq_open": [{"id": "868t1", "status": "queued",
+                        "assignees": [49257687],
+                        "updated": str(NOW_MS - DAY_MS)}],
+           "pq_done": [], "fix_parents": [], "fix_children": [],
+           "accepted": [], "sprint_open": False, "last_in": "",
+           "last_out": "", "carded_after_cutoff": True}
+    row.update(over)
+    return row
+
+
+def _cls(**over):
+    return bs.classify_row(_audit_row(**over), NOW)["drift"]
+
+
+def test_an_engineer_task_with_matching_owner_and_a_fresh_card_is_healthy():
+    assert _cls() == 12
+
+
+def test_a_task_waiting_on_the_client_is_still_on_the_engineers_plate():
+    # 38 tasks at `awaiting client response` were never swept (2026-10-24).
+    task = {"id": "868t1", "status": "awaiting client response",
+            "assignees": [4434086], "updated": str(NOW_MS - DAY_MS)}
+    assert _cls(pq_open=[task], zoho_owner="sanjay",
+                carded_after_cutoff=False) == 10
+
+
+def test_a_done_task_the_client_never_heard_about_is_class_1():
+    done = {"id": "868t2", "status": "on prod", "assignees": [49257687],
+            "updated": str(NOW_MS - 5 * DAY_MS),
+            "closed": str(NOW_MS - 5 * DAY_MS)}
+    row = bs.classify_row(_audit_row(
+        pq_open=[], pq_done=[done], last_out="2026-10-01T10:00:00Z"), NOW)
+    assert row["drift"] == 1
+    told = _cls(pq_open=[], pq_done=[done], last_out="2026-10-23T10:00:00Z")
+    assert told == 2  # answered, but Zoho still says In Progress
+
+
+def test_zoho_closed_with_open_clickup_work_is_an_orphan():
+    assert _cls(zoho_status="Closed") == 8
+
+
+def test_a_deleted_ticket_the_sprint_still_lists_is_class_4():
+    # #9539 returned 404 and sprint_queue still showed it.
+    assert _cls(zoho_status=bs.ZOHO_GONE, pq_open=[], sprint_open=True) == 4
+
+
+def test_a_copied_engineer_task_beside_an_agent_fixes_child_is_a_duplicate():
+    child = {"id": "868c1", "status": "in progress", "assignees": [],
+             "parent": "868p1"}
+    assert _cls(fix_children=[child], zoho_owner="agent_fixes") == 9
+
+
+def test_answered_but_still_processing_is_class_5_and_the_reverse_is_6():
+    assert _cls(zoho_status="Processing", zoho_owner="sam",
+                last_in="2026-10-20T10:00:00Z",
+                last_out="2026-10-21T10:00:00Z") == 5
+    assert _cls(zoho_status="Awaiting Client Response",
+                last_in="2026-10-22T10:00:00Z",
+                last_out="2026-10-21T10:00:00Z") == 6
+
+
+def test_owner_must_follow_the_clickup_work():
+    assert _cls(zoho_owner="sanjay") == 7
+    parent = {"id": "868p1", "status": "in progress", "assignees": [],
+              "check": "waiting"}
+    assert _cls(pq_open=[], fix_parents=[parent], zoho_owner="sam") == 7
+    assert _cls(pq_open=[], fix_parents=[parent],
+                zoho_owner="agent_fixes") == 11
+    assert _cls(pq_open=[], zoho_owner="agent_fixes") == 7
+
+
+def test_a_stalled_or_unassigned_task_is_class_3():
+    old = {"id": "868t1", "status": "queued", "assignees": [49257687],
+           "updated": str(NOW_MS - 20 * DAY_MS)}
+    assert _cls(pq_open=[old]) == 3
+    nobody = {"id": "868t1", "status": "queued", "assignees": [],
+              "updated": str(NOW_MS)}
+    assert _cls(pq_open=[nobody], zoho_owner="sam") == 3
+
+
+def test_in_progress_with_nothing_behind_it_is_class_2():
+    assert _cls(pq_open=[], zoho_owner="sam") == 2
+
+
+def test_join_matches_by_link_and_number_and_keeps_ticketless_work():
+    link = ("https://desk.zoho.com/agent/vomevolunteer/vome-volunteer/"
+            "tickets/details/5694")
+    pq = [
+        {"id": "868a", "name": "[#9600] Acme -- form", "status":
+         {"status": "queued"}, "assignees": [{"id": 49257687}],
+         "custom_fields": [{"id": "4776215b-c725-4d79-8f20-c16f0f0145ac",
+                            "value": link}]},
+        {"id": "868b", "name": "Backend: add sites field", "status":
+         {"status": "queued"}, "assignees": [{"id": 49257687}]},
+    ]
+    zoho = [{"id": "5694", "ticketNumber": "9600", "status": "In Progress",
+             "assigneeId": "569440000023160001", "subject": "form"}]
+    rows = bs.join_audit(zoho, {}, {}, pq, [], [], [], set())
+    by_task = {r["pq_open"][0]["id"]: r for r in rows}
+    assert by_task["868a"]["ticket_id"] == "5694"
+    assert by_task["868a"]["zoho_owner"] == "onlyg"
+    assert by_task["868b"]["zoho_status"] == ""
+    assert bs.classify_row(by_task["868b"], NOW)["drift"] == 10
+
+
+def test_the_audit_sheet_has_no_em_dashes():
+    audit = {"generated_at": "2026-10-24T18:00:00+00:00",
+             "cutoff": bs.DEEP_CUTOFF, "unit_cost": {},
+             "rows": [bs.classify_row(_audit_row(zoho_owner="sanjay"), NOW)]}
+    assert "—" not in bs.render_audit(audit)
+
+
+def test_the_on_prod_email_sent_hours_before_the_close_counts_as_told():
+    # #7922: the reply went out the day the task closed. That is the
+    # resolution, not an earlier answer.
+    done = {"id": "868t2", "status": "closed", "assignees": [49257687],
+            "closed": str(NOW_MS - 5 * DAY_MS)}
+    hours_before = datetime.fromtimestamp(
+        (NOW_MS - 5 * DAY_MS) / 1000 - 3 * 3600, timezone.utc).isoformat()
+    assert _cls(pq_open=[], pq_done=[done], last_out=hours_before) == 2
+
+
+def test_a_fix_that_moved_the_task_in_does_not_close_it(monkeypatch):
+    import ticket_fix
+
+    monkeypatch.setattr(ticket_fix, "propose_for_ticket",
+                        lambda *a, **k: {"pr_url": "https://pr/1",
+                                         "parent": "P1",
+                                         "child": "868abc123"})
+    monkeypatch.setattr(bs, "release_task",
+                        lambda *a: pytest.fail("the moved task was closed"))
+    out = bs.apply_one("fix", _entry(), _record(lane="agent_fix"))
+    assert out["ok"] and "moved in" in out["did"]

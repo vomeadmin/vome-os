@@ -137,7 +137,7 @@ def test_a_medium_backend_fix_goes_to_onlyg(proposing):
     assert out["outcome"] == "pr_opened" and out["reviewer"] == "onlyg"
     assert proposing["pr_context"]["reviewer"]["github"] == "Onlynfk"
     # Merge Owner is the engineer, not Sam.
-    assert proposing["filed"][0][-1] == 49257687
+    assert proposing["filed"][0][6] == 49257687
     assert proposing["pings"] and proposing["pings"][0][0] == "onlyg"
 
 
@@ -146,7 +146,7 @@ def test_a_medium_web_fix_goes_to_sanjay(proposing):
         **MEDIUM["code_check"], "where": "web:src/views/org/x/Y.js:10"}}
     out = ticket_fix.propose_for_ticket("T1", "9600", "X", card, "z")
     assert out["reviewer"] == "sanjay"
-    assert proposing["filed"][0][-1] == 4434086
+    assert proposing["filed"][0][6] == 4434086
 
 
 def test_a_low_risk_fix_stays_with_sam_and_pings_nobody(proposing):
@@ -155,7 +155,7 @@ def test_a_low_risk_fix_stays_with_sam_and_pings_nobody(proposing):
     out = ticket_fix.propose_for_ticket("T1", "9501", "Sarasota", card, "z")
     assert out["reviewer"] == "" and not proposing["pings"]
     assert proposing["pr_context"]["reviewer"] == {}
-    assert proposing["filed"][0][-1] == ticket_fix.MERGE_OWNER
+    assert proposing["filed"][0][6] == ticket_fix.MERGE_OWNER
 
 
 def test_the_dm_says_what_to_check(monkeypatch):
