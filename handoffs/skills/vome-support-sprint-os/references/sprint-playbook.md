@@ -32,7 +32,7 @@ Work starts when a ticket arrives, not when Sam runs a sprint. A bug the agent c
 3. **No-Confirmation.** Never confirm, reproduce or diagnose a bug to a client ("we can see", "we identified"). Reading the code is not an investigation.
 4. **Never say fixed, resolved, planned or on the roadmap** unless `fix_status` says live or a task backs it. A PR is not a fix. Forward-looking language needs a backlog task or Sam's go-ahead for that ticket. A logged feature request is only "logged with the product team" or "added to our team review"; "our team is working on it" only when the task is accepted or in progress.
 5. **Nothing from the code reaches a customer.** No file names, fields, branches, commits or task numbers.
-6. **Zoho status means one thing.** New or Processing = this client is owed a reply from Sam. Nothing automatic moves a ticket out of it: routing to an engineer and an agent fix PR both leave the status alone. Only the reply Sam sends moves it: an acknowledgment on work an engineer or the agent is doing moves it to In Progress (with the engineer's team, or with Sam when it waits on his merge); an answer closes it with no closure email; a question back sets Awaiting Client Response. If the customer writes again on an In Progress ticket, triage runs again and it returns to the queue.
+6. **Zoho status means one thing.** New or Processing = this client is owed a reply from Sam. Routing to an engineer leaves the status alone. An agent fix PR is the one automatic move (Sam, Oct 24, 2026): on a ticket we have answered before, the fix email is the reply, so the ticket goes to In Progress on the Zoho team "Agent Fixes" with no agent, out of Sam's list and into his Agent Fixes view; a never-answered ticket stays New until his acknowledgment. A fix registered by hand gets the same move. Otherwise only the reply Sam sends moves it: an acknowledgment on work an engineer or the agent is doing moves it to In Progress (with the engineer's team, or the Agent Fixes team); an answer closes it with no closure email; a question back sets Awaiting Client Response. If the customer writes again on an In Progress ticket, triage runs again and it returns to the queue.
 
 ## What runs before Sam sits down
 
@@ -126,6 +126,8 @@ An engineer's fix follows the same end: when the engineer moves the Priority Que
 |---|---|---|---|
 | Route to an engineer (no reply yet) | unchanged (New or Processing: the client is still owed a reply) | unchanged | `queued`, one assignee, private Zoho note |
 | Acknowledgment sent on routed work | In Progress | Frontend Team or Backend Team, never Support Agent | `in progress` |
+| Agent fix PR opened (ticket answered before; a never-answered ticket waits for the acknowledgment) | In Progress | team Agent Fixes, no agent | Agent Fixes parent + child |
+| Agent fix PR closed unmerged | Processing | Support Agent, team cleared | closed |
 | Question sent to the client | Awaiting Client Response | unchanged | `awaiting client` |
 | Answer or resolution sent | Closed | unchanged | closed |
 | Close with no reply | Closed, `disableClosureNotification=true` | unchanged | close if exists |

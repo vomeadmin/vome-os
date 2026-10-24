@@ -1515,6 +1515,18 @@ def sync_zoho_to_clickup(ticket_id: str) -> None:
         update_thread(thread_ts, status=THREAD_WAITING_CLIENT)
         return
 
+    # An agent fix sits on the Agent Fixes team with no agent on purpose
+    # (zoho_actions.set_agent_fixing): the owner rules below would read
+    # that as "unassigned" and close the task the release watcher needs.
+    from zoho_actions import AGENT_FIXES_TEAM
+
+    if str(ticket.get("teamId") or "") == AGENT_FIXES_TEAM:
+        print(
+            f"[ZOHO->CU] ticket {ticket_id} is on the Agent Fixes team -- "
+            f"ClickUp task {clickup_task_id} left as is"
+        )
+        return
+
     # Reassigned to Sam or Ron (not an engineer) -> close ClickUp task
     engineer_ids = {ZOHO_AGENT_SANJAY, ZOHO_AGENT_ONLYG}
     if assignee_id and assignee_id not in engineer_ids:

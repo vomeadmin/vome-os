@@ -166,17 +166,41 @@ def test_zoho_shows_the_agent_has_it_without_emailing(monkeypatch):
     calls = []
     monkeypatch.setattr(zoho_actions, "_send",
                         lambda m, p, b: calls.append((m, p, b)) or {})
+    monkeypatch.setattr(zoho_actions, "latest_outbound",
+                        lambda t: {"id": "OUT1"})
     problems = zoho_actions.mark_agent_fix("T1", PR, "https://cu/t/P1")
     assert problems == ""
-    # The status stays New/Processing until Sam's acknowledgment goes out
-    # (Sam, 2026-10-19: that status means "this client is owed a reply").
-    assert not any(m == "PATCH" for m, _, _ in calls)
+    # Answered before, so the fix email is the reply now: off Sam's list
+    # onto the Agent Fixes team (Sam, 2026-10-24).
+    assert ("PATCH", "/tickets/T1",
+            {"status": "In Progress", "teamId": zoho_actions.AGENT_FIXES_TEAM,
+             "assigneeId": None}) in calls
     assert ("POST", "/tickets/T1/associateTag",
             {"tags": ["agent-fix"]}) in calls
     note = next(b for m, p, b in calls if p.endswith("/comments"))
     assert note["isPublic"] is False and PR in note["content"]
     # No reply endpoint is ever touched.
     assert not any("sendReply" in p for _, p, _ in calls)
+
+
+def test_a_never_answered_ticket_waits_for_sams_ack(monkeypatch):
+    calls = []
+    monkeypatch.setattr(zoho_actions, "_send",
+                        lambda m, p, b: calls.append((m, p, b)) or {})
+    monkeypatch.setattr(zoho_actions, "latest_outbound", lambda t: {})
+    assert zoho_actions.mark_agent_fix("T1", PR) == ""
+    assert not any(m == "PATCH" for m, _, _ in calls)
+
+
+def test_a_closed_pr_hands_the_ticket_back_to_sam(monkeypatch):
+    calls = []
+    monkeypatch.setattr(zoho_actions, "_send",
+                        lambda m, p, b: calls.append((m, p, b)) or {})
+    assert zoho_actions.unmark_agent_fix("T1", PR) == ""
+    assert ("PATCH", "/tickets/T1",
+            {"status": "Processing",
+             "assigneeId": zoho_actions.SAM_AGENT}) in calls
+    assert ("PATCH", "/tickets/T1", {"teamId": None}) in calls
 
 
 def test_a_zoho_failure_is_reported_not_raised(monkeypatch):
@@ -186,6 +210,7 @@ def test_a_zoho_failure_is_reported_not_raised(monkeypatch):
         return {}
 
     monkeypatch.setattr(zoho_actions, "_send", flaky)
+    monkeypatch.setattr(zoho_actions, "latest_outbound", lambda t: {})
     problems = zoho_actions.mark_agent_fix("T1", PR)
     assert "tag not set" in problems and "422" in problems
 

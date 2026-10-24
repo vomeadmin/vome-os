@@ -25,6 +25,7 @@ ClickUp doc pages: Playbook `3dztm-3311` / `3dztm-1871`, Lessons Log `3dztm-3311
 Zoho team owner IDs used for ticket owner updates (the OnlyG and Sanjay agent IDs double as the team owners):
 - Frontend Team: `569440000023159001`
 - Backend Team: `569440000023160001`
+- Agent Fixes (a Zoho team, not an agent; set `teamId` with `assigneeId` null): `569440000043486190`
 
 Engineer names are for internal use only. They never appear in client-facing content.
 

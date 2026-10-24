@@ -40,8 +40,13 @@ FROM_ADDRESS = os.environ.get(
 
 BACKEND_TEAM = os.environ.get("ZOHO_AGENT_BACKEND", "569440000023160001")
 FRONTEND_TEAM = os.environ.get("ZOHO_AGENT_FRONTEND", "569440000023159001")
-# Owner of a ticket the agent is fixing: Sam merges agent PRs into dev.
+# "Support Agent", Sam's own login: what it owns is Sam's core list.
 SAM_AGENT = os.environ.get("ZOHO_AGENT_SAM") or "569440000000139001"
+# The Zoho team that owns tickets the agent is fixing. The agent has no
+# Zoho seat, so a team with no agent on it is its owner, and Sam's
+# "Agent Fixes" view sits beside Backend and Frontend (2026-10-24).
+AGENT_FIXES_TEAM = (os.environ.get("ZOHO_TEAM_AGENT_FIXES")
+                    or "569440000043486190")
 
 _EMAIL = re.compile(r"[\w.+'-]+@[\w-]+(?:\.[\w-]+)+")
 _OUR_MAILBOXES = ("zohodesk.com", "support@vomevolunteer")
@@ -281,15 +286,25 @@ AGENT_FIX_TAG = "agent-fix"
 def mark_agent_fix(ticket_id: str, pr_url: str, task_url: str = "") -> str:
     """The agent opened a fix PR: show it in Zoho, without emailing anyone.
 
-    Tagged `agent-fix`, with a private note linking the PR. The status is
-    left alone. Sam's rule (2026-10-19): New or Processing in Zoho means
-    "this client is owed a reply", so nothing the agents do on their own
-    moves a ticket out of it. `set_agent_fixing` moves it once Sam's
-    acknowledgment is sent (`sprint_thread._after_send`). Each part
-    fails on its own and is reported, never raised: the PR already exists.
+    Tagged `agent-fix`, with a private note linking the PR, and moved to
+    the Agent Fixes team at In Progress (`set_agent_fixing`). Sam,
+    2026-10-24: Processing means a person owes the client a reply, and
+    once the fix is open the fix email is that reply, so the ticket leaves
+    his list. The one exception is a ticket we have never answered: it
+    stays New until Sam's acknowledgment goes out (`sprint_thread.
+    _after_send`), or the client hears nothing until the fix ships. A
+    client writing again flips it back to Processing (Zoho's reply
+    workflow) and gets a fresh card (shadow_triage). Each part fails on
+    its own and is reported, never raised: the PR already exists.
     """
+
+    def move():
+        if latest_outbound(ticket_id):
+            set_agent_fixing(ticket_id)
+
     notes = []
     steps = (
+        ("status", move),
         ("tag", lambda: _send("POST", f"/tickets/{ticket_id}/associateTag",
                               {"tags": [AGENT_FIX_TAG]})),
         ("note", lambda: _send("POST", f"/tickets/{ticket_id}/comments", {
@@ -309,22 +324,28 @@ def mark_agent_fix(ticket_id: str, pr_url: str, task_url: str = "") -> str:
 
 
 def set_agent_fixing(ticket_id: str) -> dict:
-    """The client has been told and the agent's fix is in flight: In
-    Progress, assigned to Sam because his merge is the next human step."""
+    """The agent's fix is in flight: In Progress, owned by the Agent Fixes
+    team with no agent, so it leaves Sam's Support Agent list. The client
+    sees only In Progress."""
     return _send("PATCH", f"/tickets/{ticket_id}",
-                 {"status": "In Progress", "assigneeId": SAM_AGENT})
+                 {"status": "In Progress", "teamId": AGENT_FIXES_TEAM,
+                  "assigneeId": None})
 
 
 def unmark_agent_fix(ticket_id: str, pr_url: str) -> str:
     """The fix PR was closed unmerged: nobody is fixing this any more.
 
-    Back to Processing (needs attention) with the tag removed and a note
-    saying why, so Zoho does not keep claiming the agent has it.
+    Back to Processing (needs attention), off the Agent Fixes team and
+    back on Sam, with the tag removed and a note saying why, so Zoho does
+    not keep claiming the agent has it.
     """
     notes = []
     steps = (
         ("status", lambda: _send("PATCH", f"/tickets/{ticket_id}",
-                                 {"status": "Processing"})),
+                                 {"status": "Processing",
+                                  "assigneeId": SAM_AGENT})),
+        ("team", lambda: _send("PATCH", f"/tickets/{ticket_id}",
+                               {"teamId": None})),
         ("tag", lambda: _send("POST",
                               f"/tickets/{ticket_id}/dissociateTag",
                               {"tags": [AGENT_FIX_TAG]})),

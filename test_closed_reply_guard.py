@@ -170,3 +170,36 @@ if __name__ == "__main__":
             print(f"PASS {name}")
             passed += 1
     print(f"\n{passed} passed")
+
+
+# 2026-10-24: agent fixes sit on the Zoho "Agent Fixes" team with no agent.
+# The owner rules read that as "unassigned" and closed the ClickUp task the
+# release watcher needs to tell the client.
+def _sync_with(monkeypatch, ticket):
+    import database
+    import zoho_actions
+
+    closed = []
+    monkeypatch.setattr(database, "get_thread_by_ticket_id",
+                        lambda t: ("TS", {"clickup_task_id": "CU1"}))
+    monkeypatch.setattr(database, "update_thread", lambda *a, **k: None)
+    monkeypatch.setattr(agent, "fetch_ticket_from_zoho", lambda t: ticket)
+    monkeypatch.setattr(agent, "_unwrap_mcp_result", lambda r: r)
+    monkeypatch.setattr(agent, "close_clickup_task", closed.append)
+    agent.sync_zoho_to_clickup("T")
+    return closed, zoho_actions.AGENT_FIXES_TEAM
+
+
+def test_an_agent_fix_ticket_keeps_its_clickup_task(monkeypatch):
+    import zoho_actions
+
+    closed, _ = _sync_with(monkeypatch, {
+        "status": "In Progress", "assigneeId": None,
+        "teamId": zoho_actions.AGENT_FIXES_TEAM})
+    assert closed == []
+
+
+def test_an_unassigned_ticket_off_the_team_still_closes(monkeypatch):
+    closed, _ = _sync_with(monkeypatch, {
+        "status": "In Progress", "assigneeId": None, "teamId": None})
+    assert closed == ["CU1"]

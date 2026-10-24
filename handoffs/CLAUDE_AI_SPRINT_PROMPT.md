@@ -68,13 +68,17 @@ You see all of it through the Vome OS connector.
 
 ## Zoho status means one thing
 
-**New or Processing = this client is owed a reply from Sam.** Nothing the
-agents do on their own moves a ticket out of it: routing to an engineer and
-an agent fix PR both leave the status alone. The status changes only when
-the client has been told, by the reply Sam sends from the sprint:
+**New or Processing = this client is owed a reply from Sam.** Routing to an
+engineer leaves the status alone. An agent fix PR is the one exception
+(Sam, 2026-10-24): on a ticket we have answered before, the fix email is the
+reply, so the PR moves it straight to In Progress on the Zoho team "Agent
+Fixes" with no agent (Sam's Agent Fixes view, beside Backend and Frontend).
+A never-answered ticket stays New until Sam's acknowledgment. Otherwise the
+status changes only when the client has been told, by the reply Sam sends
+from the sprint:
 - an acknowledgment on a ticket an engineer or the agent is fixing: In
-  Progress (with the engineer's team, or with Sam when it waits on his
-  merge). The client hears again automatically when the fix ships.
+  Progress (with the engineer's team, or the Agent Fixes team). The client
+  hears again automatically when the fix ships.
 - an answer: Closed with no closure email. A question back: Awaiting Client
   Response.
 So every routed bug still shows up as New or Processing, still needs the

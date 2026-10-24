@@ -352,7 +352,8 @@ def _propose(ticket_id, ticket_number, account, card, zoho_url,
                                 zoho_url, owner)
     _record(ticket_id, ticket_number, "pr_opened", "", pr["url"], parent,
             child, thread_id=thread_id)
-    # Zoho says so straight away: In Progress, Sam, tagged agent-fix.
+    # Zoho says so straight away: In Progress on the Agent Fixes team,
+    # tagged agent-fix (a never-answered ticket stays New for Sam's ack).
     import zoho_actions
 
     zoho = zoho_actions.mark_agent_fix(
