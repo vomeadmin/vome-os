@@ -58,6 +58,7 @@ SWITCHES
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 from datetime import datetime, timezone
@@ -291,15 +292,18 @@ def _propose(ticket_id, ticket_number, account, card, zoho_url,
     risk = str(code.get("fix_risk") or "low")
     target = _pr_target(repo)
 
+    # The code check read production; the diff applies to the PR target,
+    # so the author reads that branch, at the same line found by its text.
+    source, line = source_branch(repo, path, line or 1, target)
     # The fix author reads the same windowed source the Sentry analyst does,
     # built from a one-frame trace at the line the code check named...
-    trace = f'File "{path}", line {line or 1}, in ticket_{ticket_number}'
-    gathered = sentry_code.gather(trace, repo.slug, repo.branch,
+    trace = f'File "{path}", line {line}, in ticket_{ticket_number}'
+    gathered = sentry_code.gather(trace, repo.slug, source.branch,
                                   host=repo.host, owner=repo.owner)
     # ...plus where the names the fix depends on are declared, which is
     # rarely inside that window (#9582: line 6119 used state declared at
     # 1687 and mirrored a helper in another file).
-    extra = extra_context(repo, path, line or 1, card)
+    extra = extra_context(source, path, line, card)
     if extra:
         gathered["files"] = gathered.get("files", "") + "\n\n" + extra
     analysis = {
@@ -317,7 +321,11 @@ def _propose(ticket_id, ticket_number, account, card, zoho_url,
         # #9501: told only "master", the author declined because it never
         # writes to a production branch. It reads production; the PR does
         # not go there.
-        "branch": (f"{repo.branch} (the source shown is what production "
+        "branch": (f"{target} (the source shown is this branch, the one "
+                   f"your diff is applied to; the bug was confirmed on "
+                   f"{repo.branch}, which the pull request never goes into)"
+                   if source.branch != repo.branch else
+                   f"{repo.branch} (the source shown is what production "
                    f"runs; your diff is applied to {target or 'the dev branch'}"
                    f" and the pull request goes into "
                    f"{target or 'the dev branch'}, never {repo.branch})"),
@@ -373,6 +381,86 @@ def engineer_for(alias: str) -> str:
     """Who reviews a medium risk fix in this repo: Sanjay for web and
     mobile, OnlyG for everything backend."""
     return FRONTEND if alias in FRONTEND_REPOS else BACKEND
+
+
+# How many of the 7 lines around the code check's line (itself and 3 each
+# side) must read the same on the target branch to call it the same place.
+SAME_PLACE = 4
+
+
+def matching_line(prod: list[str], target: list[str], line: int) -> int:
+    """The line on the target branch that is `line` on production, or 0.
+
+    A candidate reads the same as the production line; the one whose
+    neighbours also read the same wins. A tie or a weak match is 0: a
+    wrong window is worse than production's."""
+    def same(i: int, j: int) -> bool:
+        return (0 <= i < len(prod) and 0 <= j < len(target)
+                and prod[i].strip() == target[j].strip())
+
+    want = line - 1
+    if not 0 <= want < len(prod):
+        return 0
+    scores = []
+    for at in range(len(target)):
+        if not same(want, at):
+            continue
+        scores.append((sum(same(want + k, at + k) for k in range(-3, 4)),
+                       at))
+    scores.sort(reverse=True)
+    if not scores or scores[0][0] < SAME_PLACE or (
+            len(scores) > 1 and scores[1][0] == scores[0][0]):
+        return 0
+    return scores[0][1] + 1
+
+
+# How far from the code check's line an unchanged neighbour may anchor it,
+# and how long that neighbour must be to mean anything ("}" does not).
+ANCHOR_REACH = 15
+ANCHOR_MIN_CHARS = 12
+
+
+def place_line(prod: list[str], target: list[str], line: int) -> int:
+    """matching_line, or when the line itself was edited on the target
+    (#9573: development rewrote line 970 inside the same function), the
+    nearest unchanged neighbour within ANCHOR_REACH, with the offset kept.
+    0 when nothing near it can be placed."""
+    for distance in range(ANCHOR_REACH + 1):
+        for step in ((0,) if distance == 0 else (-distance, distance)):
+            near = line + step
+            if not 1 <= near <= len(prod):
+                continue
+            if step and len(prod[near - 1].strip()) < ANCHOR_MIN_CHARS:
+                continue
+            at = matching_line(prod, target, near)
+            if at and 1 <= at - step <= len(target):
+                return at - step
+    return 0
+
+
+def source_branch(repo, path: str, line: int, target: str):
+    """(repo to read, line there) for the fix author.
+
+    #9358 and #9573 (2026-10-25): the author read production (master)
+    and its diff was applied to develop, which had moved on, so the patch
+    missed. The author now reads the target, at the code check's line
+    found by its text. Production, as before, when the target is the same
+    branch, the file is not there, or the line cannot be placed."""
+    if not target or target == repo.branch:
+        return repo, line
+    try:
+        on_target = dataclasses.replace(repo, branch=target)
+        prod = _read_text(repo, path).splitlines()
+        dev = _read_text(on_target, path).splitlines()
+    except Exception as exc:
+        print(f"[TICKET FIX] could not read {path} on {target}: {exc}")
+        return repo, line
+    at = place_line(prod, dev, line) if prod and dev else 0
+    if not at:
+        print(f"[TICKET FIX] {path}:{line} not placed on {target}; reading "
+              f"{repo.branch}")
+        return repo, line
+    return on_target, at
 
 
 def _pr_target(repo) -> str:

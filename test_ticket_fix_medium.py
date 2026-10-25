@@ -89,8 +89,11 @@ def proposing(monkeypatch):
     monkeypatch.setattr(ticket_fix, "_record", lambda *a, **k: None)
     monkeypatch.setattr(ticket_fix, "_pr_target", lambda repo: "development")
     monkeypatch.setattr(ticket_fix, "extra_context", lambda *a: "")
+    monkeypatch.setattr(ticket_fix, "source_branch",
+                        lambda repo, path, line, target: (repo, line))
     monkeypatch.setattr(sentry_code, "gather",
-                        lambda *a, **k: {"files": "src"})
+                        lambda *a, **k: seen.update(read=a[2])
+                        or {"files": "src"})
 
     def propose(analysis, context, allow_risk=("low",)):
         seen["context"] = context
@@ -266,3 +269,74 @@ def test_a_sibling_with_no_location_keeps_the_matchers_call(monkeypatch):
     incident = {"key": "k", "same_as": ["9620", "9700"], "sentry_issue": ""}
     assert shadow_triage._drop_other_modules(
         incident, MEDIUM)["same_as"] == ["9620", "9700"]
+
+
+# ---------------------------------------------------------------------------
+# The author reads the branch its diff applies to (#9358, #9573, 2026-10-25)
+# ---------------------------------------------------------------------------
+
+PROD = ["import x", "", "def save(row):", "    row.a = 1", "    row.b = 2",
+        "    row.save()", "    return row", "", "def other():", "    pass"]
+
+
+def test_the_line_is_found_where_develop_moved_it():
+    dev = ["import x", "import y", "", "# new helper", "def helper():",
+           "    pass", ""] + PROD[2:]
+    # "    row.b = 2" is line 5 on production and line 10 on develop.
+    assert ticket_fix.matching_line(PROD, dev, 5) == 10
+
+
+def test_a_line_that_changed_on_develop_is_not_placed():
+    dev = [line.replace("row.b = 2", "row.b = compute(row)") for line in PROD]
+    assert ticket_fix.matching_line(PROD, dev, 5) == 0
+
+
+def test_an_edited_line_is_placed_by_its_unchanged_neighbour():
+    # #9573: develop rewrote the line itself, the function around it stayed.
+    dev = ["import x", "import y", ""] + PROD[2:]
+    dev[dev.index("    row.b = 2")] = "    row.b = compute(row)"
+    assert ticket_fix.place_line(PROD, dev, 5) == 6
+
+
+def test_nothing_near_it_left_is_not_placed():
+    dev = ["something else entirely"] * 30
+    assert ticket_fix.place_line(PROD, dev, 5) == 0
+
+
+def test_two_equally_good_places_are_not_guessed():
+    twice = PROD[2:8] + ["# copy"] + PROD[2:8]
+    assert ticket_fix.matching_line(PROD[2:8], twice, 3) == 0
+
+
+def test_the_author_reads_develop_when_the_line_is_placed(monkeypatch):
+    from vomeos.tools import Repo
+
+    repo = Repo("web", "github", "vome", "vome-react", "master")
+    files = {"master": PROD, "develop": ["import y"] + PROD}
+    monkeypatch.setattr(ticket_fix, "_read_text",
+                        lambda r, path: "\n".join(files[r.branch]))
+    source, line = ticket_fix.source_branch(repo, "a.py", 5, "develop")
+    assert (source.branch, line) == ("develop", 6)
+
+
+def test_production_is_kept_when_develop_lacks_the_file(monkeypatch):
+    from vomeos.tools import Repo
+
+    repo = Repo("web", "github", "vome", "vome-react", "master")
+    monkeypatch.setattr(ticket_fix, "_read_text",
+                        lambda r, path: "" if r.branch == "develop"
+                        else "\n".join(PROD))
+    source, line = ticket_fix.source_branch(repo, "a.py", 5, "develop")
+    assert (source.branch, line) == ("master", 5)
+
+
+def test_the_author_is_told_it_reads_the_target(proposing, monkeypatch):
+    import dataclasses
+
+    monkeypatch.setattr(ticket_fix, "source_branch",
+                        lambda repo, path, line, target: (
+                            dataclasses.replace(repo, branch=target), 12))
+    ticket_fix.propose_for_ticket("T1", "9358", "X", MEDIUM, "z")
+    assert proposing["read"] == "development"
+    branch = proposing["context"]["branch"]
+    assert branch.startswith("development") and "confirmed on" in branch
