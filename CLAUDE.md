@@ -103,7 +103,10 @@ feature_desk.py    #feature-requests: engineering.feature_architect shapes each
                    become fix_author PRs; Sam answers go N / no N, or
                    places it: build N (Sam Build Now), log N (Raw Intake),
                    route N onlyg, leave N (moves Ron's task, never copies).
-                   Always on; FEATURE_DESK_PR_ENABLED (off) gates the PRs
+                   Asks Sam first: nothing is analysed until he says
+                   `analyse`; log/build/route/leave/no place it unread.
+                   FEATURE_DESK_AUTO_ANALYSE (off) restores analyse-all;
+                   FEATURE_DESK_PR_ENABLED (off) gates the PRs
 WORKFLOWS.md       the workflow map + gap register (source of truth)
 VIDEO_STUDIO.md    marketing videos from #video-studio: the team, replies,
                    sources, costs, data, debugging (read before touching

@@ -196,7 +196,9 @@ flowchart TD
 <!-- map:diagram id=featuredesk title="9. A request in #feature-requests, shaped before it is built (built 2026-10-19, switched off)" -->
 ```mermaid
 flowchart TD
-  P["Request posted in #feature-requests<br/>(Ron's backend handoff + ClickUp spec, demo notes, client asks)"]:::built --> ACK["'Analysing this' in the thread"]:::built
+  P["Request posted in #feature-requests<br/>(Ron's backend handoff + ClickUp spec, demo notes, client asks)"]:::built --> Q["Sam asked in the thread: analyse, or place it as is<br/>(recorded, no model call; others' replies wait, since 2026-10-25)"]:::built
+  Q -->|"Sam: log / build / route / leave / no"| PLACE
+  Q -->|"Sam: analyse (or go, or analyse + direction)"| ACK["'Analysing this' in the thread"]:::built
   ACK --> FA["Feature architect (premium) reads the code<br/>and the 14 extension patterns; one verdict per request"]:::built
   FA -->|agent_build: additive, no schema, core/database, 3 files| FX["Fix author + patch safety<br/>PR into development (cap 3/day)"]:::built
   FX --> AF["Agent Fixes task, linked to the requester's task<br/>Sam merges; release watcher takes it"]:::built

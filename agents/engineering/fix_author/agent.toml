@@ -28,7 +28,7 @@ charter = "charter.md"
 # building-a-greenlit-fix only acts when the context carries a Greenlight
 # section (#bug-reports, Sam approved the fix himself). building-a-requested-
 # change covers #feature-requests builds and `needs_context` on any refusal.
-skills = ["building-a-greenlit-fix", "building-a-requested-change"]
+skills = ["building-a-greenlit-fix", "building-a-requested-change", "working-on-the-shift-list"]
 requires_context = [
     "root_cause",
     "proposed_fix",
