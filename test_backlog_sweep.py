@@ -395,3 +395,39 @@ def test_a_fix_that_moved_the_task_in_does_not_close_it(monkeypatch):
                         lambda *a: pytest.fail("the moved task was closed"))
     out = bs.apply_one("fix", _entry(), _record(lane="agent_fix"))
     assert out["ok"] and "moved in" in out["did"]
+
+
+# Oct 25: "we asked and they went quiet" closed tickets two days after our
+# question. Under 30 quiet days the ticket waits at Awaiting Client Response.
+def _close_with(monkeypatch, quiet, status="In Progress"):
+    import zoho_actions
+
+    set_to = []
+    monkeypatch.setattr(bs, "_quiet_days", lambda t: quiet)
+    monkeypatch.setattr(zoho_actions, "ticket_status", lambda t: status)
+    monkeypatch.setattr(zoho_actions, "set_status",
+                        lambda t, s: set_to.append(s))
+    monkeypatch.setattr(bs, "release_task", lambda *a: "released")
+    out = bs.apply_one("close", _entry(zoho_ticket_id="T1"),
+                       _record(category="awaiting_client"))
+    assert out["ok"]
+    return set_to, out["did"]
+
+
+def test_a_recent_question_waits_for_the_client(monkeypatch):
+    set_to, did = _close_with(monkeypatch, quiet=2)
+    assert set_to == [bs.ZOHO_AWAITING]
+    assert "stale sweep" in did
+
+
+def test_a_ticket_already_awaiting_is_left_as_is(monkeypatch):
+    set_to, _ = _close_with(monkeypatch, quiet=2, status=bs.ZOHO_AWAITING)
+    assert set_to == []
+
+
+def test_a_long_quiet_ticket_closes(monkeypatch):
+    assert _close_with(monkeypatch, quiet=45)[0] == ["Closed"]
+
+
+def test_nothing_owed_with_the_client_last_closes(monkeypatch):
+    assert _close_with(monkeypatch, quiet=None)[0] == ["Closed"]

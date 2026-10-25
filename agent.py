@@ -1431,6 +1431,26 @@ def _find_clickup_task_by_zoho_ticket(ticket_id: str) -> str | None:
         return None
 
 
+def _clickup_task_closed(task_id: str) -> bool:
+    """True when the task's status is a closed or done one. Unreadable is
+    False, which keeps the old behaviour."""
+    import httpx as _httpx
+    cu_token = os.environ.get("CLICKUP_API_TOKEN", "")
+    if not cu_token or not task_id:
+        return False
+    try:
+        r = _httpx.get(f"https://api.clickup.com/api/v2/task/{task_id}",
+                       headers={"Authorization": cu_token}, timeout=15)
+        r.raise_for_status()
+        state = r.json().get("status") or {}
+    except Exception as e:
+        print(f"[ZOHO->CU] could not read task {task_id}: {e}")
+        return False
+    return (state.get("type") == "closed"
+            or (state.get("status") or "").lower() in (
+                "closed", "done", "complete", "declined", "finished"))
+
+
 def _close_queue_tasks_if_closed(ticket_id: str,
                                  status_known: bool = False) -> None:
     """Close every open Priority Queue task linked to a Closed ticket, with
@@ -1531,6 +1551,16 @@ def sync_zoho_to_clickup(ticket_id: str) -> None:
     # Checked BEFORE the assignee rules below so the task is parked rather
     # than closed even when the ticket is owned by Sam/Ron.
     if status == ZOHO_AWAITING_CLIENT_RESPONSE.lower():
+        # A task already closed (released off the engineer queue) stays
+        # closed: parking it reopened it (#9536, 2026-10-25). A client
+        # reply re-triages the ticket instead.
+        if _clickup_task_closed(clickup_task_id):
+            print(
+                f"[ZOHO->CU] ticket {ticket_id} awaiting client response -- "
+                f"ClickUp task {clickup_task_id} is closed, left closed"
+            )
+            update_thread(thread_ts, status=THREAD_WAITING_CLIENT)
+            return
         print(
             f"[ZOHO->CU] ticket {ticket_id} awaiting client response -- "
             f"ClickUp task {clickup_task_id} -> {CU_AWAITING_CLIENT}"
