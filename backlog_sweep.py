@@ -886,6 +886,18 @@ def _adopt(entry: dict, record: dict) -> dict:
     return {"item": item.get("number"), "draft": draft["status"]}
 
 
+CLOSE_AFTER_QUIET_DAYS = int(os.environ.get("STALE_WAITING_DAYS", "30"))
+
+
+def _quiet_days(ticket_id: str) -> int | None:
+    """Days since our last reply when we spoke last, else None."""
+    inbound, outbound = _exchange(ticket_id)
+    last_in, last_out = _when(inbound), _when(outbound)
+    if not last_out or (last_in and last_in >= last_out):
+        return None
+    return (datetime.now(timezone.utc) - last_out).days
+
+
 def apply_one(action: str, entry: dict, record: dict) -> dict:
     card = record.get("card") or {}
     if action == "note":
@@ -907,12 +919,23 @@ def apply_one(action: str, entry: dict, record: dict) -> dict:
 
     if action == "close":
         notes = []
-        if (entry.get("zoho_ticket_id")
-                and record.get("zoho_status") not in ZOHO_DONE):
+        tid = entry.get("zoho_ticket_id")
+        if tid and record.get("zoho_status") not in ZOHO_DONE:
             import zoho_actions
 
-            zoho_actions.set_status(entry["zoho_ticket_id"], "Closed")
-            notes.append("Zoho closed with no closure email")
+            # We asked and they went quiet: the ticket waits for the stale
+            # sweep's 30 days, not a close days after our question (Oct 25,
+            # #9601 was two days quiet). A reply re-triages it.
+            quiet = _quiet_days(tid)
+            if quiet is not None and quiet < CLOSE_AFTER_QUIET_DAYS:
+                if zoho_actions.ticket_status(tid) != ZOHO_AWAITING:
+                    zoho_actions.set_status(tid, ZOHO_AWAITING)
+                notes.append(f"Zoho left at {ZOHO_AWAITING} ({quiet} days "
+                             f"quiet; the stale sweep closes it at "
+                             f"{CLOSE_AFTER_QUIET_DAYS})")
+            else:
+                zoho_actions.set_status(tid, "Closed")
+                notes.append("Zoho closed with no closure email")
         notes.append(release_task(
             entry, f"Nothing is owed here: "
             f"{card.get('situation') or card.get('recommended_action')}"))

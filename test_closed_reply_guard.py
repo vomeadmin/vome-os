@@ -245,3 +245,22 @@ def test_an_open_ticket_with_no_thread_closes_nothing(monkeypatch):
                         lambda t: swept.append(t) or [])
     agent.sync_zoho_to_clickup("T")
     assert swept == []
+
+
+# 2026-10-25: a task released off the engineer queue was reopened when the
+# ticket was then parked at Awaiting Client Response (#9536).
+def _park_with(monkeypatch, task_closed):
+    parked = []
+    monkeypatch.setattr(agent, "_clickup_task_closed", lambda t: task_closed)
+    monkeypatch.setattr(agent, "_update_clickup_task_status",
+                        lambda t, s: parked.append(t))
+    _sync_with(monkeypatch, {"status": "Awaiting Client Response"})
+    return parked
+
+
+def test_a_closed_task_stays_closed_when_the_ticket_is_parked(monkeypatch):
+    assert _park_with(monkeypatch, task_closed=True) == []
+
+
+def test_an_open_task_is_parked_with_the_ticket(monkeypatch):
+    assert _park_with(monkeypatch, task_closed=False) == ["CU1"]
