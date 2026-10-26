@@ -21,8 +21,11 @@ a bulk version of an existing write) goes straight to a pull request.
 
 FLOW
 ----
-    top-level message (web)  ->  "Analysing this." in the thread
-                             ->  enqueue engineering.feature_request -> worker:
+    top-level message (web)  ->  Sam is asked in the thread: analyse it, or
+                                 place it as is
+                             ->  enqueue engineering.feature_request -> worker
+                                 records the post, no model call
+    Sam: `analyse`           ->  "Analysing this." and the architect runs:
       1. the post, its thread, the ClickUp task it links, existing tasks
       2. engineering.feature_architect reads the code (production and the
          dev branches) and returns one verdict per request in the post
@@ -34,6 +37,13 @@ FLOW
                            Sam's queue); with no task, Sam says `log N`
          already_exists, frontend_only -> the finding, nothing built
          needs_info     -> the requester is asked one question
+
+Ask first (Sam, 2026-10-25): many requests are not wanted yet, or not even
+worth an analysis, so nothing is read until Sam says so. Before an analysis
+the request is one item, the post as written: `log`, `build`, `route
+onlyg|sanjay`, `leave`, `no` and `close` place it with no model call, and
+`analyse` (or `go`, or "analyse it, focus on X", which is direction) runs
+the architect. Replies from anyone else wait for Sam and cost nothing.
 
 Replies in the thread, from Sam: `go N` / `go NB` (an agent builds item N,
 or option B of it), `build N` (Sam Build Now: he builds it himself), `log N`
@@ -59,6 +69,8 @@ The desk always listens to the channel. FEATURE_DESK_ENABLED was removed
 at Sam's request, 2026-10-19: a default-off switch nobody set made the first
 real post go unanswered.
 
+    FEATURE_DESK_AUTO_ANALYSE     default OFF. "true" goes back to analysing
+                                  every new post without asking Sam.
     FEATURE_DESK_PR_ENABLED       default OFF. "true" lets the agent open
                                   pull requests on its own; off, an
                                   agent_build item waits for Sam's `go N`,
@@ -132,6 +144,10 @@ _SAYS = (
         r"\braw intake\b|\bbacklog\b|\bfor later\b|\blog the request\b",
         re.I)),
 )
+# Sam asking for the architect on a request that waits for him. Whatever
+# follows the verb is direction ("analyse it, focus on the step type").
+_ANALYSE = re.compile(r"^\W*(?:please\s+)?(?:analy[sz]e|look into)"
+                      r"(?:\s+(?:it|this|that))?\b\W*(.*)$", re.I | re.S)
 # A thank-you is not direction, and must not cost a re-analysis.
 _CHAT = re.compile(r"^(thanks?( you)?|ty|ok(ay)?|great|nice|cool|perfect|"
                    r"got it|sounds good|:[a-z0-9_+-]+:)\W*$", re.I)
@@ -154,8 +170,9 @@ PLACES = {"build": "Sam Build Now", "log": "Raw Intake",
           "leave": "Sam's Priority Queue"}
 ENGINEER_OPEN = ("queued", "in progress", "escalated")
 
-# Post states.
+# Post states. AWAITING: recorded, nothing analysed until Sam says.
 ANALYSING, OPEN, CLOSED, ERROR = "analysing", "open", "closed", "error"
+AWAITING = "awaiting_sam"
 # Every item landed and the outcome is on ClickUp: the post gets a check
 # mark so the channel shows what is handled at a glance (Sam, 2026-10-19).
 SETTLED = "settled"
@@ -194,8 +211,20 @@ def _on(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() == "true"
 
 
+def auto_analyse() -> bool:
+    return _on("FEATURE_DESK_AUTO_ANALYSE")
+
+
 def pr_enabled() -> bool:
     return _on("FEATURE_DESK_PR_ENABLED")
+
+
+ANALYSING_TEXT = ("Analysing this. I'll check it against the backend and "
+                  "reply here with what can be built and what needs Sam.")
+ASK_SAM_TEXT = (f"<@{SAM_SLACK}> analyse this, or place it as is? "
+                "`analyse` (the architect checks it against the backend), "
+                "`log` (Raw Intake), `build` (Sam Build Now), `route onlyg` "
+                "or `sanjay`, `leave` (stays in your Priority Queue), `no`.")
 
 
 def daily_cap() -> int:
@@ -221,8 +250,7 @@ def handle_message(event: dict) -> None:
             # Priority Queue handoff that never had a post of its own.
             if len(text) < MIN_REQUEST_CHARS and not _TASK_LINK.search(text):
                 return
-            _post("Analysing this. I'll check it against the backend and "
-                  "reply here with what can be built and what needs Sam.",
+            _post(ANALYSING_TEXT if auto_analyse() else ASK_SAM_TEXT,
                   thread_ts=ts)
             enqueue_event(HANDLER_KEY, {"ts": ts}, queue=QUEUE)
         else:
@@ -253,6 +281,8 @@ def handle(message: dict) -> dict:
         row = _row(ts)
         if row and row.get("status") != ERROR:
             return {"status": "skipped", "reason": "already handled"}
+        if not auto_analyse():
+            return _hold(ts)
         _save(ts, status=ANALYSING)
         return analyse(ts)
     except Exception as exc:
@@ -284,8 +314,16 @@ def _on_reply(ts: str, reply: dict) -> dict:
                   "thread.", thread_ts=ts)
             return {"status": "ok", "action": "closed"}
         command = parse_command(text, items) or parse_placement(text, items)
+        if row.get("status") == AWAITING:
+            asked = _ANALYSE.match(text)
+            if asked or (command and command["verb"] == "go"):
+                return _analyse_now(ts, asked.group(1).strip() if asked
+                                    else "")
         if command:
             return _command(ts, row, items, command)
+    if row.get("status") == AWAITING:
+        # Nothing is read until Sam asks for it: that is the saving.
+        return {"status": "skipped", "reason": "waiting for Sam"}
     if _CHAT.match(text):
         return {"status": "skipped", "reason": "acknowledgement"}
     # Anything else is read against the whole thread, and the architect
@@ -294,6 +332,35 @@ def _on_reply(ts: str, reply: dict) -> dict:
     who = "Sam" if sam else _name(reply.get("user"))
     return analyse(ts, direction=text if sam else "",
                    reply=f"{who}: {text}")
+
+
+def _hold(ts: str) -> dict:
+    """A new post, recorded with no model call (Sam, 2026-10-25). It is one
+    item, the post as written, so Sam can place it without an analysis."""
+    post = _read_post(ts)
+    if not post:
+        return {"status": "skipped", "reason": "message unreadable"}
+    _save(ts, status=AWAITING, requester=post["requester"],
+          task_id=post["task_id"], items=json.dumps({"1": _plain_item(post)}))
+    return {"status": "ok", "action": "waiting for Sam"}
+
+
+def _plain_item(post: dict) -> dict:
+    """The request as written, standing in for the architect's items.
+    Recorded already: there is no analysis to write on the task."""
+    text = re.sub(r"<[^>]*>", " ", str(post.get("text") or ""))
+    first = next((line.strip(" *_#-") for line in text.splitlines()
+                  if line.strip(" *_#-")), "")
+    return {"n": "1", "title": first[:120] or "Feature request",
+            "state": "", "recorded": True}
+
+
+def _analyse_now(ts: str, direction: str) -> dict:
+    """Sam asked for the architect. The stand-in item goes, so the
+    architect's own items are the only ones on the thread."""
+    _save(ts, status=ANALYSING, items=json.dumps({}))
+    _post(ANALYSING_TEXT, thread_ts=ts)
+    return analyse(ts, direction=direction)
 
 
 def parse_command(text: str, items: dict) -> dict | None:
@@ -651,11 +718,22 @@ def _can_build(item: dict) -> tuple[bool, str]:
         return False, (f"repo {build.get('repo')!r} is not one an agent "
                        "builds in (core, database)")
     anchors = [a for a in build.get("anchors") or [] if isinstance(a, str)]
-    if not anchors or len(anchors) > 3:
-        return False, "needs one to three exact file:line anchors"
+    if not anchors or len(anchors) > MAX_ANCHORS:
+        return False, (f"needs one to {MAX_ANCHORS} exact file:line "
+                       "anchors")
     if not all(re.match(r"^[\w./-]+\.py:\d+$", a) for a in anchors):
         return False, f"anchors are not exact path:line ({anchors})"
+    if len({a.rsplit(":", 1)[0] for a in anchors}) > MAX_BUILD_FILES:
+        return False, f"edits more than {MAX_BUILD_FILES} files"
     return True, ""
+
+
+# The envelope is three files, not three edits. A helper and its call site
+# can sit 600 lines apart in one file, and the builder only sees a window
+# around each anchor (2026-10-24: three anchors spread over three files
+# left the V4 _get_shifts call site unseen, and every `go 1` refused).
+MAX_BUILD_FILES = 3
+MAX_ANCHORS = 6
 
 
 # The architect's own words for something it has not looked at yet. An
@@ -727,6 +805,16 @@ def _build(ts: str, row: dict, items: dict, n: str,
             # Sam's `go 1` on profile status was logged over missing imports).
             item["state"] = HELD
             item["build_stopped"] = reason
+            # Every path:line the builder asked for comes with the next
+            # `go N`, or the retry is shown the same source and refuses the
+            # same way (2026-10-24: it named v4/api.py:1328 and the second
+            # `go 1` still stopped short of it).
+            import sentry_code
+            asked = item.get("source_asked") or []
+            for path, line in sentry_code.references(reason):
+                if f"{path}:{line}" not in asked:
+                    asked.append(f"{path}:{line}")
+            item["source_asked"] = asked
             _save(ts, items=json.dumps(items))
             _post(f"*{n}* needs more source than the builder was given: "
                   f"{reason.rstrip('. ')}. <@{SAM_SLACK}> say `go {n}` to "
@@ -803,7 +891,9 @@ def _propose(ts: str, item: dict):
     ref = sentry_projects.fix_target(repo.slug) or repo.branch
     anchors = [a.rsplit(":", 1) for a in build.get("anchors") or []]
     refs = sentry_code.references(
-        f"{item.get('evidence') or ''}\n{build.get('plan') or ''}")
+        f"{item.get('evidence') or ''}\n{build.get('plan') or ''}\n"
+        f"{item.get('build_stopped') or ''}\n"
+        + " ".join(item.get("source_asked") or []))
     gathered = sentry_code.gather_for_build(
         [(path, int(line)) for path, line in anchors], repo.slug, ref,
         host=repo.host, owner=repo.owner, refs=refs)
@@ -1262,8 +1352,9 @@ def _react(ts: str) -> None:
 def _create_task(item: dict, ts: str, row: dict, list_id: str = RAW_INTAKE,
                  **extra) -> str:
     """Only for a post that links no task. Build now carries the request
-    as written, since Sam works from the requester's words."""
-    if list_id == SAM_ACCEPTED:
+    as written, since Sam works from the requester's words, and so does a
+    request placed without an analysis."""
+    if list_id == SAM_ACCEPTED or not item.get("analysis"):
         link = _permalink(ts)
         body = f"{_read_post(ts).get('text') or ''}\n\nSlack: {link}"
     else:

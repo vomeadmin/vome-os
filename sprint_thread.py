@@ -1286,7 +1286,17 @@ def _redraft(item: dict, notes: str) -> str:
             f"```{draft['text']}```")
 
 
-def _send(item: dict) -> str:
+def _send(item: dict, sam_wrote: bool = False,
+          automatic: bool = False) -> str:
+    """`sam_wrote`: the text is Sam's own (send_ticket_reply with `text`).
+    It still passed every outbound guard in _check_draft; only the stale
+    acknowledgment check is skipped, because Sam writing the reply is the
+    outcome that check waits for (#9549, #9575 on 2026-10-23: corrected
+    answers refused as "the team is on it").
+
+    `automatic`: no person approved this send (release watcher, shipped
+    untold). It goes out signed "Vome team" instead of Sam's name (Sam,
+    2026-10-23)."""
     import zoho_actions
 
     n = item.get("number")
@@ -1301,7 +1311,7 @@ def _send(item: dict) -> str:
     if not draft or item.get("draft_status") != "ok":
         return (f"*{n}.* has no ready draft ({item.get('draft_status')}). "
                 f"Use `edit {n}: ...` or `redraft {n}: ...` first.")
-    shipped = _engineer_shipped(item)
+    shipped = "" if sam_wrote else _engineer_shipped(item)
     if shipped:
         return shipped
 
@@ -1319,19 +1329,27 @@ def _send(item: dict) -> str:
         return (f"*{n}.* has no recipient (no sender on the latest customer "
                 "message), so nothing was sent. Reply from Zoho, or say "
                 f"`retriage {n}`.")
+    approved = draft
+    if automatic:
+        from signatures import team_signed
+
+        draft = team_signed(draft)
     zoho_actions.send_reply(item["ticket_id"], to, cc, draft)
     if _still_fixing(item):
         # The acknowledgment went; the agent still owns the fix, so the item
         # stays in flight instead of finishing (#9582).
         sprint_store.keep_fixing(item["id"])
     else:
+        by = "automatically" if automatic else "by Sam"
         sprint_store.decide(item["id"], sprint_store.SENT,
-                            f"sent by Sam after {item.get('decision')}"
-                            if owed else "sent by Sam")
-    sprint_store.record_sent(item["id"], draft)
+                            f"sent {by} after {item.get('decision')}"
+                            if owed else f"sent {by}")
+    sprint_store.record_sent(item["id"], draft, compared=approved)
     copied = f" cc {', '.join(cc)}" if cc else ""
-    _post(f"Sent #{item.get('ticket_number')} to {to}{copied} on Sam's "
-          "approval in the sprint.", channel=AGENT_LOG)
+    how = ("automatically, signed Vome team" if automatic
+           else "on Sam's approval in the sprint")
+    _post(f"Sent #{item.get('ticket_number')} to {to}{copied} {how}.",
+          channel=AGENT_LOG)
     after = _after_send(item)
     return f"*{n}.* sent to {to}{copied}." + (f" {after}" if after else "")
 
@@ -1349,10 +1367,15 @@ def _reply_owed(item: dict) -> bool:
 
 def _engineer_shipped(item: dict) -> str:
     """Why an acknowledgment must not go: the engineer triage routed it to
-    has already shipped, and the on-prod handler emailed the client "it is
-    fixed". A "we are on it" after that reads as if nobody is reading. A
-    resolution draft for the same ticket is the reply that is owed, so it
-    passes. '' when the send may go ahead (ClickUp unreadable included)."""
+    has already shipped. A "we are on it" after that reads as if nobody is
+    reading. A resolution draft for the same ticket is the reply that is
+    owed, so it passes. '' when the send may go ahead (ClickUp unreadable
+    included).
+
+    The item finishes only when Zoho shows the client was written to after
+    their last message. Only `on prod` emails the client; an engineer
+    closing the task tells nobody, and until 2026-10-22 that finished eight
+    tickets nobody had answered (#9330, #9441, #9504, #9549 among them)."""
     filed = item.get("eng_task") or {}
     if not filed.get("id"):
         return ""
@@ -1364,9 +1387,22 @@ def _engineer_shipped(item: dict) -> str:
     state = ticket_routing.task_state(filed)
     if not state.get("shipped"):
         return ""
+    try:
+        told = sprint_batch.answered_in_zoho(str(item.get("ticket_id")))
+    except Exception as exc:
+        print(f"[SPRINT] could not tell if {item.get('ticket_id')} was "
+              f"answered: {exc}")
+        told = False
+    if not told:
+        return (f"*{item.get('number')}.* nothing sent: "
+                f"{filed.get('owner')} closed the task "
+                f"({state.get('status')}, {filed.get('url')}) and the "
+                "client has not been told the outcome. This draft says the "
+                "team is on it; redraft it with the outcome first.")
     sprint_store.decide(item["id"], sprint_store.DONE,
                         f"{filed.get('owner')} shipped it "
                         f"({state.get('status')}) before Sam replied")
+    item["status"] = sprint_store.DONE
     return (f"*{item.get('number')}.* nothing sent: {filed.get('owner')} "
             f"already shipped this ({state.get('status')}, "
             f"{filed.get('url')}), and the client is emailed when a fix "
@@ -1388,18 +1424,26 @@ def _still_fixing(item: dict) -> bool:
 # status follows from it, so nobody has to tidy two systems by hand.
 CLOSE_AFTER = {"user_education", "admin_action", "misdirected",
                "account_deletion"}
-AWAIT_AFTER = {"vague_bug", "email_update"}
 
 
 def _after_send(item: dict) -> str:
     """Zoho status and Agent Fixes closure after a sent reply.
 
     A resolution (the linked fix is Live) or an answer closes the ticket,
-    silently. A question waits for the customer. An acknowledgment leaves
-    the status alone: the work is still open. Failures are reported, never
-    raised: the email already went, and that must not look like it failed.
+    silently. A routed ticket or an agent fix in flight goes to In Progress.
+    Everything else waits for the customer. A sent reply never leaves the
+    ticket in New or Processing: Processing means the customer wrote and we
+    still owe them, which stops being true the moment this email goes
+    (Sam, #9394, 2026-10-22). Failures are reported, never raised: the email
+    already went, and that must not look like it failed.
+
+    A routed task the engineer turned down means Sam's reply is the answer,
+    so the ticket closes. Whenever the ticket closes, the routed task closes
+    with it: #9547's task sat in `declined` after the client was answered
+    (Sam, 2026-10-22).
     """
     import shadow_triage
+    import ticket_routing
     import zoho_actions
 
     category = item.get("category") or ""
@@ -1410,7 +1454,14 @@ def _after_send(item: dict) -> str:
     # Zoho moves out of New/Processing only now that the client has been
     # told (ticket_routing): until then that status means "owed a reply".
     filed = item.get("eng_task") or {}
-    if filed.get("url") and not release.get("live"):
+    task = ticket_routing.task_state(filed) if filed.get("url") else {}
+    declined = bool(task.get("declined"))
+    # A task the engineer already closed emails nobody later, so a reply
+    # sent now is the answer, as with a declined task. #9549 and #9575
+    # (2026-10-23) went to In Progress "emailed when it ships" on tasks
+    # that had closed days before.
+    done = declined or bool(task.get("shipped"))
+    if filed.get("url") and not release.get("live") and not done:
         reason = re.sub(r"\W+", "_", str(filed.get("reason") or "auto"))
         sprint_store.decide(item["id"], sprint_store.ROUTED,
                             f"routed to {filed.get('owner')} "
@@ -1430,12 +1481,12 @@ def _after_send(item: dict) -> str:
                     "waiting on your merge).")
         except Exception as exc:
             return f":warning: Zoho status NOT set to In Progress ({exc})."
-    if release.get("live") or category in CLOSE_AFTER:
+    # A closed task only closes the ticket when the reply is a complete
+    # answer (CLOSE_AFTER); otherwise the reply asked something and waits.
+    if release.get("live") or category in CLOSE_AFTER or declined:
         status = "Closed"
-    elif category in AWAIT_AFTER:
-        status = "Awaiting Client Response"
     else:
-        return "Zoho status left as it is (the work is still open)."
+        status = "Awaiting Client Response"
 
     notes = []
     try:
@@ -1448,7 +1499,24 @@ def _after_send(item: dict) -> str:
 
     if release.get("live"):
         notes.append(_close_agent_fix(item))
+    if status == "Closed" and filed.get("id"):
+        notes.append(_close_engineer_task(filed, task))
     return " ".join(n for n in notes if n)
+
+
+def _close_engineer_task(filed: dict, task: dict) -> str:
+    """Close the task triage routed once the ticket itself is closed.
+
+    `Closed`, never `on prod`: on prod fires the on-prod handler, which
+    would email the customer a second time. A task already Closed or on
+    prod is left alone."""
+    if task.get("status") in ("closed", "on prod"):
+        return ""
+    try:
+        _clickup_status(filed["id"], "Closed")
+        return f"ClickUp task closed ({filed.get('url')})."
+    except Exception as exc:
+        return f":warning: ClickUp task NOT closed ({exc})."
 
 
 def _clickup_status(task_id: str, status: str) -> None:

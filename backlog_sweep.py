@@ -7,6 +7,8 @@ off their plates what an answer or an agent fix can settle.
     py backlog_sweep.py inventory              list the backlog, read only
     railway run --service vome-os-worker py backlog_sweep.py triage --limit 10
     py backlog_sweep.py sheet                  the review sheet, by group
+    railway run --service vome-os-worker py backlog_sweep.py audit
+                                               Zoho and ClickUp in sync?
     railway run --service vome-os-worker py backlog_sweep.py apply answer \\
         868abc123 zoho:569440000043050400 --confirm
 
@@ -68,7 +70,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -84,6 +86,11 @@ def _use_public_database() -> None:
     same database. Must run before anything imports vomeos.config."""
     url = os.environ.get("DATABASE_URL", "")
     if ".railway.internal" not in url:
+        return
+    # The Postgres service's own public address wins: the .env copy goes
+    # stale when the password rotates (2026-10-24).
+    if os.environ.get("DATABASE_PUBLIC_URL"):
+        os.environ["DATABASE_URL"] = os.environ["DATABASE_PUBLIC_URL"]
         return
     from dotenv import dotenv_values
 
@@ -486,8 +493,21 @@ def triage_one(entry: dict) -> dict:
     result = run_agent(sprint.AGENT, context=context,
                        subject_type="backlog_sweep", subject_id=entry["key"],
                        images=images)
+    card = result.data or {}
+    # Every engineer item is exactly what the deep pass is for (lane
+    # engineer or sam_ops, or unsure). Without it the sweep's cards were
+    # the shallow kind the 2026-10-24 cleanup set out to replace.
+    if result.ok:
+        import deep_triage
+
+        card = deep_triage.deepen(
+            context, card, images,
+            ticket_id=entry.get("zoho_ticket_id") or entry["key"],
+            ticket_number=facts.get("ticket_number") or "",
+            arr=float(facts.get("arr") or 0), first_result=result,
+            source="backlog_sweep")
     record = {"key": entry["key"], "triaged_at": _now(), **facts,
-              "status": result.status, "card": result.data or {}}
+              "status": result.status, "card": card}
     if not result.ok:
         record["why"] = result.why()
     return record
@@ -866,6 +886,18 @@ def _adopt(entry: dict, record: dict) -> dict:
     return {"item": item.get("number"), "draft": draft["status"]}
 
 
+CLOSE_AFTER_QUIET_DAYS = int(os.environ.get("STALE_WAITING_DAYS", "30"))
+
+
+def _quiet_days(ticket_id: str) -> int | None:
+    """Days since our last reply when we spoke last, else None."""
+    inbound, outbound = _exchange(ticket_id)
+    last_in, last_out = _when(inbound), _when(outbound)
+    if not last_out or (last_in and last_in >= last_out):
+        return None
+    return (datetime.now(timezone.utc) - last_out).days
+
+
 def apply_one(action: str, entry: dict, record: dict) -> dict:
     card = record.get("card") or {}
     if action == "note":
@@ -887,12 +919,23 @@ def apply_one(action: str, entry: dict, record: dict) -> dict:
 
     if action == "close":
         notes = []
-        if (entry.get("zoho_ticket_id")
-                and record.get("zoho_status") not in ZOHO_DONE):
+        tid = entry.get("zoho_ticket_id")
+        if tid and record.get("zoho_status") not in ZOHO_DONE:
             import zoho_actions
 
-            zoho_actions.set_status(entry["zoho_ticket_id"], "Closed")
-            notes.append("Zoho closed with no closure email")
+            # We asked and they went quiet: the ticket waits for the stale
+            # sweep's 30 days, not a close days after our question (Oct 25,
+            # #9601 was two days quiet). A reply re-triages it.
+            quiet = _quiet_days(tid)
+            if quiet is not None and quiet < CLOSE_AFTER_QUIET_DAYS:
+                if zoho_actions.ticket_status(tid) != ZOHO_AWAITING:
+                    zoho_actions.set_status(tid, ZOHO_AWAITING)
+                notes.append(f"Zoho left at {ZOHO_AWAITING} ({quiet} days "
+                             f"quiet; the stale sweep closes it at "
+                             f"{CLOSE_AFTER_QUIET_DAYS})")
+            else:
+                zoho_actions.set_status(tid, "Closed")
+                notes.append("Zoho closed with no closure email")
         notes.append(release_task(
             entry, f"Nothing is owed here: "
             f"{card.get('situation') or card.get('recommended_action')}"))
@@ -918,6 +961,13 @@ def apply_one(action: str, entry: dict, record: dict) -> dict:
             why = fix.get("reason") or fix.get("outcome")
             return {"ok": False, "why": f"no PR: {why}"}
         parent = fix.get("parent")
+        # The fix took the engineer task over as its child: closing it
+        # now would close the task the release watcher tells the client
+        # from (Sam's "moved, never copied" rule).
+        if entry.get("task_id") and fix.get("child") == entry["task_id"]:
+            return {"ok": True, "did": f"PR {fix['pr_url']}, "
+                                       f"{entry['task_id']} moved in as "
+                                       f"the child of {parent}"}
         released = release_task(
             entry, f"The agent opened a fix: {fix['pr_url']}"
             + (f"\nAgent Fixes: https://app.clickup.com/t/{parent}"
@@ -994,6 +1044,591 @@ def run_apply(action: str, keys: list[str], confirm: bool,
 
 
 # ---------------------------------------------------------------------------
+# 5. Audit: is Zoho telling the same story as ClickUp?
+# ---------------------------------------------------------------------------
+#
+# Sam, 2026-10-24: "Everything on Zoho and ClickUp in sync perfectly." The
+# inventory above only sees `queued` and `in progress` engineer tasks; that
+# day 38 of the 89 tasks on OnlyG's and Sanjay's plates sat at `awaiting
+# client response` and no sweep had ever read them. The audit joins every
+# open Zoho ticket, every open Priority Queue, Agent Fixes and Sam Accepted
+# task and the sprint store, and gives each row one drift class. Reads only.
+
+AUDIT = "audit.json"
+AUDIT_SHEET = "audit.md"
+AGENT_FIXES_LIST = "901115573468"
+SAM_ACCEPTED_LIST = "901115573620"
+ZOHO_OPEN = ("New", "Processing", "In Progress", "Awaiting Client Response",
+             "On Hold")
+ZOHO_OWED = ("New", "Processing")
+ZOHO_AWAITING = "Awaiting Client Response"
+ZOHO_GONE = "gone"
+TASK_DONE = ("on prod", "closed", "done", "complete", "declined",
+             "finished")
+# Cards from before the deep pass shipped (2026-10-23 15:36 ET) are stale.
+DEEP_CUTOFF = "2026-10-23T19:36:00+00:00"
+STALL_DAYS = 14
+# The `on prod` email goes out when the task reaches `on prod`, which is
+# often hours before someone closes it: a reply that recent is the
+# resolution, not an earlier answer (#7922 on 2026-10-24).
+TOLD_SLACK = timedelta(days=1)
+# Closed Priority Queue tasks are read back this far for drift class 1.
+CLOSED_LOOKBACK_DAYS = 200
+
+DRIFT = {
+    1: ("untold", "Engineer task done, Zoho open, client never told"),
+    2: ("no_task", "Zoho In Progress with no open task and no fix"),
+    3: ("stalled", "Open engineer task untouched 14+ days, or unassigned"),
+    4: ("gone", "Sprint item whose Zoho ticket no longer exists"),
+    5: ("answered_owed", "We answered last, but Zoho says New or Processing"),
+    6: ("client_wrote", "Awaiting Client Response, but the client wrote "
+                        "since"),
+    7: ("owner", "Zoho owner does not match the ClickUp work"),
+    8: ("orphan", "Open ClickUp work whose Zoho ticket is Closed or gone"),
+    9: ("duplicate", "More than one live task for one ticket"),
+    10: ("uncarded", "Engineer item with no card from after the deep pass"),
+    11: ("fix_waiting", "Agent fix open, waiting to go live"),
+    12: ("healthy", "In sync"),
+}
+# The first class that applies is the row's class; the rest are kept as
+# flags. A ticket that is gone or closed makes every other question moot,
+# and duplicates have to be settled before anything is moved.
+PRECEDENCE = (4, 8, 9, 1, 6, 5, 7, 2, 3, 10, 11)
+# Classes whose rows may need a fresh card before anything is done.
+TRIAGE_CLASSES = (1, 2, 3, 6, 10)
+
+
+def _when(value) -> datetime | None:
+    """An ISO string, a ClickUp millisecond stamp or a datetime, as UTC."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    text = str(value)
+    if text.isdigit():
+        return datetime.fromtimestamp(int(text) / 1000, timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _engineers_on(task: dict) -> list[str]:
+    return [ENGINEERS[a] for a in task.get("assignees") or []
+            if a in ENGINEERS]
+
+
+def zoho_owner(zoho: dict) -> str:
+    """onlyg / sanjay / agent_fixes / sam / other / '' for a Zoho row."""
+    import zoho_actions
+
+    if str(zoho.get("teamId") or "") == zoho_actions.AGENT_FIXES_TEAM:
+        return "agent_fixes"
+    assignee = str(zoho.get("assigneeId") or "")
+    if assignee in ZOHO_TEAMS:
+        return ZOHO_TEAMS[assignee]
+    if assignee == zoho_actions.SAM_AGENT:
+        return "sam"
+    return "other" if assignee else ""
+
+
+def drift(row: dict, now: datetime) -> list[tuple[int, str]]:
+    """Every drift class that applies to one joined row, with the reason.
+
+    `row` is what `join_audit` builds: the Zoho side (`zoho_status` is ''
+    when the work names no ticket, `gone` when Zoho returns 404), the
+    last inbound and outbound message times, and the ClickUp work as
+    plain dicts (`id`, `status`, `assignees` as ids, `updated`, `closed`).
+    """
+    found: list[tuple[int, str]] = []
+    status = row.get("zoho_status") or ""
+    owner = row.get("zoho_owner") or ""
+    pq_open = row.get("pq_open") or []
+    pq_done = row.get("pq_done") or []
+    fixes = row.get("fix_parents") or []
+    children = row.get("fix_children") or []
+    accepted = row.get("accepted") or []
+    has_fix = bool(fixes or children)
+    open_work = bool(pq_open or has_fix or accepted)
+    last_in = _when(row.get("last_in"))
+    last_out = _when(row.get("last_out"))
+    engineers = sorted({e for t in pq_open for e in _engineers_on(t)})
+    ticket_open = status in ZOHO_OPEN
+
+    if status == ZOHO_GONE and row.get("sprint_open"):
+        found.append((4, "the sprint still lists it, Zoho returns 404"))
+    if status in ("Closed", ZOHO_GONE) and open_work:
+        ids = [t["id"] for t in pq_open + fixes + children + accepted]
+        found.append((8, f"Zoho {status}, still open in ClickUp: "
+                         + ", ".join(ids)))
+
+    if len(pq_open) > 1:
+        found.append((9, f"{len(pq_open)} open Priority Queue tasks: "
+                         + ", ".join(t["id"] for t in pq_open)
+                         + " (a second issue may be legitimate)"))
+    if len(children) > 1:
+        found.append((9, f"{len(children)} live Agent Fixes children: "
+                         + ", ".join(t["id"] for t in children)))
+    if pq_open and children:
+        found.append((9, "an open engineer task and an Agent Fixes child "
+                         "both carry it (copied, not moved)"))
+
+    if ticket_open and not open_work and pq_done:
+        oldest = datetime.min.replace(tzinfo=timezone.utc)
+        done = max(pq_done, key=lambda t: _when(
+            t.get("closed") or t.get("updated")) or oldest)
+        done_at = _when(done.get("closed") or done.get("updated"))
+        told = last_out and done_at and last_out > done_at - TOLD_SLACK
+        if not told:
+            found.append((1, f"task {done['id']} is {done['status']} since "
+                             f"{done_at.date() if done_at else '?'}, last "
+                             "reply to the client "
+                             f"{last_out.date() if last_out else 'never'}"))
+        elif status == "In Progress":
+            found.append((2, f"task {done['id']} is {done['status']} and "
+                             "the client was answered since, but Zoho is "
+                             "still In Progress"))
+
+    if status == ZOHO_AWAITING and last_in and (not last_out
+                                                or last_in > last_out):
+        found.append((6, f"client wrote {last_in.date()}, our last reply "
+                         f"{last_out.date() if last_out else 'never'}"))
+    if status in ZOHO_OWED and last_out and (not last_in
+                                             or last_out > last_in):
+        found.append((5, f"we replied {last_out.date()} after the client's "
+                         f"{last_in.date() if last_in else 'first'} "
+                         "message"))
+
+    if status == "In Progress":
+        if has_fix and owner != "agent_fixes":
+            found.append((7, f"agent fix open, Zoho owner is "
+                             f"{owner or 'nobody'}, not the Agent Fixes "
+                             "team"))
+        elif not has_fix and owner == "agent_fixes":
+            found.append((7, "on the Agent Fixes team with no open fix"))
+        elif not has_fix and engineers and owner not in engineers:
+            found.append((7, f"ClickUp has {'/'.join(engineers)}, Zoho "
+                             f"owner is {owner or 'nobody'}"))
+        elif (not has_fix and not engineers and accepted
+              and owner in ("onlyg", "sanjay")):
+            found.append((7, f"Sam is building it, Zoho owner is {owner}"))
+
+    if status == "In Progress" and not open_work and not pq_done:
+        found.append((2, "no task and no fix"))
+
+    for task in pq_open:
+        updated = _when(task.get("updated"))
+        if not task.get("assignees"):
+            found.append((3, f"task {task['id']} has nobody on it"))
+        elif (_engineers_on(task) and updated
+              and (now - updated).days >= STALL_DAYS):
+            found.append((3, f"task {task['id']} untouched since "
+                             f"{updated.date()}"))
+
+    engineer_item = bool(engineers) or (status == "In Progress"
+                                        and owner in ("onlyg", "sanjay"))
+    if engineer_item and not row.get("carded_after_cutoff"):
+        found.append((10, "no card since the deep pass"
+                          + ("" if status else " (no Zoho ticket)")))
+
+    if fixes:
+        checks = ", ".join(f"{t['id']} {t.get('check') or 'no check'}"
+                           for t in fixes)
+        found.append((11, f"fix {checks}"))
+    return found
+
+
+def classify_row(row: dict, now: datetime) -> dict:
+    """The row with its class, reason and the other classes as flags."""
+    found = drift(row, now)
+    by_class: dict[int, list[str]] = {}
+    for cls, why in found:
+        by_class.setdefault(cls, []).append(why)
+    primary = next((c for c in PRECEDENCE if c in by_class), 12)
+    row = dict(row)
+    row["drift"] = primary
+    row["why"] = "; ".join(by_class.get(primary) or ["in sync"])
+    row["flags"] = {c: by_class[c] for c in sorted(by_class) if c != primary}
+    return row
+
+
+def _slim(task: dict) -> dict:
+    """The fields of a ClickUp task the audit reads."""
+    from ticket_fix import _PR_LINE
+
+    pr = _PR_LINE.search(task.get("description")
+                         or task.get("text_content") or "")
+    return {
+        "id": str(task.get("id")),
+        "name": (task.get("name") or "")[:140],
+        "status": ((task.get("status") or {}).get("status") or "").lower(),
+        "assignees": [a.get("id") for a in task.get("assignees") or []],
+        "updated": task.get("date_updated") or "",
+        "closed": task.get("date_closed") or task.get("date_done") or "",
+        "parent": task.get("parent") or "",
+        "pr": pr.group(1) if pr else "",
+    }
+
+
+def _is_open(task: dict) -> bool:
+    return task["status"] not in TASK_DONE
+
+
+def join_audit(zoho_rows: list[dict], exchanges: dict, lookups: dict,
+               pq: list[dict], fixes: list[dict], accepted: list[dict],
+               sprint_items: list[dict], carded: set[str]) -> list[dict]:
+    """One row per Zoho ticket that is open or has open work, plus one per
+    open engineer task that names no ticket.
+
+    zoho_rows: open tickets from Zoho. exchanges: ticket id -> (last in,
+    last out). lookups: ticket id -> status for tickets outside the open
+    set ('Closed', 'gone', ...). Tasks are raw ClickUp tasks. carded:
+    ticket ids and task ids with a card from after DEEP_CUTOFF.
+    """
+    from zoho_links import extract_zoho_ticket_id
+
+    def index(tasks):
+        by_id: dict[str, list] = {}
+        by_number: dict[str, list] = {}
+        for task in tasks:
+            slim = _slim(task)
+            tid = extract_zoho_ticket_id(task) or ""
+            slim["ticket_id"] = tid
+            if tid:
+                by_id.setdefault(tid, []).append(slim)
+            for number in _TICKET_IN_NAME.findall(task.get("name") or ""):
+                by_number.setdefault(number, []).append(slim)
+            if not tid and not _TICKET_IN_NAME.search(task.get("name") or ""):
+                by_id.setdefault("", []).append(slim)
+        return by_id, by_number
+
+    pq_id, pq_num = index(pq)
+    fx_id, fx_num = index(fixes)
+    ac_id, ac_num = index(accepted)
+    parents = {t["id"]: t for t in map(_slim, fixes) if not t["parent"]}
+    sprint_open = {str(i.get("ticket_id")): i for i in sprint_items}
+
+    tickets: dict[str, dict] = {}
+    for zrow in zoho_rows:
+        tickets[str(zrow.get("id"))] = {
+            "ticket_id": str(zrow.get("id")),
+            "ticket_number": str(zrow.get("ticketNumber") or ""),
+            "subject": (zrow.get("subject") or "")[:140],
+            "zoho_status": zrow.get("status") or "",
+            "zoho_owner": zoho_owner(zrow),
+        }
+    # Tickets outside the open set that open work or the sprint still
+    # points at: Closed, gone, or a status the audit did not list.
+    for source in (pq_id, fx_id, ac_id):
+        for tid in source:
+            if tid and tid not in tickets and tid in lookups:
+                tickets[tid] = {"ticket_id": tid, "ticket_number": "",
+                                "subject": "", "zoho_owner": "",
+                                "zoho_status": lookups[tid]}
+    for tid in sprint_open:
+        if tid not in tickets and tid in lookups:
+            item = sprint_open[tid]
+            tickets[tid] = {"ticket_id": tid,
+                            "ticket_number": str(item.get("ticket_number")
+                                                 or ""),
+                            "subject": (item.get("subject") or "")[:140],
+                            "zoho_owner": "", "zoho_status": lookups[tid]}
+
+    def unique(tasks):
+        return list({t["id"]: t for t in tasks}.values())
+
+    rows = []
+    for tid, row in tickets.items():
+        number = row["ticket_number"]
+        pq_tasks = unique(pq_id.get(tid, []) + (pq_num.get(number, [])
+                                                if number else []))
+        fx_tasks = unique(fx_id.get(tid, []) + (fx_num.get(number, [])
+                                                if number else []))
+        ac_tasks = unique(ac_id.get(tid, []) + (ac_num.get(number, [])
+                                                if number else []))
+        children = [t for t in fx_tasks if t["parent"] and _is_open(t)]
+        fix_parents = {t["id"]: t for t in fx_tasks
+                       if not t["parent"] and _is_open(t)}
+        for child in children:
+            parent = parents.get(child["parent"])
+            if parent and _is_open(parent):
+                fix_parents[parent["id"]] = parent
+        last_in, last_out = exchanges.get(tid, ("", ""))
+        row.update({
+            "pq_open": [t for t in pq_tasks if _is_open(t)],
+            "pq_done": [t for t in pq_tasks if not _is_open(t)
+                        and _engineers_on(t)],
+            "fix_parents": [dict(t, check=lookups.get(f"check:{t['id']}",
+                                                      ""))
+                            for t in fix_parents.values()],
+            "fix_children": children,
+            "accepted": [t for t in ac_tasks if _is_open(t)],
+            "sprint_open": tid in sprint_open,
+            "last_in": last_in,
+            "last_out": last_out,
+            "carded_after_cutoff": tid in carded,
+        })
+        if row["zoho_status"] not in ZOHO_OPEN and not (
+                row["pq_open"] or row["fix_parents"] or row["fix_children"]
+                or row["accepted"] or row["sprint_open"]):
+            continue
+        rows.append(row)
+
+    # Engineer work that names no ticket at all (internal builds, Sentry).
+    for task in pq_id.get("", []):
+        if not _is_open(task) or not _engineers_on(task):
+            continue
+        rows.append({
+            "ticket_id": "", "ticket_number": "", "zoho_status": "",
+            "zoho_owner": "", "subject": task["name"], "pq_open": [task],
+            "pq_done": [], "fix_parents": [], "fix_children": [],
+            "accepted": [], "sprint_open": False, "last_in": "",
+            "last_out": "", "carded_after_cutoff": task["id"] in carded,
+        })
+    return rows
+
+
+def _list_open_and_recent(list_id: str, days: int) -> list[dict]:
+    import ticket_reconciler
+
+    since = int((time.time() - days * 86400) * 1000)
+    return ticket_reconciler._list_tasks(list_id, since)
+
+
+def _open_tasks(list_id: str) -> list[dict]:
+    tasks: list[dict] = []
+    for page in range(30):
+        resp = httpx.get(f"{CLICKUP_BASE}/list/{list_id}/task",
+                         headers=_clickup_headers(),
+                         params={"page": page, "include_closed": "false",
+                                 "subtasks": "true"}, timeout=30)
+        resp.raise_for_status()
+        batch = resp.json().get("tasks") or []
+        tasks.extend(batch)
+        if len(batch) < 100:
+            break
+    return tasks
+
+
+def _exchange(ticket_id: str) -> tuple[str, str]:
+    import sprint_batch
+    import zoho_actions
+
+    inbound, outbound = zoho_actions.last_exchange(
+        ticket_id, skip=sprint_batch._out_of_office)
+    return (str(inbound.get("createdTime") or ""),
+            str(outbound.get("createdTime") or ""))
+
+
+def _lookup_status(ticket_id: str) -> str:
+    import zoho_actions
+
+    try:
+        return zoho_actions.ticket_status(ticket_id) or "unknown"
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in (404, 422):
+            return ZOHO_GONE
+        return f"unreadable ({exc.response.status_code})"
+
+
+def _sprint_open_items() -> list[dict]:
+    import sprint_store
+    from vomeos import store
+
+    if not sprint_store.ready():
+        raise RuntimeError("the sprint store is not reachable")
+    return store.query(
+        f"SELECT id, number, ticket_id, ticket_number, subject, status,"
+        f" category, draft_status, updated_at FROM {sprint_store.ITEMS}"
+        " WHERE status IN ('open', 'held', 'fixing')")
+
+
+def _carded_since(cutoff: str) -> set[str]:
+    """Ticket ids (and backlog task keys) carded after the deep pass."""
+    import deep_triage
+    from vomeos import store
+
+    rows = store.query(
+        f"SELECT DISTINCT ticket_id FROM {deep_triage.TABLE}"
+        " WHERE created_at >= :c", {"c": _when(cutoff).replace(tzinfo=None)})
+    carded = {str(r["ticket_id"]) for r in rows if r.get("ticket_id")}
+    for key, record in (_load(CARDS, {}) or {}).items():
+        if (record.get("triaged_at") or "") >= cutoff:
+            carded.add(key.removeprefix("zoho:"))
+    return carded
+
+
+def triage_unit_cost(cutoff: str) -> dict:
+    """What one triage cost since the deep pass shipped, from the runs."""
+    import deep_triage
+    from vomeos import store
+
+    rows = store.query(
+        "SELECT COUNT(*) AS n,"
+        " AVG(COALESCE(first_usd, 0) + COALESCE(deep_usd, 0)) AS avg_all,"
+        " AVG(CASE WHEN deep_usd > 0 THEN COALESCE(first_usd, 0) + deep_usd"
+        " END) AS avg_deep,"
+        " MAX(COALESCE(first_usd, 0) + COALESCE(deep_usd, 0)) AS max_one"
+        f" FROM {deep_triage.TABLE} WHERE created_at >= :c",
+        {"c": _when(cutoff).replace(tzinfo=None)})
+    row = rows[0] if rows else {}
+    return {k: float(row.get(k) or 0) for k in ("n", "avg_all", "avg_deep",
+                                                "max_one")}
+
+
+def build_audit(progress=print) -> dict:
+    import release_watcher
+    import ticket_reconciler
+
+    progress("Zoho: open tickets")
+    zoho_rows = []
+    for status in ZOHO_OPEN:
+        try:
+            zoho_rows.extend(ticket_reconciler.zoho_tickets(status))
+        except RuntimeError as exc:
+            # An empty status comes back as no data at all.
+            if "NoneType" not in str(exc):
+                raise
+    progress(f"  {len(zoho_rows)} open")
+
+    progress("ClickUp: Priority Queue (open, and closed in the last "
+             f"{CLOSED_LOOKBACK_DAYS} days), Agent Fixes, Sam Accepted")
+    pq = _list_open_and_recent(PRIORITY_QUEUE, CLOSED_LOOKBACK_DAYS)
+    fixes = _list_open_and_recent(AGENT_FIXES_LIST, CLOSED_LOOKBACK_DAYS)
+    accepted = _open_tasks(SAM_ACCEPTED_LIST)
+    progress(f"  {len(pq)} PQ, {len(fixes)} Agent Fixes, {len(accepted)} "
+             "Sam Accepted")
+
+    sprint_items = _sprint_open_items()
+    carded = _carded_since(DEEP_CUTOFF)
+    progress(f"Sprint: {len(sprint_items)} open items; {len(carded)} "
+             "tickets carded since the deep pass")
+
+    from zoho_links import extract_zoho_ticket_id
+
+    open_ids = {str(r.get("id")) for r in zoho_rows}
+    lookups: dict[str, str] = {}
+    pointed = set()
+    for task in pq + fixes + accepted:
+        status = ((task.get("status") or {}).get("status") or "").lower()
+        tid = extract_zoho_ticket_id(task) or ""
+        if tid and status not in TASK_DONE:
+            pointed.add(tid)
+    pointed |= {str(i.get("ticket_id")) for i in sprint_items
+                if i.get("ticket_id")}
+    outside = sorted(pointed - open_ids)
+    progress(f"Zoho: status of {len(outside)} ticket(s) open work points "
+             "at outside the open set")
+    for tid in outside:
+        lookups[tid] = _lookup_status(tid)
+    for task in fixes:
+        if not task.get("parent"):
+            lookups[f"check:{task.get('id')}"] = (
+                release_watcher._release_check_value(task) or "")
+
+    progress(f"Zoho: last message each way on {len(zoho_rows)} tickets")
+    exchanges = {}
+    for index, zrow in enumerate(zoho_rows, start=1):
+        tid = str(zrow.get("id"))
+        try:
+            exchanges[tid] = _exchange(tid)
+        except Exception as exc:
+            exchanges[tid] = ("", "")
+            progress(f"  {tid}: threads unreadable ({str(exc)[:80]})")
+        if index % 25 == 0:
+            progress(f"  {index}/{len(zoho_rows)}")
+
+    now = datetime.now(timezone.utc)
+    rows = [classify_row(r, now) for r in join_audit(
+        zoho_rows, exchanges, lookups, pq, fixes, accepted, sprint_items,
+        carded)]
+    return {"generated_at": _now(), "cutoff": DEEP_CUTOFF,
+            "unit_cost": triage_unit_cost(DEEP_CUTOFF), "rows": rows,
+            "fix_parents_without_pr": [
+                t["id"] for t in map(_slim, fixes)
+                if not t["parent"] and not t["pr"] and _is_open(t)]}
+
+
+def _row_label(row: dict) -> str:
+    task = (row.get("pq_open") or row.get("fix_children")
+            or row.get("accepted") or [{}])[0]
+    number = f"#{row['ticket_number']}" if row.get("ticket_number") else ""
+    owners = sorted({e for t in row.get("pq_open") or []
+                     for e in _engineers_on(t)})
+    bits = [number or f"task {task.get('id', '')}",
+            row.get("zoho_status") or "no ticket"]
+    if owners:
+        bits.append("/".join(owners))
+    if task.get("status"):
+        bits.append(f"task {task['status']}")
+    subject = row.get("subject") or task.get("name") or ""
+    return f"{' | '.join(bits)} | {subject[:80]}"
+
+
+def render_audit(audit: dict) -> str:
+    """The review sheet: one section per drift class, counts first."""
+    rows = audit["rows"]
+    unit = audit.get("unit_cost") or {}
+    by_class: dict[int, list] = {}
+    for row in rows:
+        by_class.setdefault(row["drift"], []).append(row)
+    lines = [f"# Pipeline audit {audit['generated_at'][:16]} UTC", "",
+             f"{len(rows)} rows. Cards older than {audit['cutoff'][:16]} "
+             "UTC count as stale.", "", "| Class | Rows |", "|---|---|"]
+    for cls, (_, title) in DRIFT.items():
+        lines.append(f"| {cls}. {title} | {len(by_class.get(cls, []))} |")
+
+    need = [r for r in rows if r["drift"] in TRIAGE_CLASSES
+            and not r.get("carded_after_cutoff")]
+    with_ticket = [r for r in need if r.get("ticket_id")]
+    low = len(with_ticket) * (unit.get("avg_all") or 0.3)
+    high = len(with_ticket) * (unit.get("avg_deep") or 1.5)
+    lines += ["", f"**Triage estimate.** {len(with_ticket)} ticket rows in "
+              f"classes {', '.join(map(str, TRIAGE_CLASSES))} have no fresh "
+              f"card: about ${low:.0f} to ${high:.0f} (average "
+              f"${unit.get('avg_all', 0):.2f} a run, "
+              f"${unit.get('avg_deep', 0):.2f} with the deep pass, over "
+              f"{int(unit.get('n', 0))} runs since the cutoff). "
+              f"{len(need) - len(with_ticket)} more name no Zoho ticket."]
+    if audit.get("fix_parents_without_pr"):
+        lines += ["", "**Agent Fixes parents with no `Fix PR:` line:** "
+                  + ", ".join(audit["fix_parents_without_pr"])]
+
+    for cls, (_, title) in DRIFT.items():
+        members = by_class.get(cls) or []
+        if not members:
+            continue
+        lines += ["", f"## {cls}. {title} ({len(members)})", ""]
+        for row in sorted(members, key=lambda r: r.get("ticket_number")
+                          or "~"):
+            flags = " ".join(f"[{c}]" for c in row.get("flags") or {})
+            lines.append(f"- {_row_label(row)} -- {row['why']}"
+                         + (f" {flags}" if flags else ""))
+    return "\n".join(lines) + "\n"
+
+
+def run_audit(reuse: bool = False) -> int:
+    if reuse:
+        # Classify the rows of the last run again, without reading Zoho or
+        # ClickUp: for a change to the rules, not for a fresh picture.
+        audit = _load(AUDIT, None)
+        if not audit:
+            print("No audit yet. Run `backlog_sweep.py audit` first.")
+            return 1
+        now = _when(audit["generated_at"])
+        audit["rows"] = [classify_row(r, now) for r in audit["rows"]]
+    else:
+        audit = build_audit()
+    _save(AUDIT, audit)
+    sheet = render_audit(audit)
+    _path(AUDIT_SHEET).write_text(sheet, encoding="utf-8", newline="\n")
+    print(sheet.split("\n## ")[0])
+    print(f"Wrote {_path(AUDIT)} and {_path(AUDIT_SHEET)}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -1013,6 +1648,8 @@ def main(argv: list[str] | None = None) -> int:
     p_tri.add_argument("--refresh", action="store_true")
 
     sub.add_parser("sheet")
+    p_aud = sub.add_parser("audit")
+    p_aud.add_argument("--reuse", action="store_true")
 
     p_app = sub.add_parser("apply")
     p_app.add_argument("action", choices=ACTIONS)
@@ -1031,6 +1668,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_triage(args.limit, args.only, args.refresh)
     if args.cmd == "sheet":
         return run_sheet()
+    if args.cmd == "audit":
+        return run_audit(args.reuse)
     return run_apply(args.action, args.keys, args.confirm, args.started)
 
 

@@ -29,6 +29,7 @@ Condensed from "CS Agent Workflow and Handoff (Oct 16, 2026)" (doc `3dztm-3311`,
 
 - **3.4 Zoho statuses:** New or Processing no longer means "waiting for triage". It means the client is owed a reply from Sam (Playbook Rule 6).
 - **16, `route_ticket`:** routing no longer posts a Slack notice or sets Zoho to In Progress.
+- **Agent fix in Zoho (Oct 24, 2026):** an open agent fix on an answered ticket is In Progress on the Zoho team "Agent Fixes" (`569440000043486190`) with no agent, so it sits in Sam's Agent Fixes view, not his own list. The client sees only In Progress.
 - **3.5 and 4.1:** "it's fixed" emails for agent fixes now send on their own once proven live.
 
 ## Things the agents never do

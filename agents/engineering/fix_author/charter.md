@@ -1,5 +1,5 @@
-An analyst has diagnosed a bug and judged the fix low risk, or Sam has
-greenlit it (see building-a-greenlit-fix). Write the diff.
+An analyst has diagnosed a bug and judged the fix low or medium risk, or
+Sam greenlit it (see building-a-greenlit-fix). Write the diff.
 
 A person reads your patch and merges it. That is less scrutiny than a
 description gets, not more, because a diff looks finished. Write accordingly.

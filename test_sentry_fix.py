@@ -404,8 +404,9 @@ def test_the_write_surface_is_exactly_three_operations():
     # "cannot merge" next to a merge method would pass a naive check.
     allowed = {
         "create_branch", "commit_file", "open_pull_request",
-        # Read helpers needed to perform those three.
-        "ref_sha", "file_sha", "token_for",
+        # Read helpers needed to perform those three. member_uuid finds the
+        # reviewer a medium risk PR opens with (2026-10-22).
+        "ref_sha", "file_sha", "token_for", "member_uuid",
         # Inherited from Connector.
         "configured", "headers",
     }
@@ -492,9 +493,11 @@ def test_both_projects_for_one_repo_agree_on_the_target():
 def test_a_repo_with_no_integration_branch_is_refused_not_defaulted(
     monkeypatch,
 ):
-    # VomeApp has only master. Falling back to the error's ref would open a
-    # pull request into master, which is the exact thing this prevents.
-    assert sentry_projects.fix_target("VomeApp") == ""
+    # A repo missing from the table (VomeApp was, until it grew
+    # `development` on 2026-10-23). Falling back to the error's ref would
+    # open a pull request into master, which is the exact thing this
+    # prevents.
+    assert sentry_projects.fix_target("new-service") == ""
 
     # The kill switch is checked before the target and would otherwise be the
     # reason returned, which would make this test pass for the wrong reason.
@@ -504,7 +507,7 @@ def test_a_repo_with_no_integration_branch_is_refused_not_defaulted(
     out = sentry_fix.open_pull_request(
         {"issue_id": "T-1", "triage_summary": "x"},
         {"attempted": True, "diff": "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"},
-        {"repo": "VomeApp", "branch": "master", "host": "github",
+        {"repo": "new-service", "branch": "master", "host": "github",
          "owner": "vomeadmin"},
     )
     assert out["opened"] is False
@@ -512,8 +515,8 @@ def test_a_repo_with_no_integration_branch_is_refused_not_defaulted(
 
 
 def test_pr_targets_can_be_overridden_without_a_deploy(monkeypatch):
-    monkeypatch.setenv("VOMEOS_PR_TARGETS", "VomeApp:development")
-    assert sentry_projects.fix_target("VomeApp") == "development"
+    monkeypatch.setenv("VOMEOS_PR_TARGETS", "new-service:development")
+    assert sentry_projects.fix_target("new-service") == "development"
     # The override must not leak into repositories it does not name.
     assert sentry_projects.fix_target("vome-react") == "develop"
 
@@ -587,3 +590,20 @@ def test_a_truncated_read_is_refused_not_committed(monkeypatch):
         "--- a/a.py\n+++ b/a.py\n@@ -1,1 +1,1 @@\n-x = 1\n+x = 2\n")
     assert contents == {}
     assert "larger than" in error
+
+
+# ---------------------------------------------------------------------------
+# The PR title
+# ---------------------------------------------------------------------------
+
+def test_a_short_title_is_left_alone():
+    assert sentry_fix._clip("Fix: birthday emails", 100) == "Fix: birthday emails"
+
+
+def test_a_long_title_ends_on_a_whole_word():
+    # #9637's title stopped mid-word.
+    text = ("Fix: Why the app crashes when they tap I'm attending, and when "
+            "they tap Not attending the shift does not refresh")
+    out = sentry_fix._clip(text, 100)
+    assert len(out) <= 100 and out.endswith("...")
+    assert text.startswith(out[:-3]) and text[len(out) - 3] == " "

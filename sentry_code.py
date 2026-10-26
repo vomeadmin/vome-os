@@ -17,11 +17,11 @@ commits that recently touched them.
 
 ON THE BRANCH THAT RAN
 ----------------------
-Every read carries the ref from `sentry_projects`. `dev-vome-app` and
-`prod-vome` are the same repository at different branches, so reading a dev
-traceback against `master` means reasoning about code nobody is running, with
-line numbers that do not match the frames. The wrong branch is worse than no
-branch, because it looks like an answer.
+Every read carries the ref from `sentry_projects`. `django-core-dev` and
+`django-core-prod` are the same repository at different branches, so reading
+a dev traceback against `master` means reasoning about code nobody is
+running, with line numbers that do not match the frames. The wrong branch is
+worse than no branch, because it looks like an answer.
 
 THE BUDGET IS THE DESIGN
 ------------------------
@@ -343,7 +343,8 @@ def _commit_rows(data) -> list[str]:
 # reference, under a larger budget.
 
 FEATURE_WINDOW = int(os.environ.get("FEATURE_BUILD_WINDOW", "100"))
-FEATURE_MAX_CHARS = int(os.environ.get("FEATURE_BUILD_MAX_CHARS", "60000"))
+# Six anchors at 200 lines each, plus import blocks and precedent.
+FEATURE_MAX_CHARS = int(os.environ.get("FEATURE_BUILD_MAX_CHARS", "100000"))
 FEATURE_MAX_REFERENCES = int(os.environ.get("FEATURE_BUILD_MAX_REFS", "4"))
 
 # A reference as the architect writes it: "core:path/file.py:123", the repo

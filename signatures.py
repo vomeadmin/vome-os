@@ -35,6 +35,8 @@ _SENDER_NAMES = {
     # Target model — NOT WIRED YET (flip happens in the behavior steps).
     "vic": "Vic",
     "sam": "Sam | Vome team",
+    # Everything sent without Sam's explicit approval (Sam, 2026-10-23).
+    "team": "Vome team",
     # Legacy values — used now to reproduce current output exactly.
     "legacy_sam_support": "Sam | Vome support",
     "legacy_vome_team": "Vome team",
@@ -61,7 +63,17 @@ _SIGNATURE_BLOCKS = {
         "en": "Best,\n\nSam | Vome team\nsupport.vomevolunteer.com",
         "fr": "Cordialement,\n\nSam | Vome team\nsupport.vomevolunteer.com",
     },
+    # Automatic sends: on prod, release watcher, user education, needs
+    # client info. Sam, 2026-10-23: anything that does not get his explicit
+    # approval is not signed with his name. French matches the auth replies.
+    "team": {
+        "en": "Best,\n\nVome team\nsupport.vomevolunteer.com",
+        "fr": "Cordialement,\n\nÉquipe Vome\nsupport.vomevolunteer.com",
+    },
 }
+
+# The sender for any email that goes out without Sam approving it.
+AUTO_SENDER = "team"
 
 
 def signature_name(sender: str) -> str:
@@ -153,3 +165,13 @@ def sign_message(text: str, sender: str, lang: str = "en") -> str:
     head = _strip_trailing_signoff(body[:m.start()])
     tail = body[m.start():].rstrip()
     return f"{head}\n\n{sig}\n\n{tail}"
+
+
+def team_signed(text: str) -> str:
+    """Re-sign a draft for an automatic send: Sam's name comes off and the
+    team signature goes on, in the draft's language (a French draft closes
+    with "Cordialement"). Drafts are written signed "Sam | Vome team" so Sam
+    can send them as they are; only a send he did not approve is changed."""
+    tail = (text or "").rstrip()[-200:]
+    lang = "fr" if re.search(r"cordialement", tail, re.IGNORECASE) else "en"
+    return sign_message(text, AUTO_SENDER, lang)

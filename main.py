@@ -405,6 +405,45 @@ _scheduler.add_job(
     max_instances=1,
 )
 
+# Dependency watch. Mirrors engineering.dependency_scan (daily 07:45) and
+# engineering.dependency_digest (Wednesday 10:00). Imported here rather than
+# at the top so a slow import never delays the web app's boot.
+def _run_dependency_scan():
+    from dependency_watch import run_daily_scan
+
+    return run_daily_scan()
+
+
+def _run_dependency_digest():
+    from dependency_watch import run_weekly_digest
+
+    return run_weekly_digest()
+
+
+_scheduler.add_job(
+    _run_dependency_scan,
+    CronTrigger(
+        hour=int(os.environ.get("DEPENDENCY_SCAN_HOUR", "7")),
+        minute=int(os.environ.get("DEPENDENCY_SCAN_MINUTE", "45")),
+        timezone="America/Montreal",
+    ),
+    misfire_grace_time=3600,
+    coalesce=True,
+    max_instances=1,
+)
+_scheduler.add_job(
+    _run_dependency_digest,
+    CronTrigger(
+        day_of_week="wed",
+        hour=int(os.environ.get("DEPENDENCY_DIGEST_HOUR", "10")),
+        minute=int(os.environ.get("DEPENDENCY_DIGEST_MINUTE", "0")),
+        timezone="America/Montreal",
+    ),
+    misfire_grace_time=3600,
+    coalesce=True,
+    max_instances=1,
+)
+
 # Credential watch, 08:00. Mirrors engineering.code_access. Runs before the
 # Sentry report so a dead token is known about before the report that depends
 # on it goes out. Silent unless something is broken or expiring.
@@ -792,6 +831,10 @@ async def zoho_update_webhook(request: Request):
     # Sync Zoho assignee/status changes to ClickUp (always -- this is the
     # reverse direction and only writes ClickUp, never the Zoho status).
     sync_zoho_to_clickup(ticket_id)
+
+    # Every update, Sam's own reply included: if he closed, moved on or
+    # answered the ticket in Zoho, its sprint item finishes (on the worker).
+    sprint_batch.enqueue_reconcile(ticket_id)
 
     return {"status": "ok"}
 

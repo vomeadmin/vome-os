@@ -131,7 +131,7 @@ def sends(monkeypatch):
                         lambda i, s, d: S.decided.append(s))
     monkeypatch.setattr(sprint_store, "keep_fixing",
                         lambda i: S.kept.append(i))
-    monkeypatch.setattr(sprint_store, "record_sent", lambda i, t: None)
+    monkeypatch.setattr(sprint_store, "record_sent", lambda i, t, **k: None)
     monkeypatch.setattr(sprint_thread, "_post", lambda *a, **k: "ts")
     monkeypatch.setattr(shadow_triage, "release_state",
                         lambda n, t: {"live": S.live})
@@ -166,17 +166,41 @@ def test_zoho_shows_the_agent_has_it_without_emailing(monkeypatch):
     calls = []
     monkeypatch.setattr(zoho_actions, "_send",
                         lambda m, p, b: calls.append((m, p, b)) or {})
+    monkeypatch.setattr(zoho_actions, "latest_outbound",
+                        lambda t: {"id": "OUT1"})
     problems = zoho_actions.mark_agent_fix("T1", PR, "https://cu/t/P1")
     assert problems == ""
-    # The status stays New/Processing until Sam's acknowledgment goes out
-    # (Sam, 2026-10-19: that status means "this client is owed a reply").
-    assert not any(m == "PATCH" for m, _, _ in calls)
+    # Answered before, so the fix email is the reply now: off Sam's list
+    # onto the Agent Fixes team (Sam, 2026-10-24).
+    assert ("PATCH", "/tickets/T1",
+            {"status": "In Progress", "teamId": zoho_actions.AGENT_FIXES_TEAM,
+             "assigneeId": None}) in calls
     assert ("POST", "/tickets/T1/associateTag",
             {"tags": ["agent-fix"]}) in calls
     note = next(b for m, p, b in calls if p.endswith("/comments"))
     assert note["isPublic"] is False and PR in note["content"]
     # No reply endpoint is ever touched.
     assert not any("sendReply" in p for _, p, _ in calls)
+
+
+def test_a_never_answered_ticket_waits_for_sams_ack(monkeypatch):
+    calls = []
+    monkeypatch.setattr(zoho_actions, "_send",
+                        lambda m, p, b: calls.append((m, p, b)) or {})
+    monkeypatch.setattr(zoho_actions, "latest_outbound", lambda t: {})
+    assert zoho_actions.mark_agent_fix("T1", PR) == ""
+    assert not any(m == "PATCH" for m, _, _ in calls)
+
+
+def test_a_closed_pr_hands_the_ticket_back_to_sam(monkeypatch):
+    calls = []
+    monkeypatch.setattr(zoho_actions, "_send",
+                        lambda m, p, b: calls.append((m, p, b)) or {})
+    assert zoho_actions.unmark_agent_fix("T1", PR) == ""
+    assert ("PATCH", "/tickets/T1",
+            {"status": "Processing",
+             "assigneeId": zoho_actions.SAM_AGENT}) in calls
+    assert ("PATCH", "/tickets/T1", {"teamId": None}) in calls
 
 
 def test_a_zoho_failure_is_reported_not_raised(monkeypatch):
@@ -186,6 +210,7 @@ def test_a_zoho_failure_is_reported_not_raised(monkeypatch):
         return {}
 
     monkeypatch.setattr(zoho_actions, "_send", flaky)
+    monkeypatch.setattr(zoho_actions, "latest_outbound", lambda t: {})
     problems = zoho_actions.mark_agent_fix("T1", PR)
     assert "tag not set" in problems and "422" in problems
 
@@ -201,7 +226,7 @@ def test_opening_the_pr_marks_zoho(monkeypatch):
     monkeypatch.setattr(ticket_fix, "_record", lambda *a, **k: None)
     monkeypatch.setattr(ticket_fix, "_file_tasks", lambda *a: ("P1", "C1"))
     monkeypatch.setattr(sentry_code, "gather", lambda *a, **k: {"files": ""})
-    monkeypatch.setattr(sentry_fix, "propose", lambda a, c: {"diff": "d"})
+    monkeypatch.setattr(sentry_fix, "propose", lambda a, c, **k: {"diff": "d"})
     monkeypatch.setattr(sentry_fix, "open_pull_request",
                         lambda *a: {"opened": True, "url": PR})
     monkeypatch.setattr(zoho_actions, "mark_agent_fix",
@@ -523,3 +548,74 @@ def test_a_retry_is_stamped_with_its_own_time(db):
     row = db.query(f"SELECT attempted_at, reason FROM {ticket_fix.LEDGER}")[0]
     assert row["reason"] == "window too narrow"
     assert row["attempted_at"] > first["attempted_at"]
+
+
+# ---------------------------------------------------------------------------
+# Filing: the ticket's own task is moved in, never copied (2026-10-24)
+# ---------------------------------------------------------------------------
+
+LINK = ("https://desk.zoho.com/agent/vomevolunteer/vome-volunteer/tickets/"
+        "details/569440000043239739")
+
+
+def _filing(monkeypatch, pq_tasks, takes_parent=True):
+    from types import SimpleNamespace
+
+    calls = []
+
+    def fake(method, path, body=None):
+        calls.append((method, path, body))
+        if method == "POST" and path.endswith("/task") and body.get(
+                "parent") is None:
+            return {"id": "P1"}
+        if method == "POST" and path.endswith("/task"):
+            return {"id": "NEWCHILD"}
+        if method == "GET" and path.startswith("/list/"):
+            return {"tasks": pq_tasks}
+        if method == "GET" and path.startswith("/task/"):
+            return {"parent": "P1" if takes_parent else None,
+                    "list": {"id": ticket_fix.AGENT_FIXES_LIST}}
+        return {}
+
+    monkeypatch.setattr(ticket_fix, "_clickup", fake)
+    repo = SimpleNamespace(alias="mobile", slug="VomeApp")
+    out = ticket_fix._file_tasks(
+        "9594", "North Sky Raptor Sanctuary", {"live_question": "crash"},
+        repo, PR, LINK, ticket_fix.MERGE_OWNER, "569440000043239739")
+    return out, calls
+
+
+def _pq_task(task_id="868eng", link=LINK, name="[#9594] North Sky -- crash"):
+    fields = ([{"id": ticket_fix.FIELD_ZOHO_TICKET_LINK, "value": link}]
+              if link else [])
+    return {"id": task_id, "name": name, "custom_fields": fields,
+            "assignees": [{"id": 4434086}], "date_updated": "1"}
+
+
+def test_the_engineers_own_task_becomes_the_child(monkeypatch):
+    # #9594: Sanjay's 868mk9g2j stayed open beside a fresh copy, 868mmwxv4.
+    (parent, child), calls = _filing(monkeypatch, [_pq_task()])
+    assert (parent, child) == ("P1", "868eng")
+    assert not [c for c in calls if c[2] and c[2].get("parent")
+                and c[0] == "POST"]
+    assert ("PUT", "/task/868eng", {"parent": "P1"}) in calls
+    tidy = next(b for m, p, b in calls if m == "PUT" and p == "/task/868eng"
+                and "assignees" in (b or {}))
+    assert tidy["assignees"]["rem"] == [4434086]
+    assert tidy["status"] == "in progress"
+    assert not any((b or {}).get("status") == "on prod" for _, _, b in calls)
+
+
+def test_a_task_that_only_names_the_number_is_not_moved(monkeypatch):
+    (parent, child), calls = _filing(monkeypatch, [_pq_task(link="")])
+    assert child == "NEWCHILD"
+    assert not any(p == "/task/868eng" for _, p, _ in calls)
+
+
+def test_a_refused_parent_files_a_child_and_leaves_the_task_alone(
+        monkeypatch):
+    (parent, child), calls = _filing(monkeypatch, [_pq_task()],
+                                     takes_parent=False)
+    assert child == "NEWCHILD"
+    assert not any(m == "PUT" and p == "/task/868eng"
+                   and "assignees" in (b or {}) for m, p, b in calls)

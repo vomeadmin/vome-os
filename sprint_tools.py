@@ -117,6 +117,93 @@ def _engineer(item: dict) -> dict:
             "filed": filed.get("how") or ""}
 
 
+# A ClickUp task id as cards name it ("already logged on 868mgyqdm") or as a
+# link.
+_TASK_ID = re.compile(r"(?:app\.clickup\.com/t/|\b)(86[a-z0-9]{7})\b")
+_MAX_TASKS = 3
+
+
+def _tasks(item: dict, card: dict) -> tuple[list[dict], str]:
+    """The ClickUp tasks behind this ticket and the list each sits in now,
+    so Sam can open the work and see whose list it is on without searching
+    (Sam, 2026-10-24). The engineer task and the agent fix parent are read
+    live; tasks linked to the ticket come from the cached list search.
+    Returns (tasks, problem); a problem means a task may exist unseen."""
+    import clickup_search
+    import ticket_routing
+
+    found: dict[str, dict] = {}
+    problem = ""
+
+    def live(task_id: str) -> None:
+        if not task_id or task_id in found:
+            return
+        state = ticket_routing.task_state({"id": task_id})
+        if state.get("status") == "unreadable":
+            nonlocal problem
+            problem = f"ClickUp task {task_id} could not be read"
+            return
+        found[task_id] = {
+            "id": task_id, "name": state.get("name") or "",
+            "list": state.get("list") or "", "status": state.get("status"),
+            "assignee": state.get("assignee") or "",
+            "url": state.get("url") or f"https://app.clickup.com/t/{task_id}"}
+
+    live((item.get("eng_task") or {}).get("id") or "")
+    if item.get("fix_pr"):
+        try:
+            live(str(_ledger(str(item.get("ticket_id") or ""))
+                     .get("parent_task") or ""))
+        except Exception:
+            pass
+    try:
+        for task in clickup_search.linked_tasks(
+                str(item.get("ticket_number") or ""),
+                str(item.get("ticket_id") or "")):
+            found.setdefault(task["id"], {
+                k: task.get(k) or "" for k in
+                ("id", "name", "list", "status", "assignee", "url")})
+    except Exception as exc:
+        problem = f"ClickUp could not be searched ({exc})"
+    for task_id in _TASK_ID.findall(str(card.get("existing_work") or "")):
+        live(task_id)
+    return list(found.values())[:_MAX_TASKS], problem
+
+
+def _links(item: dict, zoho_url: str, tasks: list[dict],
+           problem: str) -> str:
+    """'[Zoho #9557](..) | [ClickUp](..) in Sam Accepted (Build Now),
+    queued, assigned Sam': where the ticket and its work live, one click
+    each."""
+    parts = [f"[Zoho #{item.get('ticket_number')}]({zoho_url})"]
+    for task in tasks:
+        where = ", ".join(p for p in (
+            task.get("list") or "unknown list", task.get("status") or "",
+            f"assigned {task['assignee']}" if task.get("assignee")
+            else "unassigned") if p)
+        parts.append(f"[ClickUp]({task['url']}) in {where}")
+    if problem:
+        parts.append(f"{problem}, so a task may exist that is not shown")
+    elif not tasks:
+        parts.append("no ClickUp task")
+    return " | ".join(parts)
+
+
+def _deep_view(card: dict) -> dict:
+    deep = card.get("deep") or {}
+    if not deep:
+        return {}
+    return {k: v for k, v in {
+        "why_it_ran": deep.get("reason") or "",
+        "status": deep.get("status") or "",
+        "verdict": deep.get("verdict") or "",
+        "changes": deep.get("changes") or [],
+        "checked": deep.get("checked") or "",
+        "first_pass": card.get("first_pass") or {},
+        "not_run_because": deep.get("why") or "",
+    }.items() if v}
+
+
 def view(item: dict) -> dict:
     """One item as the model needs it: the agent's first pass, the draft in
     full, and where it stands."""
@@ -143,13 +230,19 @@ def view(item: dict) -> dict:
         f"waiting {sprint_batch.age(item)}",
         "IMPORTANT" if item.get("important") else "",
     ) if p)
+    zoho_url = zoho_actions.ticket_url(item.get("ticket_id"))
+    tasks, problem = _tasks(item, card)
     return {
         "item": item.get("number"),
         "ticket": f"#{item.get('ticket_number')}",
         "header": header,
+        # The second line on every card: Zoho and ClickUp one click away,
+        # and the list the work sits in now.
+        "links": _links(item, zoho_url, tasks, problem),
         "client": client,
         "contact": contact,
-        "zoho_url": zoho_actions.ticket_url(item.get("ticket_id")),
+        "zoho_url": zoho_url,
+        "clickup_tasks": tasks,
         "account": item.get("account"),
         "important": bool(item.get("important")),
         "status": item.get("status"),
@@ -169,6 +262,9 @@ def view(item: dict) -> dict:
         "escalation_reason": card.get("escalation_reason") or "",
         "why_human": card.get("why_human") or "",
         "recommended_action": card.get("recommended_action") or "",
+        # The senior second look (deep_triage.py): whether it ran, and what
+        # it changed in the first card and why.
+        "deep_pass": _deep_view(card),
         "draft": item.get("draft") or "",
         "draft_status": item.get("draft_status") or "none",
         "draft_held_because": item.get("draft_why") or "",
@@ -200,14 +296,24 @@ def sprint_queue(include_finished: bool = False) -> dict:
     if not sprint_store.ready():
         _refuse("the sprint database is not reachable")
     items = sprint_store.working_set()
-    # Routed by triage and already shipped: the on-prod handler emailed the
-    # client, so the acknowledgment waiting here is stale and finishes.
+    # Answered or closed in Zoho by hand: finished before anything is listed
+    # (lesson L27). An unreadable queue finishes nothing.
+    try:
+        tickets = sprint_batch._queue()
+    except Exception as exc:
+        tickets, queue_error = None, str(exc)
+    else:
+        sprint_batch.sync_handled_elsewhere(
+            items, {str(t.get("id")) for t in tickets})
+    # Routed by triage and already shipped, with the client told since:
+    # the acknowledgment waiting here is stale and finishes.
     import sprint_thread
 
     items = [i for i in items
              if not ((i.get("eng_task") or {}).get("id")
                      and i.get("status") in sprint_store.CARRIES
-                     and sprint_thread._engineer_shipped(i))]
+                     and sprint_thread._engineer_shipped(i)
+                     and i.get("status") == sprint_store.DONE)]
     groups: dict[str, list] = {name: [] for name in SECTIONS}
     finished = []
     for item in sorted(items, key=sprint_batch._priority):
@@ -218,7 +324,8 @@ def sprint_queue(include_finished: bool = False) -> dict:
             finished.append(view(item))
     untriaged: int | str
     try:
-        tickets = sprint_batch._queue()
+        if tickets is None:
+            raise RuntimeError(queue_error)
         known = {str(i.get("ticket_id")) for i in items}
         rows = store.query(
             f"SELECT ticket_id FROM {sprint_store.ITEMS} WHERE ticket_id ="
@@ -238,8 +345,12 @@ def sprint_queue(include_finished: bool = False) -> dict:
         "held": groups["held"],
         "agent_fixing": groups["in_flight"],
         "how_to_use_this": (
-            "ready_to_send drafts are complete; show each one in full and "
-            "send only on Sam's explicit word. An item with agent_fix set "
+            "Every card opens with two lines given exactly: header, then "
+            "links (the Zoho ticket and each ClickUp task as clickable "
+            "links, with the list each task sits in, its status and "
+            "assignee). ready_to_send drafts are complete; show each one "
+            "in full and send only on Sam's explicit word. An item with "
+            "agent_fix set "
             "is one the agent is fixing: say so plainly (the agent is "
             "fixing this, here is the acknowledgment to send). "
             "agent_fixing lists tickets already acknowledged that the agent "
@@ -247,9 +358,15 @@ def sprint_queue(include_finished: bool = False) -> dict:
             "it says Sam's merge. An item with engineer set is already with "
             "that engineer (triage filed the ClickUp task on its own): do "
             "not route it again, and its reply is an acknowledgment that "
-            "the team is on it, with no timeline. When the engineer ships, "
-            "the client is emailed and the ticket closes automatically. "
-            "needs_decision carries the agent's first pass (code_check, "
+            "the team is on it, with no timeline. When the engineer marks "
+            "it on prod, the client is emailed and the ticket closes "
+            "automatically. A listed item whose engineer.shipped is true "
+            "had its task closed with nobody telling the client: its "
+            "acknowledgment draft is stale, so offer "
+            "ticket_first_pass(refresh=true) for a reply with the outcome. "
+            "Tickets answered or closed by hand in Zoho are finished before "
+            "this list is built and never appear. needs_decision carries "
+            "the agent's first pass (code_check, "
             "recommended_action, escalation_reason). Never re-triage a "
             "listed item to learn its status: engineer and agent_fix are "
             "read live. For a ticket not listed, call ticket_first_pass."),
@@ -328,6 +445,31 @@ def _production_owner(commits: str) -> str:
     return " and ".join(owners) or "the repo owner promotes it to production"
 
 
+def ticket_states(state: str = "") -> dict:
+    """Every Zoho ticket at In Progress and what its ClickUp work says, as
+    of the nightly reconcile (ticket_reconciler.py): our team is on it,
+    fixed and waiting for release, shipped, closed, stalled or fell
+    through, with the line to tell the client. Read only."""
+    import ticket_reconciler
+
+    out = ticket_reconciler.states(state.strip())
+    if out.get("error"):
+        _refuse(out["error"])
+    return out
+
+
+def triage_cost(days: int = 14) -> dict:
+    """What triage cost over the last `days` (first pass and deep pass),
+    how often the deep pass ran and corrected the first card, and the
+    monthly and yearly forecast at that rate. Read only."""
+    import deep_triage
+
+    out = deep_triage.report(int(days or 14))
+    if out.get("error"):
+        _refuse(out["error"])
+    return out
+
+
 def fix_status(ticket: str) -> dict:
     """Where an agent fix for this ticket stands, and whose move it is."""
     import shadow_triage
@@ -376,13 +518,18 @@ def sprint_followups() -> dict:
     """What happened since the last sprint that needs a follow-up: replies
     owed for work that shipped, PRs waiting on Sam's merge, fixes waiting
     on production, and release checks that failed."""
+    import sprint_batch
+
     if not sprint_store.ready():
         _refuse("the sprint database is not reachable")
-    owed = store.query(
+    owed = [sprint_store._decode(dict(r)) for r in store.query(
         f"SELECT i.* FROM {sprint_store.ITEMS} i JOIN"
         " vomeos_release_resolutions r ON r.ticket_id = i.ticket_id"
         " WHERE r.outcome IN ('drafted', 'held', 'no_draft')"
-        " AND i.status IN ('open', 'held')")
+        " AND i.status IN ('open', 'held')")]
+    # Sam may have answered or closed it in Zoho since it was drafted.
+    sprint_batch.sync_handled_elsewhere(owed, set())
+    owed = [i for i in owed if i.get("status") in sprint_store.CARRIES]
     prs = store.query(
         "SELECT tf.ticket_number, tf.pr_url, tf.attempted_at FROM"
         " vomeos_ticket_fixes tf WHERE tf.outcome = 'pr_opened' AND NOT"
@@ -397,8 +544,7 @@ def sprint_followups() -> dict:
     for f in waiting:
         f["next"] = _production_owner(str(f.get("fix_commit") or ""))
     return {
-        "replies_owed_for_shipped_work": [
-            view(sprint_store._decode(dict(r))) for r in owed],
+        "replies_owed_for_shipped_work": [view(i) for i in owed],
         "agent_prs_waiting_on_sams_merge": [
             {k: str(v) for k, v in r.items()} for r in prs],
         "merged_waiting_on_production": [
@@ -488,7 +634,7 @@ def send_ticket_reply(ticket: str, sam_said: str, caller: str,
             _refuse(f"the edited reply is held by a guard ({why}); nothing "
                     "was sent")
         item = sprint_store.get_item(item["id"])
-    result = sprint_thread._send(item)
+    result = sprint_thread._send(item, sam_wrote=bool(text.strip()))
     return {"result": result, "lesson": learned.strip(),
             "sent": " sent to " in result}
 
@@ -582,7 +728,7 @@ def log_ticket_request(ticket: str, caller: str, build: bool = False,
 
 WALK_SECTIONS = ("urgent", "route", "with_engineer", "agent_fixing",
                  "your_call", "answer", "close_quietly", "old_card",
-                 "not_triaged")
+                 "not_triaged", "answered_in_zoho")
 
 
 def _fix_attempt(item: dict) -> dict:
@@ -644,11 +790,23 @@ def _walk_one(item: dict) -> tuple[str, dict]:
     return "answer", line
 
 
+def _still_answered(ticket_id: str) -> bool:
+    """The customer has not written since we answered. Triage reopens the
+    item on a new message, but not before its daily cap allows."""
+    import sprint_batch
+
+    try:
+        return sprint_batch.answered_in_zoho(ticket_id)
+    except Exception:
+        return False
+
+
 def walk_queue() -> dict:
     """Every Zoho ticket at New or Processing (each one owes the client a
     reply), and what the system does with it now: routes it to an engineer,
-    leaves it with the agent's fix, or puts it in front of Sam. Read-only,
-    and no agent runs: it uses the cards triage already wrote."""
+    leaves it with the agent's fix, or puts it in front of Sam. No agent
+    runs: it uses the cards triage already wrote. The one write: an item
+    answered in Zoho after the customer's last message is finished."""
     import sprint_batch
 
     if not sprint_store.ready():
@@ -658,13 +816,24 @@ def walk_queue() -> dict:
     except Exception as exc:
         _refuse(f"the Zoho queue could not be read ({exc}); that is not "
                 "the same as an empty queue")
+    items = {str(t.get("id")): sprint_store.by_ticket(str(t.get("id")))
+             for t in tickets}
+    sprint_batch.sync_handled_elsewhere(
+        [i for i in items.values() if i], set(items))
     groups: dict[str, list] = {name: [] for name in WALK_SECTIONS}
     for ticket in tickets:
-        item = sprint_store.by_ticket(str(ticket.get("id")))
+        item = items[str(ticket.get("id"))]
         if not item or not item.get("card"):
             groups["not_triaged"].append({
                 "ticket": f"#{ticket.get('ticketNumber')}",
                 "subject": ticket.get("subject") or "",
+                "zoho_status": ticket.get("status")})
+            continue
+        if (item.get("decision") == sprint_batch.ANSWERED
+                and _still_answered(str(ticket.get("id")))):
+            groups["answered_in_zoho"].append({
+                "ticket": f"#{item.get('ticket_number')}",
+                "account": item.get("account"),
                 "zoho_status": ticket.get("status")})
             continue
         section, line = _walk_one(item)
@@ -683,11 +852,19 @@ def walk_queue() -> dict:
             "is what moves Zoho to In Progress. your_call needs Sam (feature "
             "requests to log, design questions, data or billing). "
             "old_card tickets were triaged before lanes existed: offer to "
-            "re-run them with ticket_first_pass(refresh=true), about $0.40 "
-            "each, only on Sam's yes. not_triaged tickets have no card "
+            "re-run them with ticket_first_pass(refresh=true), $0.40 to "
+            "about $3 each (an unsure card gets the deep pass), only on "
+            "Sam's yes. not_triaged tickets have no card "
             "yet: the 30-minute sweep picks "
-            "them up, or use ticket_first_pass on one. If a line is wrong, "
-            "that is a lesson: ask Sam for the rule and use teach_agents."),
+            "them up, or use ticket_first_pass on one. answered_in_zoho "
+            "tickets were answered by hand after the customer's last "
+            "message: nothing is owed, and the status is moved out of New "
+            "or Processing on its own (Awaiting Client Response, or In "
+            "Progress when routed). One still listed here is a move that "
+            "failed: set it by hand, or offer to close it. If a line is "
+            "wrong, that is a lesson: ask Sam for the rule and use "
+            "teach_agents. In Progress tickets are not listed here: "
+            "ticket_states shows each one against its ClickUp work."),
     }
 
 

@@ -87,9 +87,14 @@ def test_a_question_waits_for_the_customer(after):
     assert after.statuses == [("T1", "Awaiting Client Response")]
 
 
-def test_an_acknowledgment_leaves_the_work_open(after):
-    note = sprint_thread._after_send(_item(category="clear_bug"))
-    assert after.statuses == [] and "left as it is" in note
+def test_a_sent_reply_never_stays_processing(after):
+    # #9394: an acknowledgment with nothing routed used to leave the ticket
+    # in Processing, which reads as "the customer is still owed a reply".
+    for category in ("clear_bug", "needs_human", "design_question", ""):
+        after.statuses = []
+        note = sprint_thread._after_send(_item(category=category))
+        assert after.statuses == [("T1", "Awaiting Client Response")]
+        assert "left as it is" not in note
 
 
 def test_a_zoho_failure_is_reported_not_raised(monkeypatch, after):
@@ -182,8 +187,9 @@ def test_only_granted_tools_are_defined():
 def test_unknown_repo_is_a_message_not_a_crash():
     from vomeos import tools
 
+    # `chats` was the example until it joined the map (2026-10-23).
     assert "Unknown repo" in tools.execute("read_code_file",
-                                           {"repo": "chats", "path": "x"})
+                                           {"repo": "billing", "path": "x"})
 
 
 def test_read_returns_numbered_window(monkeypatch):
@@ -284,7 +290,7 @@ GOOD = {"code_check": {"verdict": "bug", "confidence": "high",
     ({"verdict": "works_as_designed"}, "verdict"),
     ({"verdict": "design_question"}, "Sam's decision"),
     ({"confidence": "low"}, "confidence"),
-    ({"fix_risk": "medium"}, "risk"),
+    ({"fix_risk": "high"}, "risk"),
     ({"fix": ""}, "fix"),
     # #9415's card: a path with commentary is not a location to fix at.
     ({"where": "web:src/views/org/orgSequences (exact render path not "
@@ -312,7 +318,7 @@ def test_sam_can_ask_for_a_design_question_fix_but_not_a_risky_one():
                                "confidence": "low"}}
     assert ticket_fix.should_attempt(question)[0] is False
     assert ticket_fix.should_attempt(question, sam_approved=True)[0] is True
-    risky = {"code_check": {**question["code_check"], "fix_risk": "medium"}}
+    risky = {"code_check": {**question["code_check"], "fix_risk": "high"}}
     assert ticket_fix.should_attempt(risky, sam_approved=True)[0] is False
 
 
@@ -321,13 +327,13 @@ def test_sams_fix_may_retry_and_skips_the_daily_cap(monkeypatch):
     import sentry_fix
 
     monkeypatch.setenv("TICKET_FIX_ENABLED", "true")
-    monkeypatch.setattr(ticket_fix, "_attempted", lambda t: True)
+    monkeypatch.setattr(ticket_fix, "_attempted", lambda t, th="": True)
     monkeypatch.setattr(ticket_fix, "_opened_today", lambda: 99)
     monkeypatch.setattr(ticket_fix, "_record", lambda *a, **k: None)
     monkeypatch.setattr(sentry_code, "gather",
                         lambda *a, **k: {"files": "src"})
     monkeypatch.setattr(sentry_fix, "propose",
-                        lambda a, c: {"attempted": True, "diff": "d"})
+                        lambda a, c, **k: {"attempted": True, "diff": "d"})
     monkeypatch.setattr(sentry_fix, "open_pull_request",
                         lambda i, p, c: {"opened": True,
                                          "url": "https://bb/pr/8"})
@@ -349,13 +355,13 @@ def test_propose_opens_a_pr_and_files_tasks(monkeypatch):
 
     filed = []
     monkeypatch.setenv("TICKET_FIX_ENABLED", "true")
-    monkeypatch.setattr(ticket_fix, "_attempted", lambda t: False)
+    monkeypatch.setattr(ticket_fix, "_attempted", lambda t, th="": False)
     monkeypatch.setattr(ticket_fix, "_opened_today", lambda: 0)
     monkeypatch.setattr(ticket_fix, "_record", lambda *a, **k: None)
     monkeypatch.setattr(sentry_code, "gather",
                         lambda *a, **k: {"files": "src"})
     monkeypatch.setattr(sentry_fix, "propose",
-                        lambda a, c: {"attempted": True, "diff": "d"})
+                        lambda a, c, **k: {"attempted": True, "diff": "d"})
     monkeypatch.setattr(sentry_fix, "open_pull_request",
                         lambda i, p, c: {"opened": True,
                                          "url": "https://bb/pr/7"})
@@ -369,7 +375,7 @@ def test_propose_opens_a_pr_and_files_tasks(monkeypatch):
 
 
 def test_one_attempt_per_ticket(monkeypatch):
-    monkeypatch.setattr(ticket_fix, "_attempted", lambda t: True)
+    monkeypatch.setattr(ticket_fix, "_attempted", lambda t, th="": True)
     out = ticket_fix.propose_for_ticket("T1", "9500", "x", GOOD, "u")
     assert out["reason"] == "already attempted"
 

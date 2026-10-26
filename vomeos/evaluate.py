@@ -113,6 +113,9 @@ class Report:
 
 
 def load_cases(manifest: AgentManifest) -> list[dict]:
+    """The answer key on disk, then the cases Sam recorded from real
+    tickets (vomeos_eval_cases, see vomeos/eval_cases.py). Real tickets
+    carry customer threads, so they live in the database, not in git."""
     path: Path = manifest.evals_path
     if not path.exists():
         raise FileNotFoundError(f"no answer key at {path}")
@@ -120,6 +123,9 @@ def load_cases(manifest: AgentManifest) -> list[dict]:
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.strip():
             cases.append(json.loads(line))
+    from vomeos import eval_cases
+
+    cases.extend(eval_cases.for_agent(manifest.qualified))
     return cases
 
 

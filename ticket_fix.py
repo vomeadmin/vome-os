@@ -14,17 +14,34 @@ the same machinery at the bugs customers report.
 
 THE LADDER (each rung can stop it, and usually does)
 ----------------------------------------------------
-1. The triage card's code_check says `bug`, confidence high, fix_risk low,
-   with a file and a described fix. Anything else stops here.
+1. The triage card's code_check says `bug`, confidence high or medium,
+   fix_risk low or medium, with a file and a described fix. Anything else
+   stops here.
 2. The code around that line is read on the live branch.
 3. `engineering.fix_author` writes a diff, or declines.
 4. `patch_safety` refuses migrations, settings, auth, payments,
    dependencies, CI and tests. The diff must apply to the dev branch as it
    is now.
 5. A pull request opens into `development` (backend) or `develop` (web).
-   It is never merged by an agent: Sam merges agent PRs into the dev
-   branch (they carry no migrations), and the Merge Owner field says so.
+   It is never merged by an agent: Sam merges low risk agent PRs into the
+   dev branch (they carry no migrations), and the Merge Owner field says so.
    Production: Sam deploys web, OnlyG merges core to master.
+
+MEDIUM RISK (Sam, 2026-10-22)
+-----------------------------
+A medium risk fix (it changes what gets written or deleted, or spans a few
+files, with nothing on the patch_safety list) is the agent's to propose too:
+#9501 waited two days for a hand-made fix the triage card had all but found.
+Its PR goes to the engineer who owns the repo (OnlyG backend, Sanjay web and
+mobile) as reviewer and Merge Owner, and they get a Slack DM with what to
+check. High risk never opens a PR, Sam's `fix N` included.
+
+ONE ATTEMPT PER CUSTOMER MESSAGE
+--------------------------------
+An attempt is spent per customer message, not per ticket. #9501's only
+attempt went on Oct 20 to a resolution card whose fix was already live, so
+when the customer wrote back the next day with the path that fix missed,
+nothing could try again. A ticket with a PR open still never gets a second.
 
 Then, in Agent Fixes: a parent task (the fix, no Zoho link, "Fix PR:" in its
 description) and a child per ticket (with the Zoho link). Once the pull
@@ -41,6 +58,7 @@ SWITCHES
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 from datetime import datetime, timezone
@@ -51,6 +69,7 @@ import sprint_store
 from vomeos import store
 
 AGENT_FIXES_LIST = "901115573468"
+PRIORITY_QUEUE = "901113386257"
 FIELD_ZOHO_TICKET_LINK = "4776215b-c725-4d79-8f20-c16f0f0145ac"
 FIELD_FIX_COMMIT = "ee6d6f9b-2093-40df-846c-4c5e7003f2c5"
 FIELD_MERGE_OWNER = "12682083-5a03-4f27-a6b6-5c716aa5dd73"
@@ -83,7 +102,23 @@ store.register_table(
         child_task    VARCHAR
     )
     """,
+    # The customer message the attempt answered (2026-10-22). Empty on
+    # rows from before, which then count as attempted on any message.
+    (f"ALTER TABLE {LEDGER} ADD COLUMN IF NOT EXISTS thread_id VARCHAR",),
 )
+
+# The engineer who reviews a medium risk agent PR, by repo alias. Identities
+# are not secrets; the env overrides exist for somebody on leave.
+BACKEND, FRONTEND = "onlyg", "sanjay"
+FRONTEND_REPOS = {"web", "mobile"}
+ENGINEERS = {
+    "onlyg": {"name": "OnlyG", "clickup": 49257687, "github": "Onlynfk",
+              "bitbucket_name": "OnlyGod"},
+    "sanjay": {"name": "Sanjay", "clickup": 4434086, "github": "skjangid",
+               "bitbucket_name": "Sanjay"},
+}
+
+RISKS_THE_AGENT_FIXES = ("low", "medium")
 
 
 def enabled() -> bool:
@@ -116,6 +151,9 @@ def should_attempt(card: dict, sam_approved: bool = False
     should work: Sam decides whether to change it, log it, or answer it).
     `sam_approved` is Sam saying `fix N`: it lifts the verdict and
     confidence bar, never the risk bar or the patch safety guard.
+
+    Sam, 2026-10-22: medium risk is the agent's too, reviewed by the
+    engineer who owns the repo. High risk never is.
     """
     code = card.get("code_check") if isinstance(card, dict) else None
     if not isinstance(code, dict):
@@ -128,8 +166,9 @@ def should_attempt(card: dict, sam_approved: bool = False
             return False, f"code check verdict is {verdict!r}"
         if code.get("confidence") not in ("high", "medium"):
             return False, "code check confidence is low"
-    if code.get("fix_risk") != "low":
-        return False, f"fix risk is {code.get('fix_risk')!r}, not low"
+    if code.get("fix_risk") not in RISKS_THE_AGENT_FIXES:
+        return False, (f"fix risk is {code.get('fix_risk')!r}, not "
+                       + " or ".join(RISKS_THE_AGENT_FIXES))
     if not code.get("fix") or not code.get("where"):
         return False, "no described fix or location"
     if not _EXACT_WHERE.match(str(code.get("where")).strip()):
@@ -152,12 +191,25 @@ def parse_where(where: str) -> tuple[str, str, int]:
     return alias.strip(), path.strip(), line
 
 
-def _attempted(ticket_id: str) -> bool:
+def _attempted(ticket_id: str, thread_id: str = "") -> bool:
+    """Whether this ticket's attempt is already spent.
+
+    A PR opened is final. Otherwise a new customer message (a different
+    `thread_id`) earns one new attempt; an attempt with no message on record
+    counts against every message, as before.
+    """
     if not store.ensure_table(LEDGER):
         return False
-    rows = store.query(f"SELECT 1 AS x FROM {LEDGER} WHERE ticket_id = :t",
-                       {"t": ticket_id})
-    return bool(rows)
+    rows = store.query(
+        f"SELECT outcome, thread_id FROM {LEDGER} WHERE ticket_id = :t",
+        {"t": ticket_id})
+    if not rows:
+        return False
+    row = rows[0]
+    if row.get("outcome") == "pr_opened":
+        return True
+    spent_on = row.get("thread_id") or ""
+    return not thread_id or not spent_on or spent_on == thread_id
 
 
 def _opened_today() -> int:
@@ -169,20 +221,22 @@ def _opened_today() -> int:
 
 
 def _record(ticket_id: str, number: str, outcome: str, reason: str,
-            pr_url: str = "", parent: str = "", child: str = "") -> None:
+            pr_url: str = "", parent: str = "", child: str = "",
+            thread_id: str = "") -> None:
     if not store.ensure_table(LEDGER):
         return
     store.execute(
         f"INSERT INTO {LEDGER} (ticket_id, ticket_number, outcome, reason,"
-        " pr_url, parent_task, child_task) VALUES (:t, :n, :o, :r, :p, :pa,"
-        " :c) ON CONFLICT (ticket_id) DO UPDATE SET outcome = EXCLUDED."
-        "outcome, reason = EXCLUDED.reason, pr_url = EXCLUDED.pr_url,"
+        " pr_url, parent_task, child_task, thread_id) VALUES (:t, :n, :o,"
+        " :r, :p, :pa, :c, :th) ON CONFLICT (ticket_id) DO UPDATE SET"
+        " outcome = EXCLUDED.outcome, reason = EXCLUDED.reason,"
+        " pr_url = EXCLUDED.pr_url,"
         # A retry is a new attempt: its time, not the first one's.
         " attempted_at = NOW(),"
         " parent_task = EXCLUDED.parent_task, child_task = EXCLUDED."
-        "child_task",
+        "child_task, thread_id = EXCLUDED.thread_id",
         {"t": ticket_id, "n": number, "o": outcome, "r": reason[:1000],
-         "p": pr_url, "pa": parent, "c": child},
+         "p": pr_url, "pa": parent, "c": child, "th": thread_id},
     )
 
 
@@ -192,29 +246,30 @@ def _record(ticket_id: str, number: str, outcome: str, reason: str,
 
 def propose_for_ticket(ticket_id: str, ticket_number: str, account: str,
                        card: dict, zoho_url: str,
-                       sam_approved: bool = False) -> dict:
+                       sam_approved: bool = False,
+                       thread_id: str = "") -> dict:
     """Returns {"outcome", "reason", "pr_url"}. Never raises.
 
-    One attempt per ticket on the agent's own call: a ticket that comes back
-    with a new reply is not a reason to open a second pull request for the
-    same bug. Sam's `fix N` may retry, and is not held to the daily cap.
+    One attempt per customer message on the agent's own call (`thread_id`
+    is the latest one), and never a second pull request for a ticket that
+    has one. Sam's `fix N` may retry, and is not held to the daily cap.
     """
     try:
         return _propose(ticket_id, ticket_number, account, card, zoho_url,
-                        sam_approved)
+                        sam_approved, thread_id)
     except Exception as exc:
         print(f"[TICKET FIX] #{ticket_number} failed: {exc}")
         return {"outcome": "error", "reason": str(exc), "pr_url": ""}
 
 
 def _propose(ticket_id, ticket_number, account, card, zoho_url,
-             sam_approved=False) -> dict:
+             sam_approved=False, thread_id="") -> dict:
     if not enabled():
         return {"outcome": "skipped", "reason": "disabled", "pr_url": ""}
     ok, reason = should_attempt(card, sam_approved=sam_approved)
     if not ok:
         return {"outcome": "skipped", "reason": reason, "pr_url": ""}
-    if not sam_approved and _attempted(ticket_id):
+    if not sam_approved and _attempted(ticket_id, thread_id):
         return {"outcome": "skipped", "reason": "already attempted",
                 "pr_url": ""}
     if not sam_approved and _opened_today() >= daily_cap():
@@ -230,25 +285,31 @@ def _propose(ticket_id, ticket_number, account, card, zoho_url,
     repo = repo_map().get(alias)
     if not repo or not path:
         _record(ticket_id, ticket_number, "skipped",
-                f"unknown location {code.get('where')!r}")
+                f"unknown location {code.get('where')!r}",
+                thread_id=thread_id)
         return {"outcome": "skipped", "reason": "unknown location",
                 "pr_url": ""}
+    risk = str(code.get("fix_risk") or "low")
+    target = _pr_target(repo)
 
+    # The code check read production; the diff applies to the PR target,
+    # so the author reads that branch, at the same line found by its text.
+    source, line = source_branch(repo, path, line or 1, target)
     # The fix author reads the same windowed source the Sentry analyst does,
     # built from a one-frame trace at the line the code check named...
-    trace = f'File "{path}", line {line or 1}, in ticket_{ticket_number}'
-    gathered = sentry_code.gather(trace, repo.slug, repo.branch,
+    trace = f'File "{path}", line {line}, in ticket_{ticket_number}'
+    gathered = sentry_code.gather(trace, repo.slug, source.branch,
                                   host=repo.host, owner=repo.owner)
     # ...plus where the names the fix depends on are declared, which is
     # rarely inside that window (#9582: line 6119 used state declared at
     # 1687 and mirrored a helper in another file).
-    extra = extra_context(repo, path, line or 1, card)
+    extra = extra_context(source, path, line, card)
     if extra:
         gathered["files"] = gathered.get("files", "") + "\n\n" + extra
     analysis = {
         "root_cause": code.get("finding") or "",
         "proposed_fix": code.get("fix") or "",
-        "risk": "low",
+        "risk": risk,
         # The real call, so the fix author weighs a medium one accordingly.
         "confidence": code.get("confidence") or "medium",
         "needs_migration": False,
@@ -257,41 +318,193 @@ def _propose(ticket_id, ticket_number, account, card, zoho_url,
     issue_key = f"zoho-{ticket_number}"
     proposal = sentry_fix.propose(analysis, {
         "source": gathered.get("files", ""), "repo": repo.slug,
-        "branch": repo.branch, "issue_id": issue_key,
-    })
+        # #9501: told only "master", the author declined because it never
+        # writes to a production branch. It reads production; the PR does
+        # not go there.
+        "branch": (f"{target} (the source shown is this branch, the one "
+                   f"your diff is applied to; the bug was confirmed on "
+                   f"{repo.branch}, which the pull request never goes into)"
+                   if source.branch != repo.branch else
+                   f"{repo.branch} (the source shown is what production "
+                   f"runs; your diff is applied to {target or 'the dev branch'}"
+                   f" and the pull request goes into "
+                   f"{target or 'the dev branch'}, never {repo.branch})"),
+        "issue_id": issue_key,
+    }, allow_risk=RISKS_THE_AGENT_FIXES)
     if not proposal.get("diff"):
         _record(ticket_id, ticket_number, "declined",
-                proposal.get("reason") or "no diff")
+                proposal.get("reason") or "no diff", thread_id=thread_id)
         return {"outcome": "declined", "reason": proposal.get("reason"),
                 "pr_url": ""}
 
-    summary = (card.get("live_question") or "")[:60]
+    reviewer = engineer_for(alias) if risk == "medium" else ""
+    # Whole, not clipped: it is the PR's "What broke" (#9637 read "...and
+    # when h"). sentry_fix shortens it for the branch and title itself.
+    summary = (card.get("live_question") or "").strip()
     pr = sentry_fix.open_pull_request(
         {"issue_id": issue_key, "triage_summary": summary,
          "source_label": f"Zoho ticket #{ticket_number} ({account})",
          "severity": "customer reported"},
         proposal,
         {"repo": repo.slug, "host": repo.host, "owner": repo.owner,
-         "root_cause": analysis["root_cause"]},
+         "root_cause": analysis["root_cause"],
+         "reviewer": ENGINEERS[reviewer] if reviewer else {}},
     )
     if not pr.get("opened"):
         _record(ticket_id, ticket_number, "not_opened",
-                pr.get("reason") or "")
+                pr.get("reason") or "", thread_id=thread_id)
         return {"outcome": "not_opened", "reason": pr.get("reason"),
                 "pr_url": ""}
 
+    owner = ENGINEERS[reviewer]["clickup"] if reviewer else MERGE_OWNER
     parent, child = _file_tasks(ticket_number, account, card, repo, pr["url"],
-                                zoho_url)
+                                zoho_url, owner, ticket_id)
     _record(ticket_id, ticket_number, "pr_opened", "", pr["url"], parent,
-            child)
-    # Zoho says so straight away: In Progress, Sam, tagged agent-fix.
+            child, thread_id=thread_id)
+    # Zoho says so straight away: In Progress on the Agent Fixes team,
+    # tagged agent-fix (a never-answered ticket stays New for Sam's ack).
     import zoho_actions
 
     zoho = zoho_actions.mark_agent_fix(
         ticket_id, pr["url"],
         f"https://app.clickup.com/t/{parent}" if parent else "")
+    pinged = ""
+    if reviewer:
+        pinged = _ping_reviewer(reviewer, ticket_number, account, card,
+                                proposal, pr, parent, zoho_url)
     return {"outcome": "pr_opened", "reason": "", "pr_url": pr["url"],
-            "parent": parent, "child": child, "zoho": zoho}
+            "parent": parent, "child": child, "zoho": zoho,
+            "reviewer": reviewer, "pinged": pinged}
+
+
+def engineer_for(alias: str) -> str:
+    """Who reviews a medium risk fix in this repo: Sanjay for web and
+    mobile, OnlyG for everything backend."""
+    return FRONTEND if alias in FRONTEND_REPOS else BACKEND
+
+
+# How many of the 7 lines around the code check's line (itself and 3 each
+# side) must read the same on the target branch to call it the same place.
+SAME_PLACE = 4
+
+
+def matching_line(prod: list[str], target: list[str], line: int) -> int:
+    """The line on the target branch that is `line` on production, or 0.
+
+    A candidate reads the same as the production line; the one whose
+    neighbours also read the same wins. A tie or a weak match is 0: a
+    wrong window is worse than production's."""
+    def same(i: int, j: int) -> bool:
+        return (0 <= i < len(prod) and 0 <= j < len(target)
+                and prod[i].strip() == target[j].strip())
+
+    want = line - 1
+    if not 0 <= want < len(prod):
+        return 0
+    scores = []
+    for at in range(len(target)):
+        if not same(want, at):
+            continue
+        scores.append((sum(same(want + k, at + k) for k in range(-3, 4)),
+                       at))
+    scores.sort(reverse=True)
+    if not scores or scores[0][0] < SAME_PLACE or (
+            len(scores) > 1 and scores[1][0] == scores[0][0]):
+        return 0
+    return scores[0][1] + 1
+
+
+# How far from the code check's line an unchanged neighbour may anchor it,
+# and how long that neighbour must be to mean anything ("}" does not).
+ANCHOR_REACH = 15
+ANCHOR_MIN_CHARS = 12
+
+
+def place_line(prod: list[str], target: list[str], line: int) -> int:
+    """matching_line, or when the line itself was edited on the target
+    (#9573: development rewrote line 970 inside the same function), the
+    nearest unchanged neighbour within ANCHOR_REACH, with the offset kept.
+    0 when nothing near it can be placed."""
+    for distance in range(ANCHOR_REACH + 1):
+        for step in ((0,) if distance == 0 else (-distance, distance)):
+            near = line + step
+            if not 1 <= near <= len(prod):
+                continue
+            if step and len(prod[near - 1].strip()) < ANCHOR_MIN_CHARS:
+                continue
+            at = matching_line(prod, target, near)
+            if at and 1 <= at - step <= len(target):
+                return at - step
+    return 0
+
+
+def source_branch(repo, path: str, line: int, target: str):
+    """(repo to read, line there) for the fix author.
+
+    #9358 and #9573 (2026-10-25): the author read production (master)
+    and its diff was applied to develop, which had moved on, so the patch
+    missed. The author now reads the target, at the code check's line
+    found by its text. Production, as before, when the target is the same
+    branch, the file is not there, or the line cannot be placed."""
+    if not target or target == repo.branch:
+        return repo, line
+    try:
+        on_target = dataclasses.replace(repo, branch=target)
+        prod = _read_text(repo, path).splitlines()
+        dev = _read_text(on_target, path).splitlines()
+    except Exception as exc:
+        print(f"[TICKET FIX] could not read {path} on {target}: {exc}")
+        return repo, line
+    at = place_line(prod, dev, line) if prod and dev else 0
+    if not at:
+        print(f"[TICKET FIX] {path}:{line} not placed on {target}; reading "
+              f"{repo.branch}")
+        return repo, line
+    return on_target, at
+
+
+def _pr_target(repo) -> str:
+    try:
+        import sentry_projects
+
+        return sentry_projects.fix_target(repo.slug) or ""
+    except Exception:
+        return ""
+
+
+def _ping_reviewer(reviewer, ticket_number, account, card, proposal, pr,
+                   parent, zoho_url) -> str:
+    """DM the engineer a medium risk PR is waiting on. Returns the message
+    ts, or "" when Slack could not be reached (the PR still stands)."""
+    import sentry_notify
+    import sprint_thread
+
+    user = sentry_notify.user_id(reviewer)
+    if not user:
+        print(f"[TICKET FIX] no Slack id for {reviewer}; #{ticket_number} "
+              "PR not pinged")
+        return ""
+    code = card.get("code_check") or {}
+    task = f"https://app.clickup.com/t/{parent}" if parent else ""
+    assigned = ("You are the reviewer and the Merge Owner."
+                if pr.get("reviewer_added") else
+                "Please add yourself as reviewer; the agent could not. You "
+                "are the Merge Owner.")
+    lines = [
+        f"Medium risk agent fix for #{ticket_number} "
+        f"({account.split('(')[0].strip()}) needs your review: "
+        f"<{pr['url']}|pull request>. {assigned}",
+        f"*Problem:* {card.get('live_question') or ''}",
+        f"*Cause:* {code.get('finding') or ''} (`{code.get('where') or ''}`)",
+        f"*Change:* {proposal.get('rationale') or code.get('fix') or ''}",
+        f"*Check before merging:* {proposal.get('risks') or 'not stated'}",
+    ]
+    links = " | ".join(x for x in (
+        f"<{task}|Agent Fixes task>" if task else "",
+        f"<{zoho_url}|Zoho ticket>" if zoho_url else "") if x)
+    if links:
+        lines.append(links)
+    return sprint_thread._post("\n".join(lines), channel=user)
 
 
 # ---------------------------------------------------------------------------
@@ -469,10 +682,10 @@ def _clickup(method: str, path: str, body: dict | None = None) -> dict:
     return resp.json() if resp.text.strip() else {}
 
 
-def _file_tasks(ticket_number, account, card, repo, pr_url, zoho_url):
+def _file_tasks(ticket_number, account, card, repo, pr_url, zoho_url,
+                owner=MERGE_OWNER, ticket_id=""):
     code = card.get("code_check") or {}
     summary = (card.get("live_question") or "").strip()[:90]
-    owner = MERGE_OWNER
     description = "\n".join([
         "**Agent fix proposed from a customer ticket.** Not reviewed by a "
         "person. Merge into the dev branch only after review.",
@@ -504,15 +717,95 @@ def _file_tasks(ticket_number, account, card, repo, pr_url, zoho_url):
             {"id": FIELD_RELEASE_CHECK, "value": RELEASE_WAITING},
         ],
     })
+    child_name = (f"[#{ticket_number}] {account.split('(')[0].strip()} -- "
+                  f"{summary} (linked to fix)")
+    own = _own_task(ticket_id)
+    if own and _move_in(own, str(parent.get("id") or ""), child_name,
+                        pr_url):
+        return str(parent.get("id") or ""), own["id"]
     child = _clickup("POST", f"/list/{AGENT_FIXES_LIST}/task", {
-        "name": f"[#{ticket_number}] {account.split('(')[0].strip()} -- "
-                f"{summary} (linked to fix)",
+        "name": child_name,
         "parent": parent.get("id"),
         "status": "in progress",
         "custom_fields": [{"id": FIELD_ZOHO_TICKET_LINK,
                            "value": zoho_url}],
     })
     return str(parent.get("id") or ""), str(child.get("id") or "")
+
+
+def _own_task(ticket_id: str) -> dict:
+    """The ticket's own open Priority Queue task, or {}.
+
+    Only a task whose Zoho Ticket Link names this ticket counts. One that
+    merely mentions the number, or that an incident match joined to it, is
+    someone else's work and is never moved (Sam's recipe, 2026-10-22).
+    """
+    if not ticket_id:
+        return {}
+    from zoho_links import extract_zoho_ticket_id
+
+    found = []
+    for page in range(20):
+        body = _clickup("GET", f"/list/{PRIORITY_QUEUE}/task?page={page}"
+                               "&include_closed=false&subtasks=true")
+        batch = body.get("tasks") or []
+        found += [t for t in batch
+                  if extract_zoho_ticket_id(t) == str(ticket_id)]
+        if len(batch) < 100:
+            break
+    engineer_ids = {e["clickup"] for e in ENGINEERS.values()}
+    # The engineer's task first (that is the queue the fix takes it off),
+    # then the most recently touched.
+    found.sort(key=lambda t: (
+        any(a.get("id") in engineer_ids for a in t.get("assignees") or []),
+        int(t.get("date_updated") or 0)), reverse=True)
+    return found[0] if found else {}
+
+
+def _move_in(task: dict, parent_id: str, name: str, pr_url: str) -> bool:
+    """Move the ticket's own task under the fix as its child: moved, never
+    copied, so the engineer's queue loses it and only one child per ticket
+    can email the client when the fix is live (release_resolutions keys
+    on the child). False, with nothing changed, when ClickUp refuses the
+    new parent; the caller then files a fresh child as before."""
+    if not parent_id:
+        return False
+    engineer_ids = {e["clickup"] for e in ENGINEERS.values()}
+    try:
+        _clickup("PUT", f"/task/{task['id']}", {"parent": parent_id})
+        moved = _clickup("GET", f"/task/{task['id']}")
+        if str(moved.get("parent") or "") != parent_id:
+            print(f"[TICKET FIX] {task['id']} did not take parent "
+                  f"{parent_id}; filing a new child")
+            return False
+    except Exception as exc:
+        print(f"[TICKET FIX] could not move {task['id']} in: {exc}")
+        return False
+    # The parent is set, so it is the fix's child from here on. The rest
+    # is tidying, and a failure in it is said, not undone.
+    try:
+        _clickup("PUT", f"/task/{task['id']}", {
+            "name": name, "status": "in progress",
+            "assignees": {"add": [], "rem": [
+                a["id"] for a in task.get("assignees") or []
+                if a.get("id") in engineer_ids]},
+        })
+        if str((moved.get("list") or {}).get("id") or "") != AGENT_FIXES_LIST:
+            import clickup_tasks
+
+            clickup_tasks.move_clickup_task(task["id"], AGENT_FIXES_LIST)
+        _clickup("POST", f"/task/{task['id']}/comment", {
+            "comment_text": (
+                "The agent opened a fix for this ticket and took this task "
+                f"over as the child of https://app.clickup.com/t/{parent_id}"
+                f".\nFix PR: {pr_url}\nSam merges it into the dev branch; "
+                "the release watcher tells the client when it is live. "
+                "Reassign yourself if this is wrong."),
+            "notify_all": False,
+        })
+    except Exception as exc:
+        print(f"[TICKET FIX] {task['id']} moved in, tidying failed: {exc}")
+    return True
 
 
 # ---------------------------------------------------------------------------

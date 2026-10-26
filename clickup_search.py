@@ -121,6 +121,10 @@ def _fetch_list(list_id: str, name: str) -> list[dict]:
                     "name": task.get("name", ""),
                     "status": (task.get("status") or {}).get("status", ""),
                     "list": name,
+                    "assignee": ", ".join(
+                        a.get("username") or a.get("email") or ""
+                        for a in task.get("assignees") or []
+                        if a.get("username") or a.get("email")),
                     "url": task.get("url", ""),
                     "zoho_ticket_id": extract_zoho_ticket_id(task) or "",
                 })

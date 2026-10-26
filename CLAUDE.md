@@ -86,6 +86,11 @@ zoho_actions.py    recipients, sendReply, silent status changes
 ticket_images.py   inline screenshots + attachments (images, text logs) for the agents
 ticket_fix.py      code-check bug -> fix PR -> Agent Fixes -> on dev on merge
 release_watcher.py proves an Agent Fix live, posts "Fix live, N clients"
+dependency_watch.py live lockfiles vs OSV.dev, CISA KEV, EPSS, endoflife.date:
+                   07:45 alerts in #eng-infra only for what is new, Wed
+                   10:00 digest. Unread repos are "not checked", never clean.
+                   Code decides the tiers; Claude only adds a thread note.
+                   NVD (optional key) fills missing severities, never finds
 release_resolutions.py  a live fix -> one resolution draft per client, as a
                    card in the day thread (RELEASE_AUTO_SEND sends clean ones)
 sentry_agent_fixes.py  actionable Sentry issue -> one Agent Fixes task/cause
@@ -98,7 +103,10 @@ feature_desk.py    #feature-requests: engineering.feature_architect shapes each
                    become fix_author PRs; Sam answers go N / no N, or
                    places it: build N (Sam Build Now), log N (Raw Intake),
                    route N onlyg, leave N (moves Ron's task, never copies).
-                   Always on; FEATURE_DESK_PR_ENABLED (off) gates the PRs
+                   Asks Sam first: nothing is analysed until he says
+                   `analyse`; log/build/route/leave/no place it unread.
+                   FEATURE_DESK_AUTO_ANALYSE (off) restores analyse-all;
+                   FEATURE_DESK_PR_ENABLED (off) gates the PRs
 WORKFLOWS.md       the workflow map + gap register (source of truth)
 VIDEO_STUDIO.md    marketing videos from #video-studio: the team, replies,
                    sources, costs, data, debugging (read before touching
@@ -289,8 +297,10 @@ needs go on `vome-os-worker`, not the web service.
   get work through `ticket_routing` (or Sam's `route`). Reply handling
   (`process_ticket_update`) is unchanged.
 - Retired: email
-  completeness gate (removed), "Vic" signatures (engineer-triggered replies
-  sign "Sam | Vome team").
+  completeness gate (removed), "Vic" signatures. Since 2026-10-23 anything sent
+  without Sam's explicit approval (on prod, release watcher, shipped untold,
+  user education, needs client info) is signed "Vome team"
+  (`signatures.AUTO_SENDER`); only what Sam approves carries "Sam | Vome team".
 
 **Kernel additions:** `vomeos/images.py` (manifest `job.images`),
 `vomeos/tools.py` + runner tool loop (manifest `job.tools`,

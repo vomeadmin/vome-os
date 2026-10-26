@@ -786,7 +786,10 @@ def run_regate_sweep(limit: int = 25) -> dict:
     hundred model calls in one job.
     """
     triaged = sentry_projects.triaged_slugs()
-    rows = sentry_ledger.claim_regate(triaged, limit=limit)
+    # Rows gated before the 2026-10-23 rename carry the old slugs.
+    rows = sentry_ledger.claim_regate(
+        sentry_projects.with_aliases(triaged), limit=limit
+    )
     if not rows:
         return {"status": "nothing_to_do", "released": 0}
 

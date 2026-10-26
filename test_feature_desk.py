@@ -115,11 +115,12 @@ def test_always_listening_with_no_switch_set(monkeypatch, desk):
     """Sam, 2026-10-19: no on switch. His first real post went unanswered
     because FEATURE_DESK_ENABLED was never set."""
     monkeypatch.delenv("FEATURE_DESK_ENABLED", raising=False)
+    monkeypatch.delenv("FEATURE_DESK_AUTO_ANALYSE", raising=False)
     queued = []
     monkeypatch.setattr("vomeos.worker.enqueue_event",
                         lambda key, payload, queue="": queued.append(payload))
     fd.handle_message({"ts": "1.1", "text": "x" * 200})
-    assert desk["posts"][0].startswith("Analysing this")
+    assert desk["posts"][0] == fd.ASK_SAM_TEXT
     assert queued == [{"ts": "1.1"}]
 
 
@@ -137,7 +138,7 @@ def test_a_request_is_acknowledged_then_queued(monkeypatch, desk):
                         lambda key, payload, queue="": queued.append(payload))
     fd.handle_message({"ts": "1.1", "text": "Please return the address "
                        "parts on the volunteer profile load, thanks."})
-    assert desk["posts"][0].startswith("Analysing this")
+    assert desk["posts"][0] == fd.ASK_SAM_TEXT
     assert queued == [{"ts": "1.1"}]
 
 
@@ -203,6 +204,8 @@ def test_with_prs_off_the_reply_says_ready_not_building(monkeypatch, desk):
     ({"repo": "web", "anchors": ["src/a.py:1"], "plan": "x"}, "repo"),
     ({"repo": "core", "anchors": [], "plan": "x"}, "anchors"),
     ({"repo": "core", "anchors": ["a.py:1", "b.py:2", "c.py:3", "d.py:4"],
+      "plan": "x"}, "more than 3 files"),
+    ({"repo": "core", "anchors": [f"a.py:{n}" for n in range(1, 8)],
       "plan": "x"}, "anchors"),
     ({"repo": "core", "anchors": ["volunteer_app/serializers.py"],
       "plan": "x"}, "anchors"),
@@ -218,6 +221,19 @@ def test_a_plan_that_cannot_be_written_is_logged(monkeypatch, desk, build,
     assert items["1"]["verdict"] == "log"
     assert items["1"]["state"] == fd.LOGGED
     assert why in items["1"]["analysis"]
+
+
+def test_a_helper_and_its_call_site_get_their_own_anchors():
+    """2026-10-24: site and category filters needed _parse_request_data,
+    a new helper and the _get_shifts call site 650 lines later in V4, plus
+    Insights and V5. Three anchors could not reach the call site."""
+    v4 = "opportunity_app/api_version/v4/api.py"
+    item = _build_item(build={
+        "repo": "core", "plan": "x",
+        "anchors": [f"{v4}:680", f"{v4}:862", f"{v4}:1328",
+                    "opportunity_app/api_version/v4/insights_api.py:362",
+                    "opportunity_app/api_version/v5/api.py:1693"]})
+    assert fd._can_build(item) == (True, "")
 
 
 def test_log_with_a_linked_task_goes_on_that_task(desk):
@@ -395,6 +411,44 @@ def test_a_builder_short_of_source_waits_for_go(monkeypatch, desk, proposal):
     assert desk["comments"] == [] and desk["tasks"] == []
     assert "needs more source" in desk["posts"][-1]
     assert "say `go 1` to try again, or `log 1`" in desk["posts"][-1]
+
+
+def test_the_source_a_builder_asks_for_comes_with_the_next_go(monkeypatch,
+                                                              desk):
+    """2026-10-24: the builder named v4/api.py:1328 as the span it needed,
+    and the second `go 1` was shown the same windows and refused again."""
+    import sentry_projects
+    import vomeos.tools
+
+    class Repo:
+        slug, host, owner, branch, alias = "core-slug", "bitbucket", "", \
+            "master", "core"
+
+    v4 = "opportunity_app/api_version/v4/api.py"
+    reasons = iter([
+        f"The central edit is in source I was not shown: {v4}:1328-1330.",
+        f"Still not shown: {v4}:1500 and {v4}:1328.",
+    ])
+    propose = fd._propose
+    monkeypatch.setattr(fd, "_propose", lambda ts, item: (
+        {"reason": next(reasons), "needs_context": True}, None))
+    items = {"1": {**_build_item(), "state": fd.HELD}}
+    fd._build("1.1", {"task_id": "T1"}, items, "1", sam_approved=True)
+    fd._build("1.1", {"task_id": "T1"}, items, "1", sam_approved=True)
+    assert items["1"]["source_asked"] == [f"{v4}:1328", f"{v4}:1500"]
+
+    seen = {}
+    monkeypatch.setattr(fd, "_propose", propose)
+    monkeypatch.setattr(vomeos.tools, "repo_map", lambda: {"core": Repo})
+    monkeypatch.setattr(sentry_projects, "fix_target",
+                        lambda slug: "development")
+    monkeypatch.setattr(sentry_code, "gather_for_build",
+                        lambda edits, repo, ref, **k: seen.update(
+                            refs=k["refs"]) or {"files": "SOURCE"})
+    import sentry_fix
+    monkeypatch.setattr(sentry_fix, "propose", lambda a, c: {"diff": ""})
+    fd._propose("1.1", items["1"])
+    assert (v4, 1328) in seen["refs"] and (v4, 1500) in seen["refs"]
 
 
 def test_a_real_refusal_is_still_logged(monkeypatch, desk):
@@ -1008,3 +1062,138 @@ def test_propose_hands_the_evidence_to_the_reader(monkeypatch):
     assert seen["refs"] == [("organization_app/serializers.py", 4836),
                             ("organization_app/serializers.py", 4848)]
     assert seen["source"] == "SOURCE"
+
+
+# ---------------------------------------------------------------------------
+# Ask first (Sam, 2026-10-25): many requests are not wanted yet, so nothing
+# is analysed until Sam says so. Before that the request is one item, the
+# post as written, and placing it costs no model call.
+# ---------------------------------------------------------------------------
+
+def _waiting_row(task_id=""):
+    post = {"text": "*Bulk duplicate shifts*\nLet admins copy a week."}
+    return _row({"1": fd._plain_item(post)}, status=fd.AWAITING,
+                task_id=task_id)
+
+
+def test_with_auto_analyse_on_the_post_is_analysed(monkeypatch, desk):
+    monkeypatch.setenv("FEATURE_DESK_AUTO_ANALYSE", "true")
+    monkeypatch.setattr("vomeos.worker.enqueue_event", lambda *a, **k: None)
+    fd.handle_message({"ts": "1.1", "text": "x" * 200})
+    assert desk["posts"][0] == fd.ANALYSING_TEXT
+
+
+def test_a_new_post_is_recorded_without_the_architect(monkeypatch, desk):
+    monkeypatch.delenv("FEATURE_DESK_AUTO_ANALYSE", raising=False)
+    monkeypatch.setattr(fd.store, "ensure_table", lambda name: True)
+    monkeypatch.setattr(fd, "analyse", lambda *a, **k: pytest.fail("ran"))
+    monkeypatch.setattr(fd, "_read_post", lambda ts: {
+        "text": "<@U1> *Bulk duplicate shifts*\n<https://app.clickup.com/"
+                "t/868abc123|spec>", "requester": "Ron",
+        "requester_id": RON, "thread": "", "task_id": "868abc123"})
+    result = fd.handle({"ts": "1.1"})
+    assert result == {"status": "ok", "action": "waiting for Sam"}
+    saved = desk["saves"][-1]
+    assert saved["status"] == fd.AWAITING
+    assert saved["task_id"] == "868abc123"
+    item = json.loads(saved["items"])["1"]
+    assert item["title"] == "Bulk duplicate shifts"
+    assert item["recorded"] is True
+    assert desk["posts"] == []
+
+
+def test_a_bare_link_gets_a_plain_title():
+    post = {"text": "<https://app.clickup.com/t/868mjq5gb>"}
+    assert fd._plain_item(post)["title"] == "Feature request"
+
+
+@pytest.mark.parametrize("user,text", [
+    (RON, "Also it should keep the volunteers on each shift"),
+    (SAM, "Ron, is this for the March release?"),
+    (SAM, "check with Ron first"),
+    (SAM, "no need to analyse, I'll think about it"),
+])
+def test_while_waiting_nothing_is_read(monkeypatch, desk, user, text):
+    monkeypatch.setattr(fd, "_row", lambda ts: _waiting_row())
+    monkeypatch.setattr(fd, "analyse", lambda *a, **k: pytest.fail("ran"))
+    result = fd._on_reply("1.1", {"ts": "2", "user": user, "text": text})
+    assert result == {"status": "skipped", "reason": "waiting for Sam"}
+    assert desk["posts"] == []
+
+
+@pytest.mark.parametrize("text,direction", [
+    ("analyse", ""),
+    ("Analyze this", ""),
+    ("please analyse it", ""),
+    ("go", ""),
+    ("analyse it, focus on whether it is a step type",
+     "focus on whether it is a step type"),
+])
+def test_sam_asks_for_the_analysis(monkeypatch, desk, text, direction):
+    seen = {}
+    monkeypatch.setattr(fd, "_row", lambda ts: _waiting_row())
+    monkeypatch.setattr(fd, "analyse", lambda ts, **k: seen.update(k))
+    fd._on_reply("1.1", {"ts": "2", "user": SAM, "text": text})
+    assert seen == {"direction": direction}
+    assert desk["posts"] == [fd.ANALYSING_TEXT]
+    # The stand-in item goes, so only the architect's items remain.
+    assert {"status": fd.ANALYSING, "items": "{}"} in desk["saves"]
+
+
+def test_only_sam_starts_an_analysis(monkeypatch, desk):
+    monkeypatch.setattr(fd, "_row", lambda ts: _waiting_row())
+    monkeypatch.setattr(fd, "analyse", lambda *a, **k: pytest.fail("ran"))
+    result = fd._on_reply("1.1", {"ts": "2", "user": RON, "text": "analyse"})
+    assert result["reason"] == "waiting for Sam"
+
+
+def test_log_moves_rons_task_with_no_analysis(monkeypatch, desk):
+    monkeypatch.setattr(fd, "_row", lambda ts: _waiting_row(task_id="T1"))
+    monkeypatch.setattr(fd, "analyse", lambda *a, **k: pytest.fail("ran"))
+    fd._on_reply("1.1", {"ts": "2", "user": SAM, "text": "log"})
+    assert desk["moves"] == [("T1", fd.RAW_INTAKE)]
+    assert desk["comments"] == []
+    assert desk["tasks"] == []
+    assert desk["reactions"] == ["1.1"]
+    assert desk["posts"][-1].startswith(":white_check_mark: Handled: 1 moved "
+                                        "to Raw Intake")
+
+
+def test_log_without_a_task_files_the_request(monkeypatch, desk):
+    monkeypatch.setattr(fd, "_row", lambda ts: _waiting_row())
+    fd._on_reply("1.1", {"ts": "2", "user": SAM, "text": "log"})
+    assert desk["tasks"] == [("1", {})]
+
+
+@pytest.mark.parametrize("text,where", [
+    ("build", fd.SAM_ACCEPTED),
+    ("Move Ron's task into Sam Build Now", fd.SAM_ACCEPTED),
+    ("put it in the backlog", fd.RAW_INTAKE),
+])
+def test_sam_places_a_waiting_request(monkeypatch, desk, text, where):
+    monkeypatch.setattr(fd, "_row", lambda ts: _waiting_row(task_id="T1"))
+    monkeypatch.setattr(fd, "analyse", lambda *a, **k: pytest.fail("ran"))
+    fd._on_reply("1.1", {"ts": "2", "user": SAM, "text": text})
+    assert desk["moves"] == [("T1", where)]
+
+
+def test_no_settles_it_and_writes_nothing(monkeypatch, desk):
+    monkeypatch.setattr(fd, "_row", lambda ts: _waiting_row(task_id="T1"))
+    fd._on_reply("1.1", {"ts": "2", "user": SAM, "text": "no"})
+    assert desk["comments"] == []
+    assert desk["reactions"] == ["1.1"]
+    assert "1 not building" in desk["posts"][-1]
+
+
+def test_an_unanalysed_task_carries_the_request(monkeypatch):
+    sent = {}
+    monkeypatch.setattr(fd, "_permalink", lambda ts: "https://slack/x")
+    monkeypatch.setattr(fd, "_read_post", lambda ts: {
+        "text": "Let admins copy a week of shifts."})
+    monkeypatch.setattr(fd, "_clickup", lambda method, path, body=None:
+                        sent.update(body) or {"id": "T9"})
+    item = fd._plain_item({"text": "Let admins copy a week of shifts."})
+    assert fd._create_task(item, "1.1", {}) == "T9"
+    assert sent["markdown_description"].startswith(
+        "Let admins copy a week of shifts.")
+    assert "Architect" not in sent["markdown_description"]

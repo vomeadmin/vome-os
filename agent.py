@@ -333,6 +333,15 @@ def _extract_ticket_fields(raw_result: dict) -> dict:
     )
 
     cc_email = _ticket_cc_emails(ticket, exclude=contact_email)
+    # A teammate the client wrote to (Ron, #9610) stays on every reply.
+    # _ticket_cc_emails drops all Vome addresses, so add them back here.
+    if ticket.get("id"):
+        import zoho_actions
+        cc = [e for e in cc_email.split(",") if e]
+        for email in zoho_actions.ticket_teammates(str(ticket["id"])):
+            if email.lower() not in {c.lower() for c in cc}:
+                cc.append(email)
+        cc_email = ",".join(cc)
 
     # Origin signals — distinguish a client-submitted ticket (inbound email /
     # web form) from one an agent created by hand inside Zoho Desk. Zoho marks
@@ -1422,6 +1431,45 @@ def _find_clickup_task_by_zoho_ticket(ticket_id: str) -> str | None:
         return None
 
 
+def _clickup_task_closed(task_id: str) -> bool:
+    """True when the task's status is a closed or done one. Unreadable is
+    False, which keeps the old behaviour."""
+    import httpx as _httpx
+    cu_token = os.environ.get("CLICKUP_API_TOKEN", "")
+    if not cu_token or not task_id:
+        return False
+    try:
+        r = _httpx.get(f"https://api.clickup.com/api/v2/task/{task_id}",
+                       headers={"Authorization": cu_token}, timeout=15)
+        r.raise_for_status()
+        state = r.json().get("status") or {}
+    except Exception as e:
+        print(f"[ZOHO->CU] could not read task {task_id}: {e}")
+        return False
+    return (state.get("type") == "closed"
+            or (state.get("status") or "").lower() in (
+                "closed", "done", "complete", "declined", "finished"))
+
+
+def _close_queue_tasks_if_closed(ticket_id: str,
+                                 status_known: bool = False) -> None:
+    """Close every open Priority Queue task linked to a Closed ticket, with
+    the engineers taken off and a comment (ticket_reconciler.close_task)."""
+    try:
+        import ticket_reconciler
+        import zoho_actions
+
+        if not status_known and \
+                zoho_actions.ticket_status(ticket_id) != ZOHO_CLOSED:
+            return
+        closed = ticket_reconciler.close_tasks_for_ticket(ticket_id)
+        if closed:
+            print(f"[ZOHO->CU] ticket {ticket_id} Closed -- closed "
+                  f"{', '.join(closed)}")
+    except Exception as e:
+        print(f"[ZOHO->CU] closing tasks for {ticket_id} failed: {e}")
+
+
 def sync_zoho_to_clickup(ticket_id: str) -> None:
     """Sync a Zoho ticket's status/assignee changes to ClickUp.
 
@@ -1443,6 +1491,9 @@ def sync_zoho_to_clickup(ticket_id: str) -> None:
             f"cannot sync (ticket may predate the link, or never got a "
             f"ClickUp task). Skipping."
         )
+        # A ticket Sam closed still has no engineer task left (2026-10-24):
+        # find them by their Zoho Ticket Link instead.
+        _close_queue_tasks_if_closed(ticket_id)
         return
     thread_ts, thread_data = thread_info
     clickup_task_id = thread_data.get("clickup_task_id")
@@ -1492,18 +1543,42 @@ def sync_zoho_to_clickup(ticket_id: str) -> None:
         print(f"[ZOHO->CU] ticket {ticket_id} is {status} -- closing ClickUp task {clickup_task_id}")
         close_clickup_task(clickup_task_id)
         update_thread(thread_ts, status=THREAD_CLOSED)
+        # A second Priority Queue task for the same ticket goes too.
+        _close_queue_tasks_if_closed(ticket_id, status_known=True)
         return
 
     # Awaiting Client Response on Zoho -> mirror on ClickUp (parked).
     # Checked BEFORE the assignee rules below so the task is parked rather
     # than closed even when the ticket is owned by Sam/Ron.
     if status == ZOHO_AWAITING_CLIENT_RESPONSE.lower():
+        # A task already closed (released off the engineer queue) stays
+        # closed: parking it reopened it (#9536, 2026-10-25). A client
+        # reply re-triages the ticket instead.
+        if _clickup_task_closed(clickup_task_id):
+            print(
+                f"[ZOHO->CU] ticket {ticket_id} awaiting client response -- "
+                f"ClickUp task {clickup_task_id} is closed, left closed"
+            )
+            update_thread(thread_ts, status=THREAD_WAITING_CLIENT)
+            return
         print(
             f"[ZOHO->CU] ticket {ticket_id} awaiting client response -- "
             f"ClickUp task {clickup_task_id} -> {CU_AWAITING_CLIENT}"
         )
         _update_clickup_task_status(clickup_task_id, CU_AWAITING_CLIENT)
         update_thread(thread_ts, status=THREAD_WAITING_CLIENT)
+        return
+
+    # An agent fix sits on the Agent Fixes team with no agent on purpose
+    # (zoho_actions.set_agent_fixing): the owner rules below would read
+    # that as "unassigned" and close the task the release watcher needs.
+    from zoho_actions import AGENT_FIXES_TEAM
+
+    if str(ticket.get("teamId") or "") == AGENT_FIXES_TEAM:
+        print(
+            f"[ZOHO->CU] ticket {ticket_id} is on the Agent Fixes team -- "
+            f"ClickUp task {clickup_task_id} left as is"
+        )
         return
 
     # Reassigned to Sam or Ron (not an engineer) -> close ClickUp task
@@ -1786,6 +1861,7 @@ _AUTO_REPLY_RE = re.compile(
     r"|on (vacation|holiday|leave|annual leave|parental leave|maternity leave)"
     r"|currently (away|out of (the )?office)|i am (currently )?out of"
     r"|i will be out of|réponse automatique|absence du bureau|de retour le"
+    r"|mailbox (?:is|will) not (?:be )?(?:attended|monitored)"
     r"|en (congé|vacances)"
     r")"
 )
@@ -1806,6 +1882,82 @@ _ACTION_SIGNAL_RE = re.compile(
 def _looks_like_auto_reply(text: str) -> bool:
     """True if the text looks like an out-of-office / autoresponder."""
     return bool(_AUTO_REPLY_RE.search(text or ""))
+
+
+# Zoho's "Customer Reply to Processing Status" workflow moves a ticket to
+# Processing on ANY customer email, an out-of-office included. The webhook
+# can reach us before that workflow has run, so the restore waits a moment.
+AUTO_REPLY_SETTLE_SECONDS = 20
+# Clock skew between the reply's createdTime and the workflow's eventTime
+# (#9526: reply 10:38:22, workflow 10:38:31).
+AUTO_REPLY_WORKFLOW_SKEW_SECONDS = 120
+
+
+def _zoho_time(value: str):
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat((value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _restore_status_after_auto_reply(ticket_id: str, reply: dict) -> str | None:
+    """Put back the status Zoho's reply workflow overwrote for an
+    out-of-office. Returns the restored status, or None if nothing changed.
+
+    #9526 (2026-10-20): our answer closed the ticket, Allie's out-of-office
+    arrived 10 seconds later, the workflow flipped Closed -> Processing, and
+    the ticket sat there looking owed for days. Only the newest status change
+    is undone, and only when a workflow made it, to Processing, around the
+    time of the auto-reply: a status a person set since is never overridden.
+    """
+    from datetime import timedelta
+    from zoho_desk_api import status_history
+
+    changes = status_history(ticket_id)
+    if not changes:
+        print(f"[NO-ACTION] OOO on ticket {ticket_id}: no status history "
+              "read -- status left as is")
+        return None
+    newest = changes[0]
+    replied = _zoho_time(reply.get("createdTime") or "")
+    changed = _zoho_time(newest["time"])
+    by_reply_workflow = (
+        newest["actor_type"].lower() == "workflow"
+        and newest["to"].lower() == ZOHO_PROCESSING.lower()
+        and replied is not None and changed is not None
+        and changed >= replied - timedelta(
+            seconds=AUTO_REPLY_WORKFLOW_SKEW_SECONDS)
+    )
+    if not by_reply_workflow or not newest["from"] \
+            or newest["from"].lower() == newest["to"].lower():
+        print(f"[NO-ACTION] OOO on ticket {ticket_id}: newest status change "
+              f"({newest['actor']}: {newest['from']} -> {newest['to']}) is "
+              "not the reply workflow -- status left as is")
+        return None
+    if not _set_zoho_ticket_status(ticket_id, newest["from"]):
+        return None
+    print(f"[NO-ACTION] OOO on ticket {ticket_id}: status restored "
+          f"{newest['to']} -> {newest['from']}")
+    return newest["from"]
+
+
+def _restore_status_after_auto_reply_later(ticket_id: str, reply: dict) -> None:
+    """_restore_status_after_auto_reply once Zoho's workflow has run. The
+    webhook handler runs inline, so this never sleeps on it."""
+    import threading
+
+    def _run():
+        try:
+            _restore_status_after_auto_reply(ticket_id, reply)
+        except Exception as exc:
+            print(f"[NO-ACTION] OOO status restore failed on ticket "
+                  f"{ticket_id}: {exc}")
+
+    timer = threading.Timer(AUTO_REPLY_SETTLE_SECONDS, _run)
+    timer.daemon = True
+    timer.start()
 
 
 def _classify_no_action_reply(reply_content: str) -> bool:
@@ -2047,12 +2199,14 @@ def process_ticket_update(ticket_id: str) -> str | None:
         # without the fallback every classifier below would judge empty text.
         reply_content_clean = _extract_reply_text(latest)
 
-        # OOO / autoresponder guard -- never treat an out-of-office as a reply.
+        # OOO / autoresponder guard -- never treat an out-of-office as a reply,
+        # and undo the Processing flip Zoho's reply workflow made for it.
         if _looks_like_auto_reply(reply_content_clean):
             print(
                 f"[NO-ACTION] OOO/autoresponder on ticket {ticket_id}"
-                " -- not treating as a reply"
+                " -- not treating as a reply, restoring its status"
             )
+            _restore_status_after_auto_reply_later(ticket_id, latest)
             return None
 
         # NO-ACTION fast path. A pure courtesy ack needs no response: realign

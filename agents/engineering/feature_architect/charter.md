@@ -58,7 +58,10 @@ each `n` from `previous_items`.
 
 `analysis`: three sentences at most, file paths allowed. `shape`: the pattern's name. For agent_build,
 `build.plan` says exactly what changes in each file, `build.anchors` are
-one to three `path:line` on development where the edits go, and
+one to six `path:line` on development, in at most three files, one at
+every place an edit goes (the builder sees only about 100 lines either
+side of each, so a new helper and each call site of it get their own
+anchor, even in the same file), and
 `build.contract` is what the frontend receives. A truncated answer is
 thrown away whole, so be brief.
 

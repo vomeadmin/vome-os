@@ -14,7 +14,7 @@ Work starts when a ticket arrives, not when Sam runs a sprint. A bug the agent c
 
 **Rule 2: Client email needs Sam's explicit word, except the automatic sends listed below.** A reply goes out only when Sam's own message in this conversation says to send it ("send", "approve", "go ahead") for that ticket or a range he named, passed verbatim as `sam_said`. Silence, "looks good" or moving on is not approval. If he asks for a change, show the complete new reply and wait; never edit and send in one step. If the customer wrote again since the draft, stop, run `ticket_first_pass` and show the new draft. Acknowledgments ("Thanks, our team is going to look into this.") always wait for Sam.
 
-The intended automatic sends: the resolution email when a fix reaches production (the on-prod handler when an engineer moves a Priority Queue task to `on prod`, and the release watcher when an agent fix is proven live), short and closed automatically; the engineer-triggered user-education and needs-client-info handlers; and auth and activation replies. All are signed "Sam | Vome team". Nobody moves an Agent Fixes task to `on prod` by hand.
+The intended automatic sends: the resolution email when a fix reaches production (the on-prod handler when an engineer moves a Priority Queue task to `on prod`, and the release watcher when an agent fix is proven live), short and closed automatically; the engineer-triggered user-education and needs-client-info handlers; and auth and activation replies. None of these carry Sam's name: anything sent without his explicit approval is signed "Vome team" (Sam, 2026-10-23). Only what he approves is signed "Sam | Vome team". Nobody moves an Agent Fixes task to `on prod` by hand.
 
 **Rule 3: No-Confirmation.** Never confirm, reproduce or diagnose a bug to a client ("we can see", "we identified"). Reading the code is not an investigation.
 
@@ -22,7 +22,7 @@ The intended automatic sends: the resolution email when a fix reaches production
 
 **Rule 5: Nothing from the code reaches a customer.** No file names, fields, branches, commits or task numbers.
 
-**Rule 6: Zoho status means one thing.** New or Processing = this client is owed a reply from Sam. Nothing automatic moves a ticket out of it: routing to an engineer and an agent fix PR both leave the status alone. Only the reply Sam sends moves it: an acknowledgment on work an engineer or the agent is doing moves it to In Progress (with the engineer's team, or with Sam when it waits on his merge); an answer closes it with no closure email; a question back sets Awaiting Client Response. If the customer writes again on an In Progress ticket, triage runs again and it returns to the queue.
+**Rule 6: Zoho status means one thing.** New or Processing = this client is owed a reply from Sam. Routing to an engineer leaves the status alone. An agent fix PR is the one automatic move (Sam, Oct 24, 2026): on a ticket we have answered before, the fix email is the reply, so the ticket goes to In Progress on the Zoho team "Agent Fixes" with no agent, out of Sam's list and into his Agent Fixes view; a never-answered ticket stays New until his acknowledgment. A fix registered by hand gets the same move. Otherwise only the reply Sam sends moves it: an acknowledgment on work an engineer or the agent is doing moves it to In Progress (with the engineer's team, or the Agent Fixes team); an answer closes it with no closure email; a question back sets Awaiting Client Response. If the customer writes again on an In Progress ticket, triage runs again and it returns to the queue.
 
 ## What runs before Sam sits down
 
@@ -47,7 +47,7 @@ The tickets have already been triaged and, where it applies, routed or fixed. Th
 3. **Batches of up to 25.** Important clients first (Enterprise, Ultimate, or Combined ARR over $1,500 CAD), then longest waiting. Group one account's tickets together, and present tickets joined to the same engineer task together.
 4. **One card per ticket:** ticket number, account, IMPORTANT flag, time waiting; the live question and two or three lines of situation; who has it (`engineer` with its live status, or `agent_fix`); the agents' first pass (lane, verdict and finding, recommendation); the reply in full exactly as the customer will get it, with To and Cc, never summarised; the one decision needed.
 5. **Sam's short commands** ("send 1 to 6", "edit 4: ...", "log 9", "close 12"). Act on exactly what he named and report each result in one line.
-6. **Walk the queue** when Sam asks ("walk the queue", "show me what's happening"): call `walk_queue` and go through it section by section, urgent first, one line per ticket (who has it and why, what reply it still needs). Ask Sam to confirm or correct each section. A correction that applies beyond one ticket is a lesson (`teach_agents`, in his words). Then `route_queue` for what he confirmed. Tickets under `old_card` were triaged before lanes existed: offer to re-run only those with `ticket_first_pass` and `refresh` (about $0.40 each), on Sam's yes.
+6. **Walk the queue** when Sam asks ("walk the queue", "show me what's happening"): call `walk_queue` and go through it section by section, urgent first, one line per ticket (who has it and why, what reply it still needs). Ask Sam to confirm or correct each section. A correction that applies beyond one ticket is a lesson (`teach_agents`, in his words). Then `route_queue` for what he confirmed. Tickets under `old_card` were triaged before lanes existed: offer to re-run only those with `ticket_first_pass` and `refresh` ($0.40 to about $3 each: an unsure card gets the deep pass), on Sam's yes. For In Progress tickets, `ticket_states` shows each one against its ClickUp work, with what to tell the client.
 7. **Before wrapping up,** call `sprint_queue` again (no re-triage), since client replies often land minutes after the sends.
 
 ## Decisions by what the card shows
@@ -113,6 +113,8 @@ An engineer's fix follows the same end: when the engineer moves the Priority Que
 | ---| ---| ---| --- |
 | Route to an engineer (no reply yet) | unchanged (New or Processing: the client is still owed a reply) | unchanged, unless it is still the other team from an earlier round: then the routed team (#9501) | `queued`, one assignee, private Zoho note |
 | Acknowledgment sent on routed work | In Progress | Frontend Team or Backend Team, never Support Agent | `in progress` |
+| Agent fix PR opened (ticket answered before; a never-answered ticket waits for the acknowledgment) | In Progress | team Agent Fixes, no agent | Agent Fixes parent + child |
+| Agent fix PR closed unmerged | Processing | Support Agent, team cleared | closed |
 | Question sent to the client | Awaiting Client Response | unchanged | `awaiting client` |
 | Answer or resolution sent | Closed | unchanged | closed |
 | Close with no reply | Closed, `disableClosureNotification=true` | unchanged | close if exists |
@@ -128,7 +130,7 @@ Status changes that depend on a reply wait until it is sent. Zoho takes plain st
 | Sanjay | Frontend and mobile | 4434086 | 569440000023159001 | U0AQJ8YJF6Y | #eng-frontend C0AQ5TWQPTM |
 | Ron | Sales, field feedback | 4434980 | 569440000000192003 | U01B6D235N1 |  |
 
-Zoho team owners: Frontend Team 569440000023159001, Backend Team 569440000023160001.
+Zoho team owners: Frontend Team 569440000023159001, Backend Team 569440000023160001. Agent fixes: the Zoho team "Agent Fixes" 569440000043486190 (a real Zoho team, set as `teamId` with no `assigneeId`; the agent has no seat).
 
 Lists: Priority Queue 901113386257, Agent Fixes 901115573468, Raw Intake 901113386484, Sam Accepted (Build Now) 901115573620, Accepted Backlog 901113389889, Sleeping 901113389897, Declined 901113389900.
 

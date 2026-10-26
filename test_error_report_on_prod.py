@@ -121,6 +121,10 @@ def _install_spies(monkeypatch, ticket_fields):
             "last_team_reply": "",
         },
     )
+    monkeypatch.setattr(
+        on_prod_handler.resolution_scope, "check",
+        lambda *a, **k: {"complete": True, "open": [], "reason": ""},
+    )
     return calls
 
 

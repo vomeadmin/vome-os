@@ -21,6 +21,9 @@ FLOW
       2. context: thread, images, CRM tier, existing work, help centre,
          and the release state of any Agent Fixes task for this ticket
       3. triage director (senior, sees the images)  -> the card
+      3b. triage investigator (deep_triage.py) when that card is unsure,
+         the lane spends someone's time, or the client is important: it
+         re-checks the card with a full budget and its card replaces it
       4. incident matcher (fast) against the last 24h and Sentry
       5. reply drafter (standard, every outbound guard)  -> the draft
       6. numbered item in sprint_store, card posted in the day's thread
@@ -297,6 +300,51 @@ def _drop_known_different(incident: dict, release: dict) -> dict:
     return {**incident, "same_as": keep}
 
 
+def module_of(where: str) -> str:
+    """The area a code check points at, from its `repo:path:line`.
+
+    A Django app for the backend ("core:sequence_app"), the view area for
+    the web app ("web:src/views/org/dashboard"). "" when there is no path.
+    """
+    parts = (where or "").strip().split(":")
+    if len(parts) < 2 or not parts[1].strip():
+        return ""
+    segments = [s for s in parts[1].strip().split("/") if s]
+    depth = 4 if segments and segments[0] == "src" else 1
+    return f"{parts[0].strip()}:{'/'.join(segments[:depth])}"
+
+
+def _drop_other_modules(incident: dict, card: dict) -> dict:
+    """Remove tickets whose code check points at a different module.
+
+    The matcher joined #9501 (deleting sequence fields, core sequence_app)
+    to #9608 (the recruitment workflow builder, web) at high confidence on
+    Oct 21 and sent it to the wrong engineer, though lesson L23 already
+    told it never to pair across modules. A lesson the model keeps missing
+    becomes a check: when both cards name a location and the modules
+    differ, they are not the same problem. Without both, the matcher's
+    call stands.
+    """
+    if not incident or not incident.get("same_as"):
+        return incident
+    mine = module_of((card.get("code_check") or {}).get("where") or "")
+    if not mine:
+        return incident
+    different = set()
+    for other in sprint_store.by_ticket_numbers(incident["same_as"]):
+        theirs = module_of(((other.get("card") or {}).get("code_check")
+                            or {}).get("where") or "")
+        if theirs and theirs != mine:
+            print(f"[SHADOW] not joining #{other.get('ticket_number')}: "
+                  f"{theirs} is not {mine}")
+            different.add(str(other.get("ticket_number")))
+    # A number with no stored card is kept: nothing says it differs.
+    keep = [n for n in incident["same_as"] if str(n) not in different]
+    if not keep and not incident.get("sentry_issue"):
+        return {}
+    return {**incident, "same_as": keep}
+
+
 # ---------------------------------------------------------------------------
 # Drafting
 # ---------------------------------------------------------------------------
@@ -413,8 +461,12 @@ def _auto_reply(ticket_id: str) -> bool:
 
 def _handle(ticket_id: str, reason: str, force: bool = False,
             release: dict | None = None, ignore_cap: bool = False,
-            refresh: bool = False) -> dict:
+            refresh: bool = False, auto_route: bool = True) -> dict:
     """`release` is the release state when the caller already knows it.
+
+    `auto_route=False` (the nightly reconciler) leaves the card for Sam
+    instead of filing an engineer task: a months-old ticket whose task was
+    closed is his call to send back, not a new task by itself.
 
     The release watcher passes the fix it just proved live, so a second
     ClickUp lookup cannot lose it: in the 2026-10-17 rehearsal a throttled
@@ -471,6 +523,12 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
         arr = 0.0
     context.pop("_ticket_id", None)
 
+    # A caller that hands us the release is drafting the resolution for a
+    # fix already proven live (release_resolutions, shipped_untold). There
+    # is nothing left to fix on that run: #9501's Oct 20 resolution card sent
+    # the shipped fix back to the fix author, and the decline spent the
+    # ticket's attempt before the customer wrote back.
+    resolution_run = release is not None
     release = release or release_state(ticket_number, ticket_id)
     if release.get("task_id"):
         context["existing_tasks"] = (
@@ -490,6 +548,20 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
     else:
         card = result.data or {}
 
+    # An unsure card gets the senior look before anything acts on it: the
+    # draft, the fix ladder and the route below all follow the card, and a
+    # wrong one sent work to an engineer that an answer would have settled
+    # (deep_triage.py, Sam 2026-10-23). A resolution run has nothing left
+    # to investigate.
+    if not resolution_run:
+        import deep_triage
+
+        card = deep_triage.deepen(
+            context, card, images, ticket_id=ticket_id,
+            ticket_number=ticket_number, arr=arr, first_result=result,
+            previous=(existing or {}).get("card"),
+            previous_at=(existing or {}).get("updated_at"))
+
     from error_reports import is_error_report
 
     when = sprint_store._now().strftime("%Y-%m-%d %H:%M UTC")
@@ -498,6 +570,7 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
         incident = match_incident(ticket_number, context.get("account", ""),
                                   card, when)
         incident = _drop_known_different(incident, release)
+        incident = _drop_other_modules(incident, card)
     except Exception as exc:
         print(f"[SHADOW] incident check failed on {ticket_number}: {exc}")
 
@@ -548,7 +621,11 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
         card={**card, "incident": {
             "same_as": incident.get("same_as") or [],
             "sentry_issue": incident.get("sentry_issue") or "",
-            "symptom": incident.get("symptom") or ""}},
+            "symptom": incident.get("symptom") or ""},
+            # Triaged on purpose although the ticket is In Progress or
+            # Awaiting Client Response: the sprint keeps it until answered
+            # (sprint_batch._handled).
+            **({"reconciled": True} if reason == "reconcile" else {})},
         draft=draft["text"],
         draft_status=draft["status"],
         draft_why=draft["why"],
@@ -565,10 +642,14 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
     import ticket_fix
     import zoho_actions as _za
 
-    fix = ticket_fix.propose_for_ticket(
-        ticket_id, ticket_number, context.get("account", ""), card,
-        _za.ticket_url(ticket_id),
-    )
+    if resolution_run:
+        fix = {"outcome": "skipped", "pr_url": "",
+               "reason": "resolution run: this ticket's fix is already live"}
+    else:
+        fix = ticket_fix.propose_for_ticket(
+            ticket_id, ticket_number, context.get("account", ""), card,
+            _za.ticket_url(ticket_id), thread_id=thread_id,
+        )
     if fix.get("pr_url"):
         sprint_store.set_fix_pr(item["id"], fix["pr_url"])
         item["fix_pr"] = fix["pr_url"]
@@ -580,7 +661,8 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
     import ticket_routing
 
     routed = {}
-    if not release.get("task_id") and not is_error_report(subject):
+    if (auto_route and not release.get("task_id")
+            and not is_error_report(subject)):
         routed = ticket_routing.route(item, card, fix, incident, arr)
     if fix.get("pr_url"):
         ticket_routing.flag_urgent_fix(item, card, fix["pr_url"], incident,

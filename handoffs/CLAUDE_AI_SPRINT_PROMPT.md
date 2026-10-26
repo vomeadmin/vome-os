@@ -68,13 +68,17 @@ You see all of it through the Vome OS connector.
 
 ## Zoho status means one thing
 
-**New or Processing = this client is owed a reply from Sam.** Nothing the
-agents do on their own moves a ticket out of it: routing to an engineer and
-an agent fix PR both leave the status alone. The status changes only when
-the client has been told, by the reply Sam sends from the sprint:
+**New or Processing = this client is owed a reply from Sam.** Routing to an
+engineer leaves the status alone. An agent fix PR is the one exception
+(Sam, 2026-10-24): on a ticket we have answered before, the fix email is the
+reply, so the PR moves it straight to In Progress on the Zoho team "Agent
+Fixes" with no agent (Sam's Agent Fixes view, beside Backend and Frontend).
+A never-answered ticket stays New until Sam's acknowledgment. Otherwise the
+status changes only when the client has been told, by the reply Sam sends
+from the sprint:
 - an acknowledgment on a ticket an engineer or the agent is fixing: In
-  Progress (with the engineer's team, or with Sam when it waits on his
-  merge). The client hears again automatically when the fix ships.
+  Progress (with the engineer's team, or the Agent Fixes team). The client
+  hears again automatically when the fix ships.
 - an answer: Closed with no closure email. A question back: Awaiting Client
   Response.
 So every routed bug still shows up as New or Processing, still needs the
@@ -97,6 +101,19 @@ to the queue.
   happening to it now (urgent, will route, with an engineer, agent fixing,
   your call, answer, close quietly, not triaged). Runs no agent and costs
   nothing. Use it to watch the system work, and to catch wrong calls.
+- `ticket_states(state)`: every Zoho ticket at In Progress against its
+  ClickUp work, from the nightly reconcile: fixed (live or on dev),
+  shipped, our team is on it, stalled 14+ days (engineer nudged),
+  unassigned, task closed, or fell through. Each state comes with the line
+  to tell the client. Use it whenever Sam asks where an In Progress ticket
+  stands, and in a sprint to say "our team is on it" or "it's fixed" with
+  a record behind it.
+- `triage_cost(days)`: what triage cost (first pass plus deep pass), how
+  often the deep pass ran and corrected the first card, and the monthly
+  and yearly forecast at that rate.
+- A card's `deep_pass` says whether the senior second look ran, what it
+  changed in the first card and why. When Sam disagrees with a card that
+  the deep pass already checked, that is a strong lesson: ask for the rule.
 - `ticket_first_pass(ticket, refresh)`: the full card and draft for one
   ticket. It re-runs the triage director by itself when the card is missing
   or older than the customer's latest message; `refresh` forces a re-run
@@ -164,6 +181,11 @@ When Sam says "let's run a sprint" (or similar):
      IMPORTANT`). Sam decides how hard to check an item by who it is for,
      so never drop or shorten the client or the person. If the client
      reads as an email or "unknown account", say so in the card.
+   - **second line, always: the item's `links` exactly as given**
+     (`[Zoho #N](..) | [ClickUp](..) in <list>, <status>, assigned
+     <who>`), so Sam can open the ticket and the task in one click and
+     see which list the work sits in now. "no ClickUp task" and "could
+     not be read" are different; keep the words as given.
    - the live question, and two or three lines of situation
    - the agents' first pass: lane, code check verdict and finding, any fix
      PR, the recommendation

@@ -49,13 +49,14 @@ from status_constants import (
     THREAD_ON_PROD_PENDING,
     THREAD_ON_PROD_SENT,
 )
-from signatures import signature, sign_message
+from signatures import AUTO_SENDER, signature, sign_message
 from error_reports import is_error_report
 from outbound_guard import (
     guard_failure_notice,
     validate_client_message,
 )
 from model_config import SUPPORT_MODEL
+import resolution_scope
 from zoho_links import extract_zoho_ticket_id
 
 ZOHO_FROM_ADDRESS = os.environ.get(
@@ -219,9 +220,10 @@ def _generate_resolution_draft(
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_message}],
     )
-    # Signed "Sam | Vome team", the one identity customers see (playbook
-    # Rule 2; "Vic" signatures were flagged in three sprint logs).
-    return sign_message(response.content[0].text.strip(), "sam", language)
+    # Sent without Sam's approval, so signed "Vome team", never with his
+    # name (Sam, 2026-10-23).
+    return sign_message(response.content[0].text.strip(), AUTO_SENDER,
+                        language)
 
 
 # ---------------------------------------------------------------------------
@@ -907,8 +909,31 @@ def handle_on_prod(task_id: str, engineer_name: str) -> bool:
         )
         return True
 
+    # Step 3c - is everything the client raised fixed, or only this task?
+    # Clients told us we wrote "fixed" when one of two related problems had
+    # shipped (Sam, 2026-10-23). When something is still open, nothing is
+    # emailed or closed: the draft goes to Slack with the reason, and the
+    # last fix to ship sends the email. Checked before the "already told"
+    # review, which would otherwise close a ticket that still has open work.
+    number = re.search(r"#(\d{3,6})", task_title)
+    scope = resolution_scope.check(
+        zoho_ticket_id, number.group(1) if number else "",
+        [{"id": task_id, "name": task_title}], thread=conversations_text,
+    )
+    print(
+        f"[ON PROD] Scope check - ticket {zoho_ticket_id}:"
+        f" complete={scope['complete']} reason={scope['reason']}"
+    )
+    scope_notice = "" if scope["complete"] else (
+        ":hourglass: *Held, nothing emailed and nothing closed.* "
+        f"{scope['reason'][:600]}. The client hears \"fixed\" once, when "
+        "every problem they raised is fixed. Send this only if you judge it "
+        "covers everything; otherwise the last fix to ship sends it."
+    )
+
     # Step 4 — set Zoho ticket status to Final Review
-    _set_zoho_status_final_review(zoho_ticket_id)
+    if scope["complete"]:
+        _set_zoho_status_final_review(zoho_ticket_id)
 
     # Step 5 — determine client language from thread_map
     language = None
@@ -929,7 +954,7 @@ def handle_on_prod(task_id: str, engineer_name: str) -> bool:
         f" reason={assessment['reason']}"
     )
 
-    if assessment["recommendation"] == "skip":
+    if assessment["recommendation"] == "skip" and scope["complete"]:
         _set_zoho_status_closed(zoho_ticket_id)
         update_clickup_status_finished(task_id)
         _notify_closed_no_send(
@@ -961,7 +986,7 @@ def handle_on_prod(task_id: str, engineer_name: str) -> bool:
         draft = (
             f"Hi {first_name}, the issue you reported has been resolved "
             "and the fix is now live. Let us know if anything else comes up.\n"
-            + signature("sam")
+            + signature(AUTO_SENDER)
         )
 
     # Step 6b - outbound guard. Deterministic check that the draft is a
@@ -977,6 +1002,7 @@ def handle_on_prod(task_id: str, engineer_name: str) -> bool:
     guard_notice = "" if guard["ok"] else guard_failure_notice(
         "on_prod", guard
     )
+    guard_notice = "\n\n".join(n for n in (scope_notice, guard_notice) if n)
 
     # Step 7 — AUTO-SEND the resolution to the client (signed Vic), then
     # close the ticket on Zoho and the task on ClickUp.
@@ -985,6 +1011,7 @@ def handle_on_prod(task_id: str, engineer_name: str) -> bool:
 
     can_send = (
         guard["ok"]
+        and scope["complete"]
         and bool(contact_email)
         and bool(draft)
         and len(draft.strip()) >= 20

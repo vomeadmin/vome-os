@@ -17,7 +17,7 @@ max_tokens = 5000
 
 [job]
 charter = "charter.md"
-skills = ["shaping-a-backend-change", "checking-for-existing-work"]
+skills = ["shaping-a-backend-change", "checking-for-existing-work", "working-on-the-shift-list"]
 # Read-only code access on production and the dev branches. The output is an
 # internal note in Slack and ClickUp, never a customer message.
 tools = ["search_code", "read_code_file", "recent_commits"]

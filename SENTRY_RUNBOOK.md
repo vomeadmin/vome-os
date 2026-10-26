@@ -169,7 +169,7 @@ writable, so empty means nothing.
 
 The analyst reads the branch that produced the traceback, because that is the
 code which ran. The pull request does not go there. Every fix targets the
-integration branch for its repository, so a production bug in `prod-vome` is
+integration branch for its repository, so a production bug in `django-core-prod` is
 diagnosed against `master` and proposed against `development`.
 
 | Repo | Error read from | PR opens against |
@@ -234,7 +234,7 @@ everything. `gate_drops_by_rule` says which rule.
 
 **3. Nothing new is not the same as nothing happening.** `issue.created`
 fires once per group, ever. An existing issue recurring does not fire it. A
-quiet day is normal; prod-vome produces about three new issues a day.
+quiet day is normal; django-core-prod produces about three new issues a day.
 
 **4. Did you just widen the allowlist?** Widening affects new issues only.
 Run the re-gate sweep to release the backlog:
@@ -273,7 +273,7 @@ performance transactions whether or not anything breaks, so:
 - zero errors AND zero spans: the SDK is dormant. Nothing is arriving.
 
 ```
-search_events(projectSlug='prod-vome-web', dataset='spans', period='7d')
+search_events(projectSlug='vome-react-prod', dataset='spans', period='7d')
 ```
 
 For a Create React App build like vome-react, the usual cause is the DSN.

@@ -496,13 +496,17 @@ def fix_abandoned(pr_url: str) -> list[dict]:
     return [_decode(r) for r in rows]
 
 
-def record_sent(item_id: int, text: str) -> None:
-    """What actually went to the customer, and whether it was the agent's."""
+def record_sent(item_id: int, text: str, compared: str | None = None) -> None:
+    """What actually went to the customer, and whether it was the agent's.
+
+    `compared`: the text to measure against the agent's draft, when the
+    sent text differs only by the automatic "Vome team" signature."""
     store.execute(
         f"UPDATE {ITEMS} SET sent_text = :t, sent_at = :now,"
-        " sent_unedited = (COALESCE(original_draft, '') = :t)"
+        " sent_unedited = (COALESCE(original_draft, '') = :c)"
         " WHERE id = :i",
-        {"t": text, "i": item_id, "now": _now()},
+        {"t": text, "c": text if compared is None else compared,
+         "i": item_id, "now": _now()},
     )
 
 

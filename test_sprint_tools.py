@@ -88,7 +88,7 @@ def test_a_send_needs_sams_own_words(sam, one):
 def test_send_uses_the_one_guarded_send_path(sam, one, monkeypatch):
     sent = []
     monkeypatch.setattr(sprint_thread, "_send",
-                        lambda item: sent.append(item["id"])
+                        lambda item, sam_wrote=False: sent.append(item["id"])
                         or "*4.* sent to ana@ms.org.")
     out = sprint_tools.send_ticket_reply("9604", "yes send it", SAM)
     assert sent == [104] and out["sent"] is True
@@ -108,7 +108,8 @@ def test_an_edited_reply_is_guarded_and_teaches(sam, one, monkeypatch):
                         lambda item, b, a, said: learned.append(a) or
                         "\n:brain: Learned L2")
     monkeypatch.setattr(sprint_thread, "_send",
-                        lambda item: f"sent to x with {item['draft'][:8]}")
+                        lambda item, sam_wrote=False:
+                        f"sent to x with {item['draft'][:8]}")
     out = sprint_tools.send_ticket_reply(
         "9604", "send this instead", SAM, text="Use the People tab.")
     assert stored[0].startswith("Hi Ana,") and "Sam | Vome team" in stored[0]
@@ -124,7 +125,8 @@ def test_an_edit_a_guard_blocks_is_not_sent(sam, one, monkeypatch):
     monkeypatch.setattr(sprint_store, "set_draft", lambda *a, **k: None)
     monkeypatch.setattr(sprint_thread, "_learn", lambda *a: "")
     sent = []
-    monkeypatch.setattr(sprint_thread, "_send", lambda i: sent.append(i))
+    monkeypatch.setattr(sprint_thread, "_send",
+                        lambda i, sam_wrote=False: sent.append(i))
     with pytest.raises(RequestError, match="held by a guard"):
         sprint_tools.send_ticket_reply("9604", "send", SAM,
                                        text="We fixed it.")
@@ -318,7 +320,30 @@ def test_the_engineer_summary_carries_the_code_check():
 # The queue and the follow-ups
 # ---------------------------------------------------------------------------
 
-def test_queue_groups_like_the_sprint(monkeypatch):
+@pytest.fixture
+def zoho(monkeypatch):
+    """Zoho as the reconcile reads it: status per ticket, and the newest
+    (inbound, outbound) per ticket. Unknown tickets are Processing with
+    nothing sent."""
+    import zoho_actions
+
+    class Z:
+        status: dict = {}
+        threads: dict = {}
+        decided: list = []
+
+    Z.status, Z.threads, Z.decided = {}, {}, []
+    monkeypatch.setattr(zoho_actions, "ticket_status",
+                        lambda t: Z.status.get(t, "Processing"))
+    monkeypatch.setattr(zoho_actions, "last_exchange",
+                        lambda t, skip=None: Z.threads.get(
+                            t, ({}, {})))
+    monkeypatch.setattr(sprint_store, "decide",
+                        lambda i, s, d: Z.decided.append((i, s, d)))
+    return Z
+
+
+def test_queue_groups_like_the_sprint(monkeypatch, zoho):
     items = [_item(1), _item(2, draft="", draft_status="none",
                              category="needs_human",
                              card={"live_question": "q"}),
@@ -335,6 +360,41 @@ def test_queue_groups_like_the_sprint(monkeypatch):
     assert out["counts"]["quiet"] == 1
     assert out["ready_to_send"][0]["draft"] == DRAFT
     assert out["untriaged_open_tickets"] == 1
+
+
+def test_queue_never_lists_what_sam_answered_or_closed_in_zoho(
+        monkeypatch, zoho):
+    """2026-10-22: a Claude.ai sprint showed tickets Sam had already
+    answered and closed by hand (lesson L27)."""
+    items = [_item(1), _item(2), _item(3)]
+    zoho.threads["56940001"] = ({"createdTime": "2026-10-21T18:38:00Z"},
+                                {"createdTime": "2026-10-21T19:56:00Z"})
+    zoho.status["56940002"] = "Closed"
+    monkeypatch.setattr(sprint_store, "ready", lambda: True)
+    monkeypatch.setattr(sprint_store, "working_set", lambda: items)
+    monkeypatch.setattr(sprint_batch, "_queue",
+                        lambda pages=None: [{"id": "56940001"},
+                                            {"id": "56940003"}])
+    monkeypatch.setattr(store, "query", lambda *a, **k: [])
+    out = sprint_tools.sprint_queue()
+    listed = [i["item"] for i in out["ready_to_send"]]
+    assert listed == [3]
+    assert sorted(d[2] for d in zoho.decided) == [
+        "handled outside the sprint (Zoho: Closed)", sprint_batch.ANSWERED]
+
+
+def test_an_unreadable_queue_finishes_nothing(monkeypatch, zoho):
+    monkeypatch.setattr(sprint_store, "ready", lambda: True)
+    monkeypatch.setattr(sprint_store, "working_set", lambda: [_item(1)])
+
+    def boom(pages=None):
+        raise RuntimeError("Zoho 500")
+
+    monkeypatch.setattr(sprint_batch, "_queue", boom)
+    monkeypatch.setattr(store, "query", lambda *a, **k: [])
+    out = sprint_tools.sprint_queue()
+    assert zoho.decided == [] and out["counts"]["ready"] == 1
+    assert out["untriaged_open_tickets"].startswith("unknown")
 
 
 def test_production_owner():
@@ -389,7 +449,35 @@ def test_find_by_ticket_number(db):
     assert ticket_id == "569400009500" and found["id"] == item["id"]
 
 
-def test_followups_list_owed_replies_and_waiting_prs(db):
+def test_followups_drop_a_resolution_sam_answered_by_hand(db, monkeypatch):
+    import zoho_actions
+
+    _upsert("569400009436")
+    store.execute(
+        "INSERT INTO vomeos_release_resolutions (child_id, parent_id,"
+        " ticket_id, ticket_number, outcome, created_at) VALUES ('c1',"
+        " 'p1', '569400009436', '9436', 'drafted', '2026-10-20 12:00')")
+    monkeypatch.setattr(zoho_actions, "ticket_status",
+                        lambda t: "Processing")
+    exchange = ({"createdTime": "2026-10-19T10:00:00Z"},
+                {"createdTime": "2026-10-20T15:00:00Z"})
+    monkeypatch.setattr(zoho_actions, "last_exchange",
+                        lambda t, skip=None: exchange)
+    out = sprint_tools.sprint_followups()
+    assert out["replies_owed_for_shipped_work"] == []
+    row = store.query("SELECT outcome FROM vomeos_release_resolutions")[0]
+    assert row["outcome"] == "handled_by_hand"
+    assert sprint_store.by_ticket("569400009436")["status"] == \
+        sprint_store.DONE
+
+
+def test_followups_list_owed_replies_and_waiting_prs(db, monkeypatch):
+    import zoho_actions
+
+    monkeypatch.setattr(zoho_actions, "ticket_status",
+                        lambda t: "Processing")
+    monkeypatch.setattr(zoho_actions, "last_exchange",
+                        lambda t, skip=None: ({}, {}))
     owed = _upsert("569400009436")
     store.execute(
         "INSERT INTO vomeos_release_resolutions (child_id, parent_id,"
@@ -452,3 +540,62 @@ def test_view_header_without_recipient_still_names_the_client():
     view = sprint_tools.view(_item(recipients={}))
     assert view["contact"] == ""
     assert "Mustard Seed (Pro)" in view["header"]
+
+
+def _clickup(monkeypatch, linked=(), live=None):
+    import clickup_search
+    import ticket_routing
+
+    monkeypatch.setattr(clickup_search, "linked_tasks",
+                        lambda n, t: list(linked))
+    monkeypatch.setattr(ticket_routing, "task_state",
+                        lambda filed: (live or {}).get(
+                            filed["id"], {"status": "unreadable"}))
+
+
+def test_links_line_opens_zoho_and_clickup_and_names_the_list(monkeypatch):
+    # Sam (2026-10-24): every card should say where the task lives now
+    # (Sam Accepted (Build Now), Priority Queue...) with one click to the
+    # Zoho ticket and the ClickUp task.
+    _clickup(monkeypatch, live={"868mgyqdm": {
+        "status": "queued", "name": "Board: sort by opportunity",
+        "list": "Sam Accepted (Build Now)", "assignee": "Sam",
+        "url": "https://app.clickup.com/t/868mgyqdm"}})
+    view = sprint_tools.view(_item(card={
+        "live_question": "Sort the Board by opportunity",
+        "existing_work": "This is already logged on 868mgyqdm."}))
+    assert view["links"].startswith("[Zoho #9604](")
+    assert view["links"].endswith(
+        "| [ClickUp](https://app.clickup.com/t/868mgyqdm) in Sam Accepted "
+        "(Build Now), queued, assigned Sam")
+    assert view["clickup_tasks"][0]["list"] == "Sam Accepted (Build Now)"
+
+
+def test_links_line_lists_the_engineer_task_first_then_linked(monkeypatch):
+    _clickup(monkeypatch, linked=[{
+        "id": "86linked1", "name": "x", "list": "Raw Intake",
+        "status": "queued", "assignee": "",
+        "url": "https://app.clickup.com/t/86linked1"}], live={"86engtask": {
+            "status": "in progress", "list": "Priority Queue",
+            "assignee": "Ron", "url": "https://app.clickup.com/t/86engtask"}})
+    view = sprint_tools.view(_item(eng_task={
+        "id": "86engtask", "url": "https://app.clickup.com/t/86engtask"}))
+    first, second = view["links"].split(" | ")[1:]
+    assert first.endswith("in Priority Queue, in progress, assigned Ron")
+    assert second.endswith("in Raw Intake, queued, unassigned")
+
+
+def test_links_line_never_says_none_when_clickup_was_not_read(monkeypatch):
+    import clickup_search
+
+    _clickup(monkeypatch)
+
+    def down(n, t):
+        raise RuntimeError("429")
+
+    monkeypatch.setattr(clickup_search, "linked_tasks", down)
+    view = sprint_tools.view(_item())
+    assert "no ClickUp task" not in view["links"]
+    assert "could not be searched" in view["links"]
+    _clickup(monkeypatch)
+    assert sprint_tools.view(_item())["links"].endswith("| no ClickUp task")

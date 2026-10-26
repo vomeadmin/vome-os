@@ -14,7 +14,10 @@ for _k in ("ANTHROPIC_API_KEY", "SLACK_BOT_TOKEN", "CLICKUP_API_TOKEN",
            "ZOHO_ORG_ID", "ZOHO_FROM_ADDRESS", "DATABASE_URL"):
     os.environ.setdefault(_k, "test-dummy")
 
+import pytest  # noqa: E402
+
 import agent  # noqa: E402
+import zoho_actions  # noqa: E402
 from ops import zoho_sync  # noqa: E402
 
 PRIMARY = "admin.team@riverbend.org"
@@ -31,6 +34,11 @@ PORTAL_TICKET = {
     "contact": {"firstName": "Riverbend", "lastName": "Admin", "email": PRIMARY},
     "secondaryContacts": [SECONDARY_ID],
 }
+
+
+@pytest.fixture(autouse=True)
+def _no_thread_read(monkeypatch):
+    monkeypatch.setattr(zoho_actions, "ticket_teammates", lambda tid: [])
 
 
 def _contacts(monkeypatch, mapping):
@@ -116,3 +124,13 @@ def test_ops_send_explicit_empty_cc_skips_lookup(monkeypatch):
     )
     zoho_sync.send_zoho_reply("1", "Hi Nora,", PRIMARY, cc_email="")
     assert "cc" not in sent
+
+
+def test_a_teammate_the_client_wrote_to_is_copied(monkeypatch):
+    """#9610: Ron was on the client's To line. Fix emails and other agent
+    replies keep him, even though own addresses are dropped from cc."""
+    _contacts(monkeypatch, {SECONDARY_ID: SECONDARY})
+    monkeypatch.setattr(zoho_actions, "ticket_teammates",
+                        lambda tid: ["r.segev@vomevolunteer.com"])
+    fields = agent._extract_ticket_fields(PORTAL_TICKET)
+    assert fields["cc_email"] == f"{SECONDARY},r.segev@vomevolunteer.com"

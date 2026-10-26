@@ -13,7 +13,7 @@ To propose a change: edit a diagram or add a register row, set its status,
 and regenerate. A new AI session should read this file, `CLAUDE.md`, and the
 ClickUp handoff page (doc 3dztm-3311, page 3dztm-6351) before acting.
 
-**As of:** 2026-10-20
+**As of:** 2026-10-23
 
 ## Status key
 
@@ -34,8 +34,10 @@ flowchart TD
   B --> S["Shadow triage on the worker<br/>customer_success.shadow_triage"]:::deployed
   S --> S1["Thread + screenshots<br/>(inline images, attachments)"]:::deployed
   S --> S2["Existing work + release state<br/>(ticket no., account, symptom; Agent Fixes)"]:::deployed
-  S --> S3["Code check on the live branch<br/>(read-only tools, 10 calls)"]:::built
+  S --> S3["Code check on the live branch, 25 calls<br/>grep + find on full copies of all 6 repos, read_task"]:::built
   S1 & S2 & S3 --> T["Triage director (senior)<br/>card: category, live question, code check"]:::deployed
+  T -->|"unsure, engineer / sam_ops lane,<br/>or important client"| DP["Triage investigator (deep pass)<br/>60 calls, challenges the card; its card replaces it"]:::built
+  DP --> I
   T --> I["Incident matcher (fast)<br/>last 24h tickets + Sentry"]:::deployed
   I -->|high confidence| IA["Immediate mention to Sam<br/>in the day thread"]:::deployed
   T --> D["Reply drafter (standard)<br/>every outbound guard"]:::deployed
@@ -69,14 +71,16 @@ flowchart TD
   LIVE --> RD["Resolution draft per client,<br/>as a numbered card (retry on error)"]:::broken
   RD --> AUTO{"RELEASE_AUTO_SEND on?<br/>(off; never needs_human)"}:::decide
   AUTO -->|off| SEND["Sam says 'send N'<br/>in the thread"]:::deployed
-  AUTO -->|on, draft passed guards| AS["Sent automatically"]:::decide
+  AUTO -->|on, draft passed guards| SCOPE{"Every problem on the ticket fixed?<br/>(other tasks shipped + scope check)"}:::built
+  SCOPE -->|yes| AS["Sent automatically"]:::decide
+  SCOPE -->|no| HELD["Held for Sam with what is still open;<br/>the last fix to ship sends it"]:::built
   SEND & AS --> CLOSE["Zoho Closed (no closure email)<br/>child + parent Closed"]:::built
 ```
 
 <!-- map:diagram id=sentry title="3. A production error, from Sentry to a fix" -->
 ```mermaid
 flowchart TD
-  E1["Django core errors<br/>(prod-vome)"]:::live --> WH["Sentry issue.created webhook"]:::live
+  E1["Django core errors<br/>(django-core-prod)"]:::live --> WH["Sentry issue.created webhook"]:::live
   E2["vome-react errors<br/>(DSN not in the build: zero events)"]:::broken
   E3["Chats / integrations services<br/>(no Sentry at all)"]:::broken
   E4["Mobile app (VomeApp)<br/>(source unreadable, 403)"]:::broken
@@ -192,7 +196,9 @@ flowchart TD
 <!-- map:diagram id=featuredesk title="9. A request in #feature-requests, shaped before it is built (built 2026-10-19, switched off)" -->
 ```mermaid
 flowchart TD
-  P["Request posted in #feature-requests<br/>(Ron's backend handoff + ClickUp spec, demo notes, client asks)"]:::built --> ACK["'Analysing this' in the thread"]:::built
+  P["Request posted in #feature-requests<br/>(Ron's backend handoff + ClickUp spec, demo notes, client asks)"]:::built --> Q["Sam asked in the thread: analyse, or place it as is<br/>(recorded, no model call; others' replies wait, since 2026-10-25)"]:::built
+  Q -->|"Sam: log / build / route / leave / no"| PLACE
+  Q -->|"Sam: analyse (or go, or analyse + direction)"| ACK["'Analysing this' in the thread"]:::built
   ACK --> FA["Feature architect (premium) reads the code<br/>and the 14 extension patterns; one verdict per request"]:::built
   FA -->|agent_build: additive, no schema, core/database, 3 files| FX["Fix author + patch safety<br/>PR into development (cap 3/day)"]:::built
   FX --> AF["Agent Fixes task, linked to the requester's task<br/>Sam merges; release watcher takes it"]:::built
@@ -247,6 +253,19 @@ flowchart TD
   BU --> DL["Thread: phone link first, every format linked"]:::deployed
 ```
 
+<!-- map:diagram id=reconcile title="12. In Progress tickets, reconciled with ClickUp every night (built 2026-10-23)" -->
+```mermaid
+flowchart TD
+  Z["Every Zoho ticket at In Progress<br/>(71 on Oct 23, oldest Apr 30)"]:::built --> J["Joined to its Priority Queue task<br/>and Agent Fixes task (link field or #N in the name)"]:::built
+  J --> S{"One state per ticket"}:::built
+  S -->|fix_live / fix_on_dev| F["Fixed: release watcher owns the reply"]:::built
+  S -->|engineer_active| A["'Our team is on it'"]:::built
+  S -->|engineer_stalled, 14+ days| N["One ClickUp comment on the task<br/>(notifies the engineer, every 14 days at most)"]:::built
+  S -->|unassigned| U["Listed for Sam to assign or route"]:::built
+  S -->|"shipped, task_closed, no_task"| R["Fresh triage + deep pass (15 a night)<br/>reads the task notes, card + draft in the sprint"]:::built
+  F & A & N & U & R --> T["ticket_states in Claude.ai:<br/>each state with the line to tell the client"]:::built
+```
+
 ## Schedule (America/Montreal, run by Celery beat on `vome-os-worker`)
 
 | When | Job | Status |
@@ -262,12 +281,16 @@ flowchart TD
 | 10, 13, 16, 19 weekdays | `support.sprint_update` (retired Oct 18, replaced by batches) | built |
 | 9, 13, 17 weekdays; 11 Sat and Sun if needed | `support.sprint_batch` (+ `support.sprint_batch_weekend`) | deployed |
 | every 30 min | `support.queue_sweep` (G26) | deployed |
+| hourly :05 | `support.code_copies` (full copy of each repo at its live commit) | built |
+| 06:30 daily | `support.ticket_reconcile` (In Progress tickets vs ClickUp) | built |
 | 17:00 daily | `support.daily_digest` | live |
 | Mon 07:00, Fri 16:45 | engineering reports | live |
 | Mon 09:30 | `support.autonomy_report` | built |
 | Mon 09:00 | `support.kb_health_scan` | live |
 | Sun 03:00 | `support.knowledge_refresh` | live |
 | 1st Tue 09:00 | `support.kb_gap_pass` | live |
+| 07:45 daily | `engineering.dependency_scan` (new vulnerabilities into #eng-infra, silent otherwise) | built |
+| Wed 10:00 | `engineering.dependency_digest` (weekly vulnerability and end-of-life digest) | built |
 
 Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 `customer_success.sprint_command` (Sam's thread messages),
@@ -286,7 +309,7 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 | G4 | sentry | vome-react sends nothing to Sentry | broken | Frontend crashes reach us only as tickets | Put REACT_APP_SENTRY_DSN into the build (CRA inlines it at build time) | Sanjay |
 | G5 | sentry | Chats and integrations services have no Sentry | broken | Their errors are invisible | Add the SDK to both services | OnlyG |
 | G6 | code | Mobile source is unreadable (VomeApp 403) | deployed | Code checks cannot read the app | VomeApp moved to vomeadmin; all GitHub reads use `vome-os-sentry-write-web`, `mobile=` added to the default repo map. Live on push | Sam |
-| G7 | creds | vomeadmin GitHub token expires 2026-10-31 | broken | Release watcher web checks and web code reads stop | Renew, update VOMEOS_GITHUB_TOKEN_VOMEADMIN on worker and web | Sam |
+| G7 | creds | vomeadmin GitHub token expiry | live | The token reads and writes use (`vome-os-sentry-write-web`) expires 2027-10-22 and has pull request read and write (Sam checked 2026-10-23); the Oct 31 date was the older read-only token, which that one now outranks | Renew before 2027-10-22 | Sam |
 | G8 | data | content_mode email failures (Oct 15 20:11 to Oct 16 16:01 UTC) | broken | Some birthday, bulk and enrollment emails may not have sent | Confirm it stopped; count what failed; add db_default on new NOT NULL columns | OnlyG |
 | G9 | feature | Feature requests are not posted to #vome-feature-requests | built | Sam's single list of decisions misses them | Push; every log/build posts with client, tier/ARR and ticket | agent |
 | G10 | feature | No duplicate check before logging a feature request | built | Risk of duplicate backlog items | Push; `log N` stops on a possible duplicate, `log N to <task>` adds the client, `log N new` logs anyway | agent |
@@ -333,3 +356,10 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 | G54 | director | needs_human cards carry a holding reply | built | #9501 (7000 ARR) sat five days with no draft because the card said needs_human | Push; the draft stays under NEEDS YOUR DECISION (`send N`, never `send ready`) | agent |
 | G55 | code | Code checks cannot read production data | proposed | #9501 (which records hold a field) and #9587 (a role's stored setting) both ended on data the agent could not see | A read-only, institution-scoped lookup tool for triage | Sam |
 | G56 | bugreports | Every reply in a #bug-reports thread is read: a follow-up becomes its own report in the same thread, detail goes on the task, questions are answered, corrections become live lessons | built | Ron's "one more on this" (the sequence completion email sharing the fixed template, plus its own English-only text) came after the fix merged and was dropped as "chat on a finished report" | Push; agent `engineering.bug_thread_reader` (10/10 evals). Then Ron's 7:52 PM reply needs reposting (or a manual follow-up) since it arrived before this existed | Sam |
+| G57 | triage | First pass starved: 10 tool calls, 4500 tokens, exact-string search only | built | Oct 21 backlog sweep: 40 of 64 runs hit the cap, 46 of 79 cards "unclear", 71 of 79 medium confidence, 34 said what they had not read. Sam's Claude Code re-runs (same model) kept disagreeing | Push. Director now 25 calls, 12000 tokens, grep_code / find_files / read_task | agent |
+| G58 | triage | Deep pass: the triage investigator re-checks unsure, costly-lane and important-client cards before drafting, fixing or routing | built | The card decides the draft, the fix ladder and the engineer; a wrong one sent how-to questions to OnlyG and Sanjay | Push; watch `triage_cost` (corrected share, cost per ticket) for a week. DEEP_TRIAGE_DAILY_CAP (60) bounds spend | agent |
+| G59 | code | Full copies of every repo for grep (Bitbucket archive, GitHub tarball), refreshed hourly; chats and integrations added to the repo map | built | Bitbucket's index covers the default branch (core: development, not master); chats and integrations were unreadable, so chat tickets always ended out_of_repo. Proven Oct 23 with the worker's tokens on all six repos | Push; if VOMEOS_CODE_REPO_MAP or VOMEOS_CODE_REPOS is set on the worker, add chats and integrations there | Sam |
+| G60 | intake | In Progress tickets never looked at again | built | 71 In Progress on Oct 23, 35 silent 30+ days; #9188 closed in ClickUp, #7218 queued and unassigned since May | Push; `support.ticket_reconcile` 06:30 nightly, `ticket_states` in Claude.ai | agent |
+| G61 | learning | Sam's Claude Code disagreements become eval cases | built | The triage answer key was agent-written (G15); his corrections were the best signal and were kept nowhere | Push; `railway run -s vome-os-worker py triage_cases.py add --ticket N --expect ...` (cases live in vomeos_eval_cases, not git) | Sam |
+| G63 | security | Nobody was told when a dependency we run had a known vulnerability | built | Oct 24: a news article, not an alert, surfaced the critical Pillow flaw; Bitbucket has no Dependabot. `dependency_watch.py` reads every live lockfile against OSV.dev + CISA KEV + EPSS + endoflife.date (NVD, with a key, only fills severities OSV left blank; Claude only notes flagged results in the thread, code decides the tiers); first local run found CVE-2023-4863 (KEV) on Pillow 10.0.0 and Django 4.2 out of support everywhere | Push; set SLACK_CHANNEL_ENG_INFRA and DEPENDENCY_WATCH_RUNTIMES (optionally NVD_API_KEY) on vome-os-worker; the first 07:45 run posts one baseline digest | Sam |
+| G62 | release | No "fixed" email until every problem on the ticket is fixed | built | Clients told us we notified them too early: one of two related problems shipped and the email went (Sam, 2026-10-23). `resolution_scope.py` + `customer_success.resolution_scope_check` hold all three automatic paths (on prod, release watcher, shipped-untold) | Push; watch the first held cards in the day thread | Sam |

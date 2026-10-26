@@ -16,7 +16,7 @@ max_tokens = 4000
 
 [job]
 charter = "charter.md"
-skills = ["greenlighting-a-fix"]
+skills = ["greenlighting-a-fix", "working-on-the-shift-list"]
 # Read-only code access on the live branch, and on the integration and
 # reporter branches allowed by VOMEOS_CODE_EXTRA_BRANCHES. The output is an
 # internal note in Slack and ClickUp, never a customer message.

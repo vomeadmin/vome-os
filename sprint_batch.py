@@ -571,11 +571,17 @@ def render(batch_number: int, picked: dict, context: dict,
 # ---------------------------------------------------------------------------
 
 def _resolution_tickets() -> set:
+    return set(_pending_resolutions())
+
+
+def _pending_resolutions() -> dict:
+    """Ticket id -> when its resolution was drafted, for every resolution
+    still waiting on Sam."""
     rows = store.query(
-        "SELECT ticket_id FROM vomeos_release_resolutions"
+        "SELECT ticket_id, created_at FROM vomeos_release_resolutions"
         " WHERE outcome IN ('drafted', 'held', 'no_draft')"
     )
-    return {str(r["ticket_id"]) for r in rows}
+    return {str(r["ticket_id"]): r.get("created_at") for r in rows}
 
 
 def _release_context(since: datetime | None) -> dict:
@@ -825,9 +831,20 @@ def _needs_triage(ticket: dict, fresh_since: datetime | None) -> bool:
             and isinstance(updated, datetime) and updated < fresh_since)
 
 
+# A ticket can now take several minutes (deep_triage.py), so a loop stops
+# starting new tickets once this much of its job's time limit is used and
+# leaves the rest for the next sweep or round, rather than being killed
+# mid-ticket with its lease held.
+SWEEP_SECONDS = int(os.environ.get("SPRINT_SWEEP_SECONDS", "1800"))
+CLEAR_SECONDS = int(os.environ.get("SPRINT_CLEAR_SECONDS", "2400"))
+# Minutes a ticket is leased to one triage run: longer than a deep pass.
+TRIAGE_LEASE_MINUTES = 45
+
+
 def triage_untriaged(limit: int, ignore_cap: bool = False,
                      fresh_since: datetime | None = None,
-                     pages: int | None = None) -> dict:
+                     pages: int | None = None,
+                     seconds: int = 0) -> dict:
     """Triage open tickets silently, oldest activity first.
 
     Normally only tickets with no item. With `fresh_since` ("clear the queue
@@ -845,12 +862,17 @@ def triage_untriaged(limit: int, ignore_cap: bool = False,
         return {"status": "queue unreadable", "error": str(exc)}
     pending = [t for t in tickets if _needs_triage(t, fresh_since)]
     triaged = failed = 0
+    started = time.monotonic()
     for ticket in pending:
         if triaged >= limit:
             break
+        if seconds and time.monotonic() - started > seconds:
+            print(f"[BATCH] time budget of {seconds}s used; the rest waits "
+                  "for the next run")
+            break
         ticket_id = str(ticket.get("id"))
         if not _needs_triage(ticket, fresh_since) or \
-                not _lease(f"triage:{ticket_id}", 20):
+                not _lease(f"triage:{ticket_id}", TRIAGE_LEASE_MINUTES):
             continue
         try:
             outcome = shadow_triage._handle(
@@ -869,42 +891,212 @@ def triage_untriaged(limit: int, ignore_cap: bool = False,
 
 
 def run_queue_sweep() -> dict:
-    """Every 30 minutes: tickets a webhook missed, a few at a time."""
-    return triage_untriaged(SWEEP_CAP)
+    """Every 30 minutes: tickets a webhook missed, a few at a time, and
+    items handled outside the sprint since the last sweep."""
+    out = triage_untriaged(SWEEP_CAP, seconds=SWEEP_SECONDS)
+    try:
+        out["handled_elsewhere"] = reconcile_working_set()
+    except Exception as exc:
+        print(f"[BATCH] reconcile skipped: {exc}")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Handled outside the sprint
+# ---------------------------------------------------------------------------
+#
+# Sam answers and closes tickets in Zoho too. Until 2026-10-22 the only check
+# for that ran when a Slack batch posted, and batches were paused on Oct 18,
+# so the Claude.ai sprint kept showing tickets he had answered or closed by
+# hand (22 of them that day). It now runs from the Zoho webhook, the
+# 30-minute sweep and every sprint tool before it lists anything.
+
+RECONCILE_KEY = "customer_success.sprint_reconcile"
+ANSWERED = "handled outside the sprint (answered in Zoho)"
+# Our own fast paths answer within seconds of the customer (the activation
+# check told #9615 and #9622 "your account is already active" 5 and 8
+# seconds after they wrote). A person takes longer, so an outbound this
+# soon after the customer's message is not an answer.
+AUTO_REPLY_WINDOW = timedelta(seconds=60)
+
+
+def _out_of_office(thread: dict) -> bool:
+    from agent import _looks_like_auto_reply
+
+    return _looks_like_auto_reply(thread.get("summary") or "")
+
+
+def answered_in_zoho(ticket_id: str, since: datetime | None = None) -> bool:
+    """We wrote to the customer after their newest message, so nothing is
+    owed (lesson L27). An out-of-office arriving after our answer is not a
+    message (#9526 and #9112 on 2026-10-22). `since`: the answer must also
+    be newer than this. Raises when Zoho cannot be read."""
+    import zoho_actions
+
+    inbound, outbound = zoho_actions.last_exchange(ticket_id,
+                                                   skip=_out_of_office)
+    sent = _parse_time(outbound.get("createdTime"))
+    if sent is None or (since and sent < since):
+        return False
+    received = _parse_time(inbound.get("createdTime"))
+    return received is None or sent > received + AUTO_REPLY_WINDOW
+
+
+def _handled(item: dict, open_ids: set, pending: dict) -> str:
+    """Why this item no longer needs Sam, or ''. Never raises: a ticket
+    Zoho cannot answer for stays."""
+    import zoho_actions
+
+    ticket_id = str(item.get("ticket_id") or "")
+    # Taken off an engineer's plate by the backlog sweep, or triaged again
+    # by the reconcile (nightly, or a cleanup batch): the ticket is In
+    # Progress on purpose, and only an answer sent after it joined the
+    # sprint finishes it (an older acknowledgment does not). On Oct 25 this
+    # sweep finished 25 of 26 reconcile cards within the hour, drafts and
+    # all. A reconcile card that only waits on the client still finishes:
+    # there is nothing in it for Sam to send.
+    card = item.get("card") or {}
+    adopted = bool(card.get("backlog_sweep")) or (
+        bool(card.get("reconciled"))
+        and item.get("category") != "awaiting_client")
+    try:
+        status = ("Processing" if ticket_id in open_ids
+                  else zoho_actions.ticket_status(ticket_id))
+        if not status:
+            return ""
+        if status == "Closed":
+            return f"handled outside the sprint (Zoho: {status})"
+        if status not in ("New", "Processing") and not adopted:
+            # In Progress or Awaiting Client Response. A resolution waiting
+            # to be sent, or an agent fix PR, stays: those tickets sit In
+            # Progress while the fix is built, and the client is owed news.
+            if ticket_id in pending or item.get("fix_pr"):
+                return ""
+            return f"handled outside the sprint (Zoho: {status})"
+        # A resolution is answered only by something sent after it was
+        # drafted, not by the acknowledgment before the fix.
+        since = (_parse_time(item.get("updated_at")) if adopted
+                 else _parse_time(pending.get(ticket_id)))
+        if answered_in_zoho(ticket_id, since):
+            return ANSWERED
+    except Exception as exc:
+        print(f"[BATCH] {ticket_id} unreadable, kept: {exc}")
+    return ""
 
 
 def sync_handled_elsewhere(items: list[dict], open_ids: set) -> int:
-    """Finish items whose ticket was handled outside the sprint.
+    """Finish open and held items whose ticket was handled outside the
+    sprint: closed in Zoho, moved on to In Progress or Awaiting Client
+    Response, or answered after the customer's last message. Returns how
+    many finished.
 
-    Someone closed it in Zoho, or moved it to In Progress or Awaiting
-    Client Response: it no longer needs Sam here. The queue read only covers
-    recent tickets, so a ticket missing from it is asked about directly
-    before anything is finished. A resolution waiting to be sent, or a
-    ticket with an agent fix PR, stays: those tickets usually sit In
-    Progress while the fix is built, and the client is still owed a reply.
+    `open_ids` are tickets the queue read shows at New or Processing; any
+    other ticket is asked about directly, because the queue read only
+    covers recent tickets. Items the agent is fixing are left alone: the
+    release watcher brings them back when the fix is live.
+    """
+    import release_resolutions
+    from concurrent.futures import ThreadPoolExecutor
+
+    todo = [i for i in items
+            if i.get("status") in (sprint_store.OPEN, sprint_store.HELD)]
+    if not todo:
+        return 0
+    pending = _pending_resolutions()
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        reasons = list(pool.map(
+            lambda item: _handled(item, open_ids, pending), todo))
+    finished = 0
+    for item, why in zip(todo, reasons):
+        if not why:
+            continue
+        sprint_store.decide(item["id"], sprint_store.DONE, why)
+        item["status"] = sprint_store.DONE
+        item["decision"] = why
+        ticket_id = str(item.get("ticket_id") or "")
+        if ticket_id in pending:
+            release_resolutions.handled_elsewhere(ticket_id, why)
+        if why == ANSWERED:
+            _move_out_of_processing(item, ticket_id in open_ids)
+        finished += 1
+    return finished
+
+
+def _move_out_of_processing(item: dict, in_queue: bool) -> None:
+    """A ticket answered by hand in Zoho but left at New or Processing.
+
+    Processing means the customer wrote and we still owe them; once we have
+    written back that is false, and the queue kept listing the ticket as
+    owed (Sam, #9394, 2026-10-22). Same outcome as a sprint send, short of
+    closing: routed or agent-fixing goes to In Progress, anything else waits
+    for the customer. Closing stays a person's call. Any other status (a
+    backlog-sweep ticket already In Progress) is left alone. `in_queue`: the
+    queue read already showed it at New or Processing. Never raises.
     """
     import zoho_actions
 
-    keep = _resolution_tickets()
-    finished = 0
-    for item in items:
-        ticket_id = str(item.get("ticket_id") or "")
-        if (item.get("status") not in sprint_store.CARRIES
-                or ticket_id in open_ids or ticket_id in keep
-                or item.get("fix_pr")):
-            continue
-        try:
-            status = zoho_actions.ticket_status(ticket_id)
-        except Exception as exc:
-            print(f"[BATCH] status of {ticket_id} unreadable: {exc}")
-            continue
-        if not status or status in ("New", "Processing"):
-            continue
-        sprint_store.decide(item["id"], sprint_store.DONE,
-                            f"handled outside the sprint (Zoho: {status})")
-        item["status"] = sprint_store.DONE
-        finished += 1
-    return finished
+    ticket_id = str(item.get("ticket_id") or "")
+    filed = item.get("eng_task") or {}
+    try:
+        if not in_queue and zoho_actions.ticket_status(ticket_id) not in (
+                "New", "Processing"):
+            return
+        live = False
+        if filed.get("url") or item.get("fix_pr"):
+            import shadow_triage
+
+            live = bool(shadow_triage.release_state(
+                item.get("ticket_number") or "", ticket_id).get("live"))
+        if filed.get("url") and not live:
+            from sprint_thread import ENGINEERS
+
+            team = ENGINEERS.get(filed.get("owner"),
+                                 ("", "", "backend", ""))[2]
+            zoho_actions.set_in_progress(ticket_id, team)
+        elif item.get("fix_pr") and not live:
+            zoho_actions.set_agent_fixing(ticket_id)
+        else:
+            zoho_actions.set_status(ticket_id, "Awaiting Client Response")
+    except Exception as exc:
+        print(f"[BATCH] {ticket_id} answered in Zoho but still Processing: "
+              f"{exc}")
+
+
+def reconcile_working_set() -> int:
+    """sync_handled_elsewhere over every open item, reading the Zoho queue
+    once. Raises when the queue cannot be read."""
+    if not sprint_store.ready():
+        return 0
+    open_ids = {str(t.get("id")) for t in _queue()}
+    return sync_handled_elsewhere(sprint_store.working_set(), open_ids)
+
+
+def enqueue_reconcile(ticket_id: str) -> bool:
+    """Called from the Zoho update webhook. Cheap, never raises."""
+    if not ticket_id or ticket_id == "unknown":
+        return False
+    try:
+        from vomeos.worker import enqueue_event
+
+        enqueue_event(RECONCILE_KEY, {"ticket_id": str(ticket_id)},
+                      queue="support")
+        return True
+    except Exception as exc:
+        print(f"[BATCH] could not queue reconcile of {ticket_id}: {exc}")
+        return False
+
+
+def handle_reconcile(message: dict) -> dict:
+    """One ticket changed in Zoho (closed, answered, moved on)."""
+    ticket_id = str((message or {}).get("ticket_id") or "")
+    if not (ticket_id and sprint_store.ready()):
+        return {"status": "skipped"}
+    item = sprint_store.by_ticket(ticket_id)
+    if not item:
+        return {"status": "skipped", "reason": "no sprint item"}
+    finished = sync_handled_elsewhere([item], set())
+    return {"status": "ok", "finished": finished,
+            "decision": item.get("decision") if finished else ""}
 
 
 def _fresh_start(thread: str, now: datetime) -> datetime:
@@ -1000,7 +1192,8 @@ def handle_queue_clear(message: dict) -> dict:
         if pause:
             time.sleep(pause)
         result = triage_untriaged(BATCH_SIZE, ignore_cap=True,
-                                  fresh_since=fresh_since, pages=CLEAR_PAGES)
+                                  fresh_since=fresh_since, pages=CLEAR_PAGES,
+                                  seconds=CLEAR_SECONDS)
         if result.get("status") != "queue unreadable":
             break
     if result.get("status") != "ok":

@@ -83,7 +83,10 @@ sends: send_ticket_reply runs only on Sam's explicit word, passed verbatim.
 
 Support sprint (Sam): sprint_queue lists every open ticket with the agents' \
 first pass; walk_queue shows every New or Processing ticket and who has \
-it, with no agent run; ticket_first_pass runs the triage agent on one; \
+it, with no agent run; ticket_states shows every In Progress ticket and \
+what its ClickUp work says (on it, fixed, shipped, stalled, fell through); \
+triage_cost shows what triage costs and the monthly forecast; \
+ticket_first_pass runs the triage agent on one; \
 fix_status and sprint_followups show agent fixes and what is owed after a \
 release; propose_fix, send_ticket_reply, route_queue, route_ticket, \
 close_ticket_quietly and log_ticket_request act, Sam only. Show every reply \
@@ -513,6 +516,28 @@ def build() -> MCPServer:
         live, resolution drafted) and whose move it is."""
         return await _run("fix_status", sprint_tools.fix_status,
                           ticket=ticket)
+
+    @server.tool(annotations=READ)
+    async def ticket_states(
+        state: Annotated[str, Field(
+            description="Optional: only one state, e.g. 'engineer_stalled', "
+            "'task_closed', 'no_task'")] = "",
+    ) -> dict:
+        """Every Zoho ticket at In Progress matched to its ClickUp work, as
+        of the nightly reconcile: our team is on it, fixed and waiting for
+        release, shipped, closed, stalled, unassigned or fell through, with
+        what to tell the client for each. Read-only."""
+        return await _run("ticket_states", sprint_tools.ticket_states,
+                          state=state)
+
+    @server.tool(annotations=READ)
+    async def triage_cost(
+        days: Annotated[int, Field(description="Days to look back")] = 14,
+    ) -> dict:
+        """What ticket triage cost (first pass plus deep pass), how often
+        the deep pass ran and corrected the first card, and the monthly
+        and yearly forecast at that rate. Read-only."""
+        return await _run("triage_cost", sprint_tools.triage_cost, days=days)
 
     @server.tool(annotations=READ)
     async def walk_queue() -> dict:

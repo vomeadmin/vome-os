@@ -214,10 +214,25 @@ class Bitbucket(Connector):
 
     # -- read operations ------------------------------------------------
 
-    def search_code(self, query: str, repo: str = "") -> IntegrationResult:
-        """Find where a symbol, string or error message appears."""
+    def search_code(self, query: str, repo: str = "",
+                    ref: str = "") -> IntegrationResult:
+        """Find where a symbol, string or error message appears.
+
+        With `ref`, the live code at that branch is grepped first
+        (code_mirror.py): Bitbucket's own index covers the default branch
+        only, and core's default is `development`, not the `master`
+        production runs. The index answers when the copy cannot be made.
+        """
         if repo and not _repo_permitted(repo, self.allowlist):
             return self._denied("search_code", repo)
+        if repo and ref:
+            from vomeos.integrations import code_mirror
+
+            mirrored = code_mirror.search_copy(
+                "bitbucket", self.workspace, repo, query, self.headers(),
+                ref=ref)
+            if mirrored.ok:
+                return mirrored
         search = f"{query} repo:{repo}" if repo else query
         return self._call(
             "search_code",
@@ -465,18 +480,25 @@ class GitHub(Connector):
 
     def read_file(
         self, repo: str, path: str, ref: str = "", owner: str = "",
-        max_bytes: int = 0,
+        max_bytes: int = 0, raw: bool = False,
     ) -> IntegrationResult:
+        """`raw` asks for the file itself rather than base64 in JSON. The
+        JSON form stops at 1 MB ("encoding": "none"), and vome-react's
+        package-lock.json is several times that; the raw form goes to 100 MB.
+        A JSON file comes back parsed, anything else as text."""
         if not _repo_permitted(repo, self.allowlist):
             return self._denied("read_file", repo)
         who = owner or self.owner
         params = {"ref": ref} if ref else None
+        headers = self.headers(who)
+        if raw:
+            headers = {**headers, "Accept": "application/vnd.github.raw"}
         result = self._call(
             "read_file",
             "GET",
             f"/repos/{who}/{repo}/contents/{path}",
             params=params,
-            headers=self.headers(who),
+            headers=headers,
         )
         # A file comes back as JSON with the text base64 encoded. Hand back
         # the text, as Bitbucket does: callers that only accept text (the

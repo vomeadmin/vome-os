@@ -265,7 +265,8 @@ def open_pull_request(issue: dict, proposal: dict, context: dict) -> dict:
             return {"opened": False,
                     "reason": f"could not branch: {created.error[:140]}"}
 
-        message = f"Fix: {issue.get('triage_summary') or issue_id}"[:100]
+        message = _clip(f"Fix: {issue.get('triage_summary') or issue_id}",
+                        100)
         for path, body in contents.items():
             written = writer.commit_file(
                 repo, branch, path, body, message, **kwargs
@@ -275,12 +276,17 @@ def open_pull_request(issue: dict, proposal: dict, context: dict) -> dict:
                         "reason": f"could not commit {path}: "
                                   f"{written.error[:120]}"}
 
+        named = _reviewer_args(writer, host, context.get("reviewer") or {})
+        body = _pr_body(issue, proposal, context)
         opened = writer.open_pull_request(
-            repo, branch, ref,
-            title=message,
-            body=_pr_body(issue, proposal, context),
-            **kwargs,
+            repo, branch, ref, title=message, body=body, **kwargs, **named,
         )
+        if not opened.ok and named:
+            # A reviewer Bitbucket will not accept must not cost the PR.
+            named = {}
+            opened = writer.open_pull_request(
+                repo, branch, ref, title=message, body=body, **kwargs,
+            )
     except code_write.WriteDenied as exc:
         return {"opened": False, "reason": f"refused: {exc}"}
 
@@ -292,7 +298,41 @@ def open_pull_request(issue: dict, proposal: dict, context: dict) -> dict:
     sentry_ledger.update(
         issue_id, status=sentry_ledger.STATUS_PR_OPEN, pr_url=url
     )
-    return {"opened": True, "url": url, "branch": branch}
+    if "assignee" in named:
+        reviewer_added = bool((opened.data or {}).get("assigned"))
+    else:
+        reviewer_added = bool(named)
+    return {"opened": True, "url": url, "branch": branch,
+            "reviewer_added": reviewer_added}
+
+
+def _clip(text: str, limit: int) -> str:
+    """Shorten a title at the last whole word, so it never ends "and when h"."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit - 3]
+    if " " in cut:
+        cut = cut[:cut.rindex(" ")]
+    return cut.rstrip(" ,;:") + "..."
+
+
+def _reviewer_args(writer, host, reviewer: dict) -> dict:
+    """How to name the engineer when the PR opens: a GitHub login as
+    assignee, or a Bitbucket member uuid as reviewer. {} when there is
+    nobody to name or they cannot be found; the PR opens either way and
+    the engineer's DM says to add themselves."""
+    if not reviewer:
+        return {}
+    if host == "github":
+        login = reviewer.get("github") or ""
+        return {"assignee": login} if login else {}
+    try:
+        uuid = writer.member_uuid(reviewer.get("name") or "",
+                                  reviewer.get("bitbucket_name") or "")
+    except Exception as exc:
+        print(f"[SENTRY FIX] could not look up {reviewer.get('name')}: {exc}")
+        return {}
+    return {"reviewers": (uuid,)} if uuid else {}
 
 
 def _pr_url(data) -> str:

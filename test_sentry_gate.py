@@ -84,23 +84,49 @@ def test_an_unrecognised_level_passes(monkeypatch):
 # Project
 # ---------------------------------------------------------------------------
 
-def test_all_five_real_projects_are_mapped(monkeypatch):
-    # The five Sentry projects we actually run. If one is renamed or a sixth
-    # appears, this is where it gets noticed.
+def test_every_real_project_is_mapped(monkeypatch):
+    # The Sentry projects we actually run, a prod/dev pair per repository.
+    # If one is renamed or a new one appears, this is where it gets noticed.
     _clear(monkeypatch)
-    # Seven, not five. The dashboard grid honours a "My Teams" filter and
-    # showed five, which is how dev-vome-web and prod-vome-web were missed.
-    for slug in (
-        "prod-vome",
-        "dev-vome-app",
-        "prod-volunteer-database",
-        "dev-volunteer-database",
-        "prod-vome-web",
-        "dev-vome-web",
-        "vome-2j",
+    repos = (
+        "django-core", "django-db", "django-chats", "django-integrations",
+        "vome-react", "landing-page", "vome-app",
+    )
+    for repo in repos:
+        for env in ("prod", "dev"):
+            slug = f"{repo}-{env}"
+            assert sentry_projects.route(slug).slug == slug
+    assert len(sentry_projects.all_projects()) == 14
+
+
+def test_pre_rename_slugs_route_to_the_renamed_project(monkeypatch):
+    # Ledger rows and SENTRY_PROJECT_ALLOWLIST written before the 2026-10-23
+    # rename still say prod-vome and friends.
+    _clear(monkeypatch)
+    for old, new in (
+        ("prod-vome", "django-core-prod"),
+        ("dev-vome-app", "django-core-dev"),
+        ("prod-volunteer-database", "django-db-prod"),
+        ("dev-volunteer-database", "django-db-dev"),
+        ("prod-vome-web", "vome-react-prod"),
+        ("dev-vome-web", "vome-react-dev"),
+        ("vome-2j", "vome-app-prod"),
     ):
-        assert sentry_projects.route(slug) is not None, slug
-    assert len(sentry_projects.all_projects()) == 7
+        assert sentry_projects.route(old).slug == new
+        assert sentry_projects.canonical(old) == new
+    assert sentry_projects.with_aliases(["django-core-prod"]) == (
+        "django-core-prod", "prod-vome",
+    )
+
+
+def test_an_old_slug_in_the_allowlist_admits_the_renamed_project(
+    monkeypatch,
+):
+    _clear(monkeypatch, SENTRY_PROJECT_ALLOWLIST="prod-vome")
+    assert sentry_projects.triaged_slugs() == ("django-core-prod",)
+    assert gate.check(_signal(project="django-core-prod")).passed
+    assert gate.check(_signal(project="prod-vome")).passed
+    assert not gate.check(_signal(project="django-db-prod")).passed
 
 
 def test_the_two_production_backends_and_the_frontend_are_triaged(monkeypatch):
@@ -334,7 +360,7 @@ def test_every_block_names_a_rule(monkeypatch):
 def test_describe_reports_the_live_configuration(monkeypatch):
     _clear(monkeypatch, SENTRY_PROJECT_ALLOWLIST="prod-vome,vome-2j")
     described = gate.describe()
-    assert described["projects"] == ["prod-vome", "vome-2j"]
+    assert described["projects"] == ["django-core-prod", "vome-app-prod"]
     assert described["environments"] == ["production"]
 
 
@@ -357,8 +383,11 @@ def test_repos_in_scope_is_what_code_repos_must_contain(monkeypatch):
     _clear(monkeypatch)
     assert sentry_projects.repos_in_scope() == (
         "VomeApp",
+        "vome-landing-page",
         "vome-react",
+        "vomedjango-chats-app",
         "vomedjango-database-app",
+        "vomedjango-integrations-app",
         "vomedjango-restored-core-app",
     )
 
@@ -379,12 +408,12 @@ def test_the_web_projects_are_mapped_and_flagged_empty(monkeypatch):
     # reads as coverage on a dashboard. Mapped so they route correctly the
     # day the SDK is fixed, and flagged so the gap is not forgotten.
     _clear(monkeypatch)
-    web = sentry_projects.route("prod-vome-web")
+    web = sentry_projects.route("vome-react-prod")
     assert web.qualified_repo == "vomeadmin/vome-react"
     assert web.stack == sentry_projects.FRONTEND
     described = sentry_projects.describe()
-    assert "prod-vome-web" in described["receiving_nothing"]
-    assert "dev-vome-web" in described["receiving_nothing"]
+    assert "vome-react-prod" in described["receiving_nothing"]
+    assert "vome-react-dev" in described["receiving_nothing"]
 
 
 def test_every_github_repo_is_under_vomeadmin(monkeypatch):

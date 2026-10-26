@@ -296,8 +296,13 @@ def _untold(monkeypatch, kind, item):
                         lambda tid, reason, **k: {"status": "ok"})
     monkeypatch.setattr(sprint_store, "by_ticket", lambda t: dict(item))
     monkeypatch.setattr(sprint_thread, "_send",
-                        lambda i: sent.append(i["number"])
+                        lambda i, **k: sent.append(i["number"])
                         or "*32.* sent to a@b.org.")
+    import resolution_scope
+
+    monkeypatch.setattr(resolution_scope, "check",
+                        lambda *a, **k: {"complete": True, "open": [],
+                                         "reason": ""})
     shipped_untold.run_shipped_untold()
     return sent, finished
 
@@ -564,17 +569,49 @@ def test_refresh_respects_a_closed_ticket():
 
 @pytest.fixture
 def zoho_status(monkeypatch):
+    import release_resolutions
     import zoho_actions
 
     statuses = {}
     decided = []
     monkeypatch.setattr(zoho_actions, "ticket_status",
                         lambda t: statuses.get(t, ""))
+    monkeypatch.setattr(zoho_actions, "last_exchange",
+                        lambda t, skip=None: EXCHANGES.get(t, ({}, {})))
     monkeypatch.setattr(sprint_store, "decide",
                         lambda i, s, d: decided.append((i, s, d)))
     monkeypatch.setattr(sprint_batch, "_resolution_tickets",
                         lambda: {"RES"})
+    monkeypatch.setattr(sprint_batch, "_pending_resolutions",
+                        lambda: dict(PENDING))
+    monkeypatch.setattr(release_resolutions, "handled_elsewhere",
+                        lambda t, why: RESOLVED.append((t, why)) or 1)
+    monkeypatch.setattr(zoho_actions, "set_status",
+                        lambda t, s: MOVED.append((t, s)))
+    monkeypatch.setattr(zoho_actions, "set_in_progress",
+                        lambda t, team: MOVED.append((t, f"In Progress {team}")))
+    monkeypatch.setattr(zoho_actions, "set_agent_fixing",
+                        lambda t: MOVED.append((t, "In Progress agent")))
+    EXCHANGES.clear()
+    RESOLVED.clear()
+    PENDING.clear()
+    MOVED.clear()
+    PENDING["RES"] = None
     return statuses, decided
+
+
+# Zoho threads per ticket: (newest inbound, newest outbound).
+EXCHANGES: dict = {}
+# Resolutions waiting on Sam: ticket id -> when drafted.
+PENDING: dict = {}
+RESOLVED: list = []
+# Zoho status moves: (ticket id, status).
+MOVED: list = []
+
+
+def _exchange(received: str, sent: str = "") -> tuple[dict, dict]:
+    return ({"createdTime": received} if received else {},
+            {"createdTime": sent} if sent else {})
 
 
 def test_a_ticket_closed_in_zoho_leaves_the_batch(zoho_status):
@@ -605,13 +642,217 @@ def test_an_unreadable_status_finishes_nothing(monkeypatch, zoho_status):
 
     _, decided = zoho_status
 
-    def boom(t):
+    def boom(t, skip=None):
         raise RuntimeError("Zoho 500")
 
     monkeypatch.setattr(zoho_actions, "ticket_status", boom)
+    monkeypatch.setattr(zoho_actions, "last_exchange", boom)
     assert sprint_batch.sync_handled_elsewhere(
-        [_item(1, ticket_id="X")], set()) == 0
+        [_item(1, ticket_id="X"), _item(2, ticket_id="Q")], {"Q"}) == 0
     assert decided == []
+
+
+# ---------------------------------------------------------------------------
+# Answered or closed by hand in Zoho (2026-10-22: the Claude.ai sprint showed
+# 22 tickets Sam had already answered or closed, because the only check ran
+# with the Slack batches, paused since Oct 18. Lesson L27.)
+# ---------------------------------------------------------------------------
+
+def test_answered_after_the_customer_finishes_the_item(zoho_status):
+    _, decided = zoho_status
+    EXCHANGES["Q"] = _exchange("2026-10-21T18:38:00.000Z",
+                               "2026-10-21T19:56:00.000Z")
+    item = _item(1, ticket_id="Q")
+    assert sprint_batch.sync_handled_elsewhere([item], {"Q"}) == 1
+    assert decided == [(101, sprint_store.DONE, sprint_batch.ANSWERED)]
+    assert item["status"] == sprint_store.DONE
+    # #9394: answered means it no longer sits at Processing.
+    assert MOVED == [("Q", "Awaiting Client Response")]
+
+
+def test_answered_by_hand_follows_the_routing(monkeypatch, zoho_status):
+    import shadow_triage
+
+    monkeypatch.setattr(shadow_triage, "release_state",
+                        lambda n, t: {"live": False})
+    for tid in ("R", "F"):
+        EXCHANGES[tid] = _exchange("2026-10-21T18:38:00.000Z",
+                                   "2026-10-21T19:56:00.000Z")
+    items = [_item(1, ticket_id="R",
+                   eng_task={"url": "https://cu/t/1", "owner": "sanjay"}),
+             _item(2, ticket_id="F", fix_pr="https://bb/pr/3")]
+    assert sprint_batch.sync_handled_elsewhere(items, {"R", "F"}) == 2
+    assert MOVED == [("R", "In Progress frontend"), ("F", "In Progress agent")]
+
+
+def test_answered_outside_the_queue_moves_only_from_processing(zoho_status):
+    statuses, _ = zoho_status
+    statuses.update({"OLD": "Processing", "B": "In Progress"})
+    for tid in ("OLD", "B"):
+        EXCHANGES[tid] = _exchange("2026-10-10T10:00:00.000Z",
+                                   "2026-10-11T10:00:00.000Z")
+    items = [_item(1, ticket_id="OLD"),
+             _item(2, ticket_id="B", card={"backlog_sweep": "868abc"})]
+    assert sprint_batch.sync_handled_elsewhere(items, set()) == 2
+    assert MOVED == [("OLD", "Awaiting Client Response")]
+
+
+def test_a_failed_move_still_finishes_the_item(monkeypatch, zoho_status):
+    import zoho_actions
+
+    _, decided = zoho_status
+
+    def boom(t, s):
+        raise RuntimeError("Zoho 500")
+
+    monkeypatch.setattr(zoho_actions, "set_status", boom)
+    EXCHANGES["Q"] = _exchange("2026-10-21T18:38:00.000Z",
+                               "2026-10-21T19:56:00.000Z")
+    assert sprint_batch.sync_handled_elsewhere([_item(1, ticket_id="Q")],
+                                               {"Q"}) == 1
+    assert decided == [(101, sprint_store.DONE, sprint_batch.ANSWERED)]
+
+
+def test_an_out_of_office_after_our_answer_is_not_a_message(monkeypatch):
+    """#9526: our answer at 10:38:12, her out-of-office at 10:38:22."""
+    import zoho_actions
+
+    threads = [
+        {"direction": "in", "createdTime": "2026-10-14T18:22:59.000Z",
+         "summary": "Two of my steps no longer have a completed date"},
+        {"direction": "out", "createdTime": "2026-10-20T10:38:12.000Z",
+         "summary": "Hi Allie, the completion date field is still there"},
+        {"direction": "in", "createdTime": "2026-10-20T10:38:22.000Z",
+         "summary": "I will be out of the office Oct 20-21"},
+    ]
+    monkeypatch.setattr(zoho_actions, "_threads", lambda t: threads)
+    assert sprint_batch.answered_in_zoho("T") is True
+    threads.append({"direction": "in",
+                    "createdTime": "2026-10-22T09:00:00.000Z",
+                    "summary": "It still does not show, can you help?"})
+    assert sprint_batch.answered_in_zoho("T") is False
+
+
+def test_a_closed_mailbox_notice_is_an_out_of_office():
+    from agent import _looks_like_auto_reply
+
+    assert _looks_like_auto_reply(
+        "This mailbox will not be attended to until Thursday, January 2nd")
+
+
+def test_the_activation_auto_reply_is_not_an_answer(zoho_status):
+    """#9615: "your account is already active" 5 seconds after she wrote."""
+    _, decided = zoho_status
+    EXCHANGES["Q"] = _exchange("2026-10-21T20:00:30.000Z",
+                               "2026-10-21T20:00:35.223Z")
+    assert sprint_batch.sync_handled_elsewhere([_item(1, ticket_id="Q")],
+                                               {"Q"}) == 0
+    assert decided == []
+
+
+def test_the_customer_writing_again_keeps_it_owed(zoho_status):
+    _, decided = zoho_status
+    EXCHANGES["Q"] = _exchange("2026-10-22T18:25:00.000Z",
+                               "2026-10-12T07:33:00.000Z")
+    assert sprint_batch.sync_handled_elsewhere([_item(1, ticket_id="Q")],
+                                               {"Q"}) == 0
+    assert decided == []
+
+
+def test_a_ticket_closed_by_hand_drops_its_resolution(zoho_status):
+    """Closed wins over a waiting resolution and over a fix PR."""
+    statuses, decided = zoho_status
+    statuses.update({"RES": "Closed", "PR": "Closed"})
+    items = [_item(1, ticket_id="RES"),
+             _item(2, ticket_id="PR", fix_pr="https://bb/pr/1")]
+    assert sprint_batch.sync_handled_elsewhere(items, set()) == 2
+    assert RESOLVED == [("RES", "handled outside the sprint (Zoho: Closed)")]
+
+
+def test_a_resolution_is_answered_only_after_it_was_drafted(zoho_status):
+    """The acknowledgment sent before the fix does not answer it."""
+    _, decided = zoho_status
+    PENDING["RES"] = datetime(2026, 10, 20, 12, 0)
+    EXCHANGES["RES"] = _exchange("2026-10-18T10:00:00.000Z",
+                                 "2026-10-18T11:00:00.000Z")
+    item = _item(1, ticket_id="RES")
+    assert sprint_batch.sync_handled_elsewhere([item], {"RES"}) == 0
+    EXCHANGES["RES"] = _exchange("2026-10-18T10:00:00.000Z",
+                                 "2026-10-20T15:00:00.000Z")
+    assert sprint_batch.sync_handled_elsewhere([item], {"RES"}) == 1
+    assert RESOLVED == [("RES", sprint_batch.ANSWERED)]
+
+
+def test_a_ticket_taken_from_an_engineer_stays_until_answered(zoho_status):
+    """backlog_sweep `apply answer` adopts In Progress tickets on purpose;
+    our acknowledgment from before it joined the sprint does not count."""
+    statuses, decided = zoho_status
+    statuses["B"] = "In Progress"
+    EXCHANGES["B"] = _exchange("2026-10-10T10:00:00.000Z",
+                               "2026-10-11T10:00:00.000Z")
+    item = _item(1, ticket_id="B", updated_at=datetime(2026, 10, 23, 2, 0),
+                 card={"live_question": "q", "backlog_sweep": "868abc"})
+    assert sprint_batch.sync_handled_elsewhere([item], set()) == 0
+    EXCHANGES["B"] = _exchange("2026-10-10T10:00:00.000Z",
+                               "2026-10-23T15:00:00.000Z")
+    assert sprint_batch.sync_handled_elsewhere([item], set()) == 1
+    assert decided == [(101, sprint_store.DONE, sprint_batch.ANSWERED)]
+    statuses["C"] = "Closed"
+    closed = _item(2, ticket_id="C", card={"backlog_sweep": "868def"})
+    assert sprint_batch.sync_handled_elsewhere([closed], set()) == 1
+
+
+def test_a_reconcile_card_stays_until_answered(zoho_status):
+    """Oct 25: the sweep finished 25 of 26 reconcile cards (In Progress
+    with no task, drafts and all) within the hour."""
+    statuses, decided = zoho_status
+    statuses["R"] = "In Progress"
+    EXCHANGES["R"] = _exchange("2026-10-10T10:00:00.000Z",
+                               "2026-10-11T10:00:00.000Z")
+    item = _item(1, ticket_id="R", category="clear_bug",
+                 updated_at=datetime(2026, 10, 25, 14, 0),
+                 card={"live_question": "q", "reconciled": True})
+    assert sprint_batch.sync_handled_elsewhere([item], set()) == 0
+    assert decided == []
+
+
+def test_a_reconcile_card_that_only_waits_on_the_client_finishes(
+        zoho_status):
+    statuses, decided = zoho_status
+    statuses["W"] = "Awaiting Client Response"
+    item = _item(1, ticket_id="W", category="awaiting_client",
+                 card={"live_question": "q", "reconciled": True})
+    assert sprint_batch.sync_handled_elsewhere([item], set()) == 1
+
+
+def test_an_item_the_agent_is_fixing_is_left_alone(zoho_status):
+    statuses, decided = zoho_status
+    statuses["F"] = "Closed"
+    item = _item(1, ticket_id="F", status=sprint_store.FIXING,
+                 fix_pr="https://bb/pr/2")
+    assert sprint_batch.sync_handled_elsewhere([item], set()) == 0
+    assert decided == []
+
+
+def test_the_webhook_reconciles_one_ticket(monkeypatch, zoho_status):
+    statuses, decided = zoho_status
+    statuses["T"] = "Closed"
+    monkeypatch.setattr(sprint_store, "ready", lambda: True)
+    monkeypatch.setattr(sprint_store, "by_ticket",
+                        lambda t: _item(4, ticket_id=t))
+    out = sprint_batch.handle_reconcile({"ticket_id": "T"})
+    assert out["finished"] == 1
+    assert decided[0][:2] == (104, sprint_store.DONE)
+
+
+def test_every_zoho_update_queues_a_reconcile():
+    import os
+
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "main.py")
+    src = open(path, encoding="utf-8").read()
+    webhook = src.split("async def zoho_update_webhook")[1].split("\n@app")[0]
+    assert "sprint_batch.enqueue_reconcile(ticket_id)" in webhook
 
 
 # ---------------------------------------------------------------------------

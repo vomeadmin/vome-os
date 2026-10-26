@@ -55,8 +55,13 @@ def world(monkeypatch):
     monkeypatch.setattr(sprint_store, "by_ticket", lambda tid: dict(W.item))
     monkeypatch.setattr(sprint_store, "ready", lambda: True)
     monkeypatch.setattr(sprint_thread, "_send",
-                        lambda item: W.sent.append(item["number"])
+                        lambda item, **k: W.sent.append(item["number"])
                         or "*3.* sent to d@x.org.")
+    import resolution_scope
+
+    monkeypatch.setattr(resolution_scope, "check",
+                        lambda *a, **k: {"complete": True, "open": [],
+                                         "reason": ""})
     monkeypatch.setenv("RELEASE_AUTO_SEND", "false")
     return W
 

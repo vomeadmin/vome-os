@@ -33,7 +33,8 @@ nothing happens. Otherwise the ticket is triaged again with the shipped
 state in front of the agents, so the draft is a resolution, through every
 outbound guard. A shipped FIX whose draft passed every guard is sent and
 the ticket closes, as the on-prod handler would have done (Sam, 2026-10-19:
-fixed emails go out on their own; RELEASE_AUTO_SEND switches it off). A
+fixed emails go out on their own; RELEASE_AUTO_SEND switches it off), once
+every problem on the ticket is fixed (resolution_scope, 2026-10-23). A
 shipped FEATURE, a RELEASE, and any draft a guard held, wait under READY TO
 SEND for Sam. A release is never sent on its own: the client may have
 written since (on #9501 she had, to say the new delete refused her fields),
@@ -267,10 +268,20 @@ def run_shipped_untold() -> dict:
         if (result == "drafted" and kind == "fix"
                 and rr.auto_send_enabled()
                 and item.get("category") not in rr.NEVER_AUTO):
-            import sprint_thread
+            import resolution_scope
 
-            detail = sprint_thread._send(item)
-            result = "sent" if "sent to" in detail else "drafted"
+            # Only when every problem on the ticket is fixed, not just this
+            # task (Sam, 2026-10-23); otherwise it waits for Sam.
+            scope = resolution_scope.check(
+                ticket_id, number,
+                [{"id": task["id"], "name": task.get("name") or ""}])
+            if scope["complete"]:
+                import sprint_thread
+
+                detail = sprint_thread._send(item, automatic=True)
+                result = "sent" if "sent to" in detail else "drafted"
+            else:
+                result, detail = "held", scope["reason"]
         rr._finish(claim, item.get("number"), result, detail)
         drafted.append(item.get("number"))
     print(f"[UNTOLD] {len(shipped)} shipped, {told} already told, "

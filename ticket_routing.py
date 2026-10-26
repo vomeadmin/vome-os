@@ -77,6 +77,12 @@ FRONTEND_REPOS = {"web", "mobile"}
 
 SHIPPED = frozenset({"on prod", "closed", "done", "complete"})
 
+# A turned-down task is Closed with Resolution "Declined" (Sam removed the
+# `declined` column, 2026-10-22). Closed alone would read as shipped; this
+# keeps "the engineer says it is not a bug" apart from "it shipped".
+FIELD_RESOLUTION = "63ef3458-cfa6-4a0b-ae44-18858cd555f0"
+RESOLUTION_DECLINED = "8600a963-ab55-430f-a86f-2b1d0f911156"
+
 FOOTER = ("_Filed automatically by support triage. The client has not been "
           "told yet; Sam replies from the support sprint._")
 
@@ -416,7 +422,8 @@ _states: dict[str, tuple[float, dict]] = {}
 
 
 def task_state(filed: dict) -> dict:
-    """The engineer task's live status: {"status", "shipped", "assignee"}.
+    """The engineer task's live status: {"status", "shipped", "declined",
+    "assignee"}.
     {"status": "unreadable"} when ClickUp cannot be read. Cached a minute,
     because one sprint_queue call asks twice per routed item (finish the
     shipped ones, then show the rest)."""
@@ -450,5 +457,29 @@ def _read_state(task_id: str) -> dict:
     status = ((task.get("status") or {}).get("status") or "").lower()
     names = [a.get("username") or a.get("email") or ""
              for a in task.get("assignees") or []]
-    return {"status": status, "shipped": status in SHIPPED,
-            "assignee": ", ".join(n for n in names if n)}
+    # "declined" itself still counts until the old column's tasks are moved.
+    declined = status == "declined" or _resolution(task) == RESOLUTION_DECLINED
+    return {"status": status, "shipped": status in SHIPPED and not declined,
+            "declined": declined,
+            "assignee": ", ".join(n for n in names if n),
+            # Where the task sits now, for the sprint card's links line.
+            "name": task.get("name") or "",
+            "list": (task.get("list") or {}).get("name") or "",
+            "url": task.get("url") or ""}
+
+
+def _resolution(task: dict) -> str:
+    """The Resolution option id. ClickUp returns a dropdown value as the
+    option's orderindex, so it is matched back to an id."""
+    for field in task.get("custom_fields") or []:
+        if field.get("id") != FIELD_RESOLUTION:
+            continue
+        value = field.get("value")
+        if value is None or value == "":
+            return ""
+        options = (field.get("type_config") or {}).get("options") or []
+        for opt in options:
+            if str(value) in (str(opt.get("id")), str(opt.get("orderindex"))):
+                return str(opt.get("id") or "")
+        return str(value)
+    return ""

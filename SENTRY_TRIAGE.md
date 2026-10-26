@@ -72,18 +72,31 @@ Bitbucket will not.
 
 ## The projects, and the thing that is not obvious about them
 
-**Seven** Sentry projects, four repositories. The table lives in
-`sentry_projects.py`.
+**Fourteen** Sentry projects, seven repositories, named `<repo>-prod` and
+`<repo>-dev` after the names we use locally. Sentry teams group them by
+layer: Backend, Web, Mobile. The table lives in `sentry_projects.py`.
 
-| Sentry project | Repository | Branch | Host | Stack | Data? |
+Renamed on 2026-10-23. The old slugs (`prod-vome`, `dev-vome-app`,
+`prod-volunteer-database`, `dev-volunteer-database`, `prod-vome-web`,
+`dev-vome-web`, and `vome-2j` for mobile) are kept as `aliases` in the table,
+so older ledger rows and allowlists still route.
+
+| Sentry project | Team | Repository | Branch | Host | Data? |
 |---|---|---|---|---|---|
-| `dev-vome-app` | `vomedjango/vomedjango-restored-core-app` | `development` | Bitbucket | backend | yes |
-| `prod-vome` | same repo | `master` | Bitbucket | backend | yes |
-| `dev-volunteer-database` | `vomedjango/vomedjango-database-app` | `development` | Bitbucket | backend | yes |
-| `prod-volunteer-database` | same repo | `master` (unconfirmed) | Bitbucket | backend | yes |
-| `dev-vome-web` | `vomeadmin/vome-react` | `develop` | GitHub | frontend | **none** |
-| `prod-vome-web` | same repo | `master` (unconfirmed) | GitHub | frontend | **none** |
-| `vome-2j` | `vomeadmin/VomeApp` | `master` | GitHub | mobile | yes |
+| `django-core-dev` | Backend | `vomedjango/vomedjango-restored-core-app` | `development` | Bitbucket | yes |
+| `django-core-prod` | Backend | same repo | `master` | Bitbucket | yes |
+| `django-db-dev` | Backend | `vomedjango/vomedjango-database-app` | `development` | Bitbucket | **none** |
+| `django-db-prod` | Backend | same repo | `master` (unconfirmed) | Bitbucket | yes |
+| `django-chats-dev` | Backend | `vomedjango/vomedjango-chats-app` | `development` | Bitbucket | **none** |
+| `django-chats-prod` | Backend | same repo | `master` (unconfirmed) | Bitbucket | **none** |
+| `django-integrations-dev` | Backend | `vomedjango/vomedjango-integrations-app` | `development` | Bitbucket | **none** |
+| `django-integrations-prod` | Backend | same repo | `main` (unconfirmed) | Bitbucket | **none** |
+| `vome-react-dev` | Web | `vomeadmin/vome-react` | `develop` | GitHub | **none** |
+| `vome-react-prod` | Web | same repo | `master` (unconfirmed) | GitHub | **none** |
+| `landing-page-dev` | Web | `vomeadmin/vome-landing-page` | `develop` | GitHub | **none** |
+| `landing-page-prod` | Web | same repo | `master` | GitHub | **none** |
+| `vome-app-dev` | Mobile | `vomeadmin/VomeApp` | `development` | GitHub | **none** |
+| `vome-app-prod` | Mobile | same repo | `master` | GitHub | yes |
 
 **Count the projects from the API, not the dashboard.** The project grid
 honours a "My Teams" filter, which showed five of the seven and sent the first
@@ -91,7 +104,7 @@ version of this table out with the web client missing entirely.
 `find_projects` is the inventory.
 
 **The branch is per project, not per repository, and that is the point.**
-`dev-vome-app` and `prod-vome` are the same repository at different refs.
+`django-core-dev` and `django-core-prod` are the same repository at different refs.
 Reading a traceback from the dev deployment against `main` means reasoning
 about code that is not running, with line numbers that do not match the
 stack. Every file read and commit listing has to carry the ref, so it travels
@@ -103,16 +116,15 @@ default branch pointer and the branch that is actually deployed disagree.
 Only the deployed one matters here, and reading the default would have meant
 diagnosing against code nobody is running.
 
-`prod-volunteer-database` is set to `master` to match, but that is a guess:
+`django-db-prod` is set to `master` to match, but that is a guess:
 the database repo has `main`, `master` AND `prod-master`. Confirm it before
 that project is ever triaged. It is not today, so a wrong value cannot
 currently affect anything.
 
-**Watch the organization slug.** The Sentry org is `vome-2j`
-(`vome-2j.sentry.io`), and one of the projects is also called `vome-2j`. So
-`SENTRY_ORG=vome-2j` and the mobile project slug are the same string, which is
-a good way to spend an afternoon debugging an API call. They are different
-things in different positions in every URL.
+**The organization slug is `vome-2j`** (`vome-2j.sentry.io`). Until the
+2026-10-23 rename the mobile project had the same slug, which made API URLs
+easy to misread. It is `vome-app-prod` now, so `vome-2j` only ever means the
+org.
 
 **Dev and prod are separate projects, not separate environments.** That is the
 fact the gate is built around, and it is easy to get wrong. The obvious
@@ -127,14 +139,14 @@ fact, identical every time, so the agents are told it rather than asked for
 it. Paying a model to re-derive a constant is slower, costs money, and is
 occasionally wrong.
 
-`vome-2j` is the React Native app, confirmed from an event's App context:
+`vome-app-prod` is the React Native app, confirmed from an event's App context:
 build `com.vomeinc.vomemobile`, build type `app store`, with device, memory
 and foreground state. Those contexts only exist on a native app.
 
 Three things follow, and the first two want acting on separately from this
 project:
 
-- **`dev-vome-web` and `prod-vome-web` are instrumented but receive
+- **`vome-react-dev` and `vome-react-prod` are instrumented but receive
   nothing.** vome-react has `@sentry/react`, a sourcemap upload step in its
   build, and an init in `src/utils/sentry.js`. It is still sending zero
   errors AND zero spans as of 2026-10-02. Zero spans is the telling part: a
@@ -631,18 +643,18 @@ worth more than any amount of reasoning about it now.
 
 ### The starting configuration: one project
 
-`dev-vome-app` only, against `vomedjango-restored-core-app` at `development`.
+`django-core-dev` only, against `vomedjango-restored-core-app` at `development`.
 
 Starting on the dev backend rather than production is the right call and worth
 saying why: it is the project where a wrong gate rule, a noisy report or a bad
 verdict costs nothing. Nobody is paged, no customer is affected, and the
 traffic (264 errors against 8.9K transactions) is real enough to tune against
-while being a fraction of `prod-vome` (3.5K errors, 126K transactions). If the
+while being a fraction of `django-core-prod` (3.5K errors, 126K transactions). If the
 gate is badly wrong, you find out on the project where being wrong is free.
 
 ```
 SENTRY_ORG=vome-2j
-SENTRY_PROJECT_ALLOWLIST=dev-vome-app,prod-vome
+SENTRY_PROJECT_ALLOWLIST=django-core-dev,django-core-prod
 SENTRY_WEBHOOK_SECRET=<the Sentry app client secret>
 SENTRY_AUTH_TOKEN=<the Sentry app auth token>
 
@@ -654,9 +666,9 @@ VOMEOS_JOB_MODULES=support_jobs,engineering_jobs
 ```
 
 `SENTRY_PROJECT_ALLOWLIST` overrides the routing table outright, so
-`dev-vome-app` is triaged despite being marked `production = false`, and
+`django-core-dev` is triaged despite being marked `production = false`, and
 `SENTRY_TRIAGE_DEV_PROJECTS` is not needed as well. Everything else, including
-`prod-vome`, gates out. Widening later is one edit to that variable, with no
+`django-core-prod`, gates out. Widening later is one edit to that variable, with no
 deploy.
 
 Leave `VOMEOS_BITBUCKET_EMAIL` **unset**. Bearer is the right default, and
@@ -804,8 +816,8 @@ SENTRY_WEBHOOK_SECRET            the Sentry app's client secret. REQUIRED:
                                  the endpoint 403s every request without it.
 SENTRY_AUTH_TOKEN                read-only, for fetching full events
 SENTRY_BASE_URL                  default https://sentry.io/api/0
-SENTRY_ORG                       vome-2j. Note this is also a project slug.
-SENTRY_PROJECT_ALLOWLIST         dev-vome-app to start. Overrides the routing
+SENTRY_ORG                       vome-2j. The org, not a project, since the 2026-10-23 rename.
+SENTRY_PROJECT_ALLOWLIST         django-core-dev to start. Overrides the routing
                                  table outright, which is how a dev project
                                  gets triaged. Empty means "the production
                                  projects", NOT "all".

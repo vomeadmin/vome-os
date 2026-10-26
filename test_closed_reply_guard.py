@@ -89,6 +89,73 @@ def test_confident_ack_still_allows_a_genuine_thanks(monkeypatch):
     assert agent._is_confident_ack("Thank you so much!", has_attachment=True) is False
 
 
+# #9526 (2026-10-20): our answer closed the ticket, Allie's out-of-office came
+# back, and Zoho's reply workflow flipped it Closed -> Processing.
+OOO_REPLY = {"createdTime": "2026-10-20T10:38:22.000Z",
+             "summary": "I will be out of the office Oct 20-21"}
+REPLY_WORKFLOW_FLIP = {"time": "2026-10-20T10:38:31.000Z", "from": "Closed",
+                       "to": "Processing", "actor_type": "Workflow",
+                       "actor": "Customer Reply to Processing Status"}
+OUR_CLOSE = {"time": "2026-10-20T10:38:14.000Z", "from": "In Progress",
+             "to": "Closed", "actor_type": "Agent", "actor": "Support Agent"}
+
+
+def _restore_with(monkeypatch, changes):
+    import zoho_desk_api
+
+    set_to = []
+    monkeypatch.setattr(zoho_desk_api, "status_history", lambda t: changes)
+    monkeypatch.setattr(agent, "_set_zoho_ticket_status",
+                        lambda t, s: set_to.append(s) or True)
+    return agent._restore_status_after_auto_reply("T", OOO_REPLY), set_to
+
+
+def test_an_out_of_office_gets_its_status_back(monkeypatch):
+    restored, set_to = _restore_with(monkeypatch,
+                                     [REPLY_WORKFLOW_FLIP, OUR_CLOSE])
+    assert restored == "Closed"
+    assert set_to == ["Closed"]
+
+
+def test_awaiting_client_response_comes_back_too(monkeypatch):
+    flip = dict(REPLY_WORKFLOW_FLIP, **{"from": "Awaiting Client Response"})
+    restored, set_to = _restore_with(monkeypatch, [flip])
+    assert set_to == ["Awaiting Client Response"]
+
+
+def test_a_status_a_person_set_since_is_left_alone(monkeypatch):
+    sam = {"time": "2026-10-20T10:40:00.000Z", "from": "Processing",
+           "to": "In Progress", "actor_type": "Agent", "actor": "Sam"}
+    restored, set_to = _restore_with(monkeypatch,
+                                     [sam, REPLY_WORKFLOW_FLIP, OUR_CLOSE])
+    assert restored is None and set_to == []
+
+
+def test_an_older_workflow_change_is_not_undone(monkeypatch):
+    # The workflow had not run for this reply; its newest change is a day old.
+    old = dict(REPLY_WORKFLOW_FLIP, time="2026-10-19T09:00:00.000Z")
+    restored, set_to = _restore_with(monkeypatch, [old])
+    assert restored is None and set_to == []
+
+
+def test_unreadable_history_changes_nothing(monkeypatch):
+    restored, set_to = _restore_with(monkeypatch, None)
+    assert restored is None and set_to == []
+
+
+def test_the_out_of_office_guard_schedules_the_restore(monkeypatch):
+    conversations = {"data": [dict(OOO_REPLY, author={"type": "END_USER",
+                                                      "email": "a@b.org"})]}
+    scheduled = []
+    monkeypatch.setattr(agent, "fetch_ticket_conversations",
+                        lambda t: conversations)
+    monkeypatch.setattr(agent, "_restore_status_after_auto_reply_later",
+                        lambda t, r: scheduled.append(t))
+    monkeypatch.setattr(agent, "_processing_updates", {})
+    assert agent.process_ticket_update("T9526") is None
+    assert scheduled == ["T9526"]
+
+
 if __name__ == "__main__":
     # Minimal runner so this works without pytest installed.
     class _MP:
@@ -103,3 +170,97 @@ if __name__ == "__main__":
             print(f"PASS {name}")
             passed += 1
     print(f"\n{passed} passed")
+
+
+# 2026-10-24: agent fixes sit on the Zoho "Agent Fixes" team with no agent.
+# The owner rules read that as "unassigned" and closed the ClickUp task the
+# release watcher needs to tell the client.
+def _sync_with(monkeypatch, ticket):
+    import database
+    import zoho_actions
+
+    closed = []
+    monkeypatch.setattr(database, "get_thread_by_ticket_id",
+                        lambda t: ("TS", {"clickup_task_id": "CU1"}))
+    monkeypatch.setattr(database, "update_thread", lambda *a, **k: None)
+    monkeypatch.setattr(agent, "fetch_ticket_from_zoho", lambda t: ticket)
+    monkeypatch.setattr(agent, "_unwrap_mcp_result", lambda r: r)
+    monkeypatch.setattr(agent, "close_clickup_task", closed.append)
+    agent.sync_zoho_to_clickup("T")
+    return closed, zoho_actions.AGENT_FIXES_TEAM
+
+
+def test_an_agent_fix_ticket_keeps_its_clickup_task(monkeypatch):
+    import zoho_actions
+
+    closed, _ = _sync_with(monkeypatch, {
+        "status": "In Progress", "assigneeId": None,
+        "teamId": zoho_actions.AGENT_FIXES_TEAM})
+    assert closed == []
+
+
+def test_an_unassigned_ticket_off_the_team_still_closes(monkeypatch):
+    closed, _ = _sync_with(monkeypatch, {
+        "status": "In Progress", "assigneeId": None, "teamId": None})
+    assert closed == ["CU1"]
+
+
+# 2026-10-24: a ticket closed in Zoho takes every engineer task with it,
+# also when it has no thread record or a second task.
+def test_a_closed_ticket_closes_its_other_queue_tasks(monkeypatch):
+    import ticket_reconciler
+
+    swept = []
+    monkeypatch.setattr(ticket_reconciler, "close_tasks_for_ticket",
+                        lambda t: swept.append(t) or [])
+    closed, _ = _sync_with(monkeypatch, {"status": "Closed"})
+    assert closed == ["CU1"]
+    assert swept == ["T"]
+
+
+def test_a_closed_ticket_with_no_thread_still_closes_its_tasks(monkeypatch):
+    import database
+    import ticket_reconciler
+    import zoho_actions
+
+    swept = []
+    monkeypatch.setattr(database, "get_thread_by_ticket_id", lambda t: None)
+    monkeypatch.setattr(zoho_actions, "ticket_status", lambda t: "Closed")
+    monkeypatch.setattr(ticket_reconciler, "close_tasks_for_ticket",
+                        lambda t: swept.append(t) or [])
+    agent.sync_zoho_to_clickup("T")
+    assert swept == ["T"]
+
+
+def test_an_open_ticket_with_no_thread_closes_nothing(monkeypatch):
+    import database
+    import ticket_reconciler
+    import zoho_actions
+
+    swept = []
+    monkeypatch.setattr(database, "get_thread_by_ticket_id", lambda t: None)
+    monkeypatch.setattr(zoho_actions, "ticket_status",
+                        lambda t: "In Progress")
+    monkeypatch.setattr(ticket_reconciler, "close_tasks_for_ticket",
+                        lambda t: swept.append(t) or [])
+    agent.sync_zoho_to_clickup("T")
+    assert swept == []
+
+
+# 2026-10-25: a task released off the engineer queue was reopened when the
+# ticket was then parked at Awaiting Client Response (#9536).
+def _park_with(monkeypatch, task_closed):
+    parked = []
+    monkeypatch.setattr(agent, "_clickup_task_closed", lambda t: task_closed)
+    monkeypatch.setattr(agent, "_update_clickup_task_status",
+                        lambda t, s: parked.append(t))
+    _sync_with(monkeypatch, {"status": "Awaiting Client Response"})
+    return parked
+
+
+def test_a_closed_task_stays_closed_when_the_ticket_is_parked(monkeypatch):
+    assert _park_with(monkeypatch, task_closed=True) == []
+
+
+def test_an_open_task_is_parked_with_the_ticket(monkeypatch):
+    assert _park_with(monkeypatch, task_closed=False) == ["CU1"]

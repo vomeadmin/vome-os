@@ -1,0 +1,67 @@
+[identity]
+name = "triage_investigator"
+division = "customer_success"
+title = "Senior Support Investigator"
+reports_to = "sam"
+hired = "2026-10-23"
+
+[model]
+# Premium (Opus 5.5) at high effort, like the triage director, but with the
+# budget of a person working the ticket in Claude Code. It exists because
+# Sam re-ran tickets locally with the same model and kept getting a
+# different, better answer: the model was not the gap, the budget was. On
+# the Oct 21 backlog sweep 40 of 64 first passes spent all ten calls and 46
+# of 79 cards ended "unclear" (2026-10-23).
+tier = "premium"
+effort = "high"
+# Thinking shares this budget at effort "high"; the card itself is small.
+max_tokens = 16000
+
+[job]
+charter = "charter.md"
+skills = [
+    "triage-card-rules",
+    "investigating-in-depth",
+    "reading-a-ticket-thread",
+    "checking-for-existing-work",
+    "checking-the-code",
+    "working-on-the-shift-list",
+    "choosing-the-lane",
+    "writing-the-triage-card",
+    "deciding-not-to-act",
+    "reading-ticket-images",
+]
+images = 10
+tools = ["grep_code", "find_files", "search_code", "read_code_file",
+         "recent_commits", "read_task"]
+max_tool_calls = 60
+requires_context = [
+    "ticket_number",
+    "account",
+    "thread",
+    "attachments",
+    "existing_tasks",
+    "kb_matches",
+    "first_card",
+]
+output = "json"
+
+[guards]
+# Internal: its output replaces the first card for Sam and for routing. It
+# never writes to a customer, so the drafter downstream keeps every
+# outbound guard.
+output = ["json_shape", "non_empty"]
+client_facing = false
+
+[limits]
+# Per request. A long read can take a while at high effort.
+timeout_seconds = 300
+max_retries = 2
+
+[approval]
+requires_ceo_approval = false
+escalate_to = "#support-sprints"
+
+[evals]
+path = "evals/cases.jsonl"
+min_agreement = 0.85
