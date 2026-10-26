@@ -84,6 +84,12 @@ card called that deliberate.
   that screen calls and its UI strings. Another endpoint's error text is not
   what they read.
 
+**An empty list or picker for one admin (#9612).** Read the `web` component
+that renders it before any backend endpoint. A count that disagrees with its
+own list on the same screen ("Added 1", "No added sites") means the filter
+runs in the browser. Find the filter, then compare it with what the backend
+allows for that admin.
+
 `where` is exactly `repo:path:line`, nothing after it; commentary goes in
 `finding`.
 
@@ -97,7 +103,9 @@ card called that deliberate.
 - **high**: a migration, auth, permissions, billing, bulk data changes, or
   more than one repository. Engineer task with the exact line, no PR.
 
-Pick by the change, not by how serious the bug is.
+Pick by the change, not by how serious the bug is. A `web` change that only
+makes a screen offer what the backend already allows that admin is not a
+permission change (#9612).
 
 **Let it change your call.** works_as_designed with high confidence makes a
 "bug" a user_education. A bug the code confirms belongs in clear_bug even if

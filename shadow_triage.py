@@ -210,6 +210,23 @@ def _recent_tickets(exclude_ticket: str) -> str:
     return "\n".join(lines)
 
 
+_WORD = re.compile(r"[a-z0-9']{4,}")
+
+
+def _about_new_ticket(evidence, new_ticket: str) -> bool:
+    """Whether the matcher's quoted evidence comes from the new ticket.
+
+    Loose on purpose: the matcher paraphrases, so half of its longer words
+    appearing in the new ticket's text is enough. Evidence taken from
+    another ticket shares almost none (#9612 vs "email change request").
+    """
+    words = set(_WORD.findall(str(evidence or "").lower()))
+    if not words:
+        return False
+    text = set(_WORD.findall((new_ticket or "").lower()))
+    return len(words & text) * 2 >= len(words)
+
+
 def match_incident(ticket_number: str, account: str, card: dict,
                    when: str) -> dict:
     """Run the matcher. {} when nothing matches or it could not run."""
@@ -237,6 +254,14 @@ def match_incident(ticket_number: str, account: str, card: dict,
         return {}
     data = result.data
     same = [str(n) for n in data.get("same_as") or [] if str(n).isdigit()]
+    # A ticket match has to be about the new ticket. On #9612 (Sarasota,
+    # an empty Assign Sites list) the matcher returned #9607 at high
+    # confidence because #9607 and #9611 were the same email change as each
+    # other; neither touched #9612. Its quoted evidence must come from the
+    # new ticket, or the ticket match is dropped (a Sentry match stands).
+    if same and not _about_new_ticket(data.get("new_ticket_evidence"),
+                                      new_ticket):
+        same = []
     sentry = str(data.get("sentry_issue") or "").strip()
     # Only a high-confidence match interrupts Sam. The first shadow run on
     # #9500 (Oct 17) paired it with #9415 at medium confidence because both
