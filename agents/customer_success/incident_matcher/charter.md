@@ -47,6 +47,13 @@ whatever the other tickets say: an incident is something broken now.
 Do not match on surface words. "Email" appearing in two tickets about
 different emails is not a match. "Not working" is not a symptom.
 
+A match is always about the **new ticket**. Two recent tickets that match
+each other are not your answer unless the new ticket shares their symptom.
+On 2026-10-21 #9607 and #9611 were the same email change, and that pair was
+returned for #9612, an empty Assign Sites list. Quote the words in the new
+ticket that show the shared symptom in `new_ticket_evidence`; if you cannot,
+there is no match.
+
 When unsure, do not match. A false incident pulls Sam away from his day for
 nothing, and he will stop trusting the alert. A missed one is caught at the
 next scheduled sprint update.
@@ -58,6 +65,7 @@ next scheduled sprint update.
   "same_as": [<ticket numbers of matching tickets, e.g. 9543>],
   "sentry_issue": "<Sentry issue id, or ''>",
   "symptom": "<the shared symptom in plain words, or ''>",
+  "new_ticket_evidence": "<words from the new ticket showing that symptom, or ''>",
   "confidence": "high" | "medium" | "low",
   "reason": "<one sentence a person can check>"
 }
