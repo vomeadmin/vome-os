@@ -483,7 +483,7 @@ class FakeLedger:
 def world(monkeypatch):
     FakeLedger.rows, FakeLedger.baseline = {}, False
     posts, tasks = [], []
-    state = {"findings": [_finding(severity="HIGH")]}
+    state = {"findings": [_finding(severity="HIGH")], "replies": []}
 
     def fake_scan(repos=None):
         inv = dw.Inventory(packages=[dw.Package("PyPI", "Pillow", "10.4.0",
@@ -494,6 +494,10 @@ def world(monkeypatch):
                        {f.key: f.link for f in state["findings"]})
 
     def fake_post(text, thread_ts=""):
+        # `posts` is what lands in the channel; thread replies kept apart.
+        if thread_ts:
+            state["replies"].append((thread_ts, text))
+            return f"{thread_ts}.r"
         posts.append(text)
         return f"ts{len(posts)}"
 
@@ -549,7 +553,8 @@ def test_a_failed_baseline_post_is_retried_as_a_baseline(world, monkeypatch):
     monkeypatch.setattr(dw, "_post", lambda text, thread_ts="": "")
     assert dw.run_daily_scan()["posted"] is False
     monkeypatch.setattr(dw, "_post",
-                        lambda text, thread_ts="": posts.append(text) or "ts")
+                        lambda text, thread_ts="":
+                        thread_ts or posts.append(text) or "ts")
     assert dw.run_daily_scan()["status"] == "baseline"
     assert len(posts) == 1
 
@@ -639,7 +644,8 @@ def test_the_alert_tags_the_owners_and_copies_sam(world):
     alert = posts[-1]
     assert alert.startswith("@onlyg @sanjay cc @sam :rotating_light:")
     # Every same-day alert gets a task now, not only exploited ones.
-    assert sorted(tasks) == [("Django", "onlyg"), ("handlebars", "sanjay")]
+    assert sorted(tasks[1:]) == [("Django", "onlyg"),
+                                 ("handlebars", "sanjay")]
     assert "Owner: <https://app.clickup.com/t/task" in alert
     assert "|OnlyG's task>" in alert and "|Sanjay's task>" in alert
 
@@ -656,7 +662,7 @@ def test_one_owner_tags_only_that_owner(world):
     assert "@onlyg" not in posts[-1]
 
 
-def test_baseline_files_only_exploited_and_names_who_has_them(world):
+def test_baseline_files_every_alert_and_names_who_has_them(world):
     state, posts, tasks = world
     state["findings"] = [
         _finding(severity="HIGH", kev=True, key="CVE-2023-4863",
@@ -665,17 +671,59 @@ def test_baseline_files_only_exploited_and_names_who_has_them(world):
                  fixed="13.0.0"),
         _finding(package="Django", severity="CRITICAL", key="CVE-9",
                  version="4.2.20", fixed="4.2.25"),
+        _finding(package="handlebars", eco="npm", severity="CRITICAL",
+                 key="CVE-7", repo=WEB.slug, version="4.7.9",
+                 fixed="4.7.10"),
+        _finding(package="x", severity="MEDIUM", key="CVE-8"),  # digest
     ]
     dw.run_daily_scan()
-    assert tasks == [("Pillow", "onlyg")]
-    assert "*Assigned today* (exploited in the wild): @onlyg cc @sam" \
+    assert sorted(tasks) == [("Django", "onlyg"), ("Pillow", "onlyg"),
+                             ("handlebars", "sanjay")]
+    assert len(posts) == 1
+    assert "*Assigned*: 3 ClickUp tasks for @onlyg @sanjay cc @sam" \
         in posts[0]
+    task_list = state["replies"][0][1]
+    assert "• *Pillow* (core) exploited, <https://app.clickup.com/t/" \
+        in task_list
+    assert "|Sanjay's task>" in task_list
     # An open task is reused when the package comes up again.
     state["findings"].append(_finding(severity="CRITICAL", key="CVE-NEW",
                                       fixed="13.0.0"))
     dw.run_daily_scan()
-    assert tasks == [("Pillow", "onlyg")]
+    assert len(tasks) == 3
     assert "|OnlyG's task>" in posts[-1]
+
+
+def test_open_alerts_without_a_task_get_one_next_morning(world):
+    """The first live baseline (2026-10-25) filed a task for the exploited
+    Pillow flaw only. The rest get theirs on the next run, in one message
+    that tags the owners, and never twice."""
+    state, posts, tasks = world
+    state["findings"] = [
+        _finding(severity="HIGH", kev=True, key="CVE-2023-4863"),
+        _finding(package="Django", severity="CRITICAL", key="CVE-9",
+                 version="4.2.20", fixed="4.2.25"),
+        _finding(package="handlebars", eco="npm", severity="CRITICAL",
+                 key="CVE-7", repo=WEB.slug, version="4.7.9",
+                 fixed="4.7.10"),
+    ]
+    FakeLedger.baseline = True
+    for f in state["findings"]:
+        row = dw._row(f, dw.WATCHLIST)
+        FakeLedger.rows[row.ident] = {
+            "alerted_at": "x", "alerted_severity": row.severity,
+            "alerted_kev": row.kev,
+            "clickup_task_id": "868mmzwwe" if row.kev else None}
+    result = dw.run_daily_scan()
+    assert sorted(result["filed"]) == [("Django", "onlyg"),
+                                       ("handlebars", "sanjay")]
+    assert len(posts) == 1
+    assert posts[0].startswith("@onlyg @sanjay cc @sam :clipboard:")
+    assert "2 upgrade(s) already on the list now have a ClickUp task" \
+        in posts[0]
+    assert "Pillow" not in posts[0]
+    dw.run_daily_scan()
+    assert len(posts) == 1 and len(tasks) == 2
 
 
 def test_the_task_names_the_release_that_clears_everything(monkeypatch):

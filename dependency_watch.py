@@ -55,6 +55,9 @@ Sanjay's. Core, database, chats, integrations and the servers' runtimes go
 to OnlyG; the web app, landing page, mobile app and the web build to Sanjay.
 Each alert gets one ClickUp task per package per owner in the Priority
 Queue, assigned to them, and the #eng-infra alert tags them with Sam copied.
+Anything at alert level with no open task gets one the next morning (the
+first live baseline, which only filed the exploited one, and any task that
+failed to file), in one message that tags the owners.
 The weekly digest tags nobody (the same rule as sentry_notify: a digest that
 pings people every week gets muted).
 
@@ -1671,37 +1674,24 @@ def run_daily_scan(post: bool = True) -> dict:
               "repeat every morning")
         return {**summary, "status": "no_ledger"}
 
-    # One task per package per owner. The first run only files the
-    # exploited ones: everything else there is the baseline, not news.
-    tasks: dict[tuple[str, str], str] = {}
-    wanted = [r for r in due if r.kev] if first else due
-    for (name, owner), group in task_groups(wanted).items():
-        every = task_groups(s.rows).get((name, owner), group)
-        existing = next(
-            (told[r.ident]["clickup_task_id"] for r in every
-             if (told.get(r.ident) or {}).get("clickup_task_id")
-             and not told[r.ident].get("resolved_at")), "")
-        if existing:
-            tasks[(name, owner)] = f"https://app.clickup.com/t/{existing}"
-            continue
-        url = _create_task(name, owner, every, s.links)
-        if url:
-            tasks[(name, owner)] = url
-            ledger.set_task(every, url.rsplit("/", 1)[-1])
+    # One task per package per owner, for everything that alerts (on the
+    # first run, everything the baseline would have alerted on).
+    tasks = _file_tasks(due, s, told, ledger)
 
     if first:
         text, thread = digest_messages(
             s.rows, s.links, s.eols, s.problems, s.inv, 0, None,
             baseline=True)
         if tasks:
-            text += "\n\n*Assigned today* (exploited in the wild): " + \
-                _tags(_owners_of_tasks(tasks)) + "\n" + "\n".join(
-                    f"• {OWNER_NAMES[o]}: <{url}|{n}>"
-                    for (n, o), url in sorted(tasks.items()))
+            text += (f"\n\n*Assigned*: {len(tasks)} ClickUp tasks for "
+                     f"{_tags(_owners_of_tasks(tasks))}, listed in the "
+                     "thread.")
         ts = _post(text)
         note = claude_note([r for r in s.rows if r.tier in (KEV, URGENT)],
                            s.details) if ts else ""
-        for reply in ([note] if note else []) + (thread if ts else []):
+        replies = ([_task_list(tasks, s.rows)] if tasks else []) + \
+            ([note] if note else []) + thread
+        for reply in replies if ts else []:
             _post(reply, ts)
         if ts:
             ledger.mark_alerted([r for r in s.rows
@@ -1709,17 +1699,70 @@ def run_daily_scan(post: bool = True) -> dict:
             ledger.mark_baseline()
         return {**summary, "status": "baseline", "posted": bool(ts)}
 
-    if not due:
-        return summary
-    eol_keys = {r.key for r in due if r.key.startswith("EOL:")}
-    eols = [e for e in s.eols if e.key in eol_keys]
-    ts = _post(alert_message(due, s.links, eols, tasks))
-    if ts:
-        ledger.mark_alerted(due)
-        note = claude_note(due, s.details)
-        if note:
-            _post(note, ts)
-    return {**summary, "posted": bool(ts), "tasks": tasks}
+    ts = ""
+    if due:
+        eol_keys = {r.key for r in due if r.key.startswith("EOL:")}
+        eols = [e for e in s.eols if e.key in eol_keys]
+        ts = _post(alert_message(due, s.links, eols, tasks))
+        if ts:
+            ledger.mark_alerted(due)
+            note = claude_note(due, s.details)
+            if note:
+                _post(note, ts)
+
+    # Anything that alerts but has no open task: what a baseline listed
+    # before tasks were filed for it, or a task that failed to file.
+    open_rows = [r for r in s.rows if r.tier in (KEV, URGENT)
+                 and (_task_name(r), owner_of(r.repo)) not in tasks]
+    filed = _file_tasks(open_rows, s, told, ledger, reuse=False)
+    if filed:
+        _post(f"{_tags(_owners_of_tasks(filed))} :clipboard: *Dependency "
+              f"watch*: {len(filed)} upgrade(s) already on the list now have "
+              "a ClickUp task.\n" + _task_list(filed, s.rows))
+    return {**summary, "posted": bool(ts), "tasks": tasks, "filed": filed}
+
+
+def _file_tasks(rows: list[Row], s: Scan, told: dict, ledger,
+                reuse: bool = True) -> dict[tuple[str, str], str]:
+    """(name, owner) -> task URL for `rows`, one task per package per owner.
+    An open task already on the ledger is reused (and returned only when
+    `reuse`), so a package never gets a second task while one is open."""
+    out: dict[tuple[str, str], str] = {}
+    everything = task_groups(s.rows)
+    for (name, owner), group in task_groups(rows).items():
+        every = everything.get((name, owner), group)
+        existing = next(
+            (told[r.ident]["clickup_task_id"] for r in every
+             if (told.get(r.ident) or {}).get("clickup_task_id")
+             and not told[r.ident].get("resolved_at")), "")
+        if existing:
+            if reuse:
+                out[(name, owner)] = f"https://app.clickup.com/t/{existing}"
+            continue
+        url = _create_task(name, owner, every, s.links)
+        if url:
+            out[(name, owner)] = url
+            ledger.set_task(every, url.rsplit("/", 1)[-1])
+    return out
+
+
+def _task_list(tasks: dict[tuple[str, str], str], rows: list[Row]) -> str:
+    """One line per task: what, where, whose."""
+    lines = []
+    for (name, owner), url in sorted(
+            tasks.items(), key=lambda kv: (list(OWNER_NAMES).index(
+                kv[0][1]), kv[0][0].lower())):
+        group = task_groups(rows).get((name, owner), [])
+        where = ", ".join(sorted({_label(r.repo) for r in group}))
+        if name.startswith("EOL:"):
+            _, product, cycle = name.split(":", 2)
+            what = f"{EOL_NAMES.get(product, product)} {cycle} (end of life)"
+        else:
+            what = name
+        exploited = " exploited," if any(r.kev for r in group) else ""
+        lines.append(f"• *{what}* ({where}){exploited} "
+                     f"<{url}|{OWNER_NAMES[owner]}'s task>")
+    return "\n".join(lines)
 
 
 def _owners_of_tasks(tasks: dict[tuple[str, str], str]) -> list[str]:
