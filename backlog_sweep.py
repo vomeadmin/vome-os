@@ -1010,7 +1010,9 @@ def run_apply(action: str, keys: list[str], confirm: bool,
             print(f"  {key}: already applied "
                   f"({applied[entry['key']].get('action')})")
             continue
-        if entry["started"] and not started:
+        # An agent fix takes a started task over too (Sam, 2026-10-25: "If
+        # the agent can fix them, they should. Speed is everything.").
+        if entry["started"] and not started and action != "fix":
             print(f"  {key}: {', '.join(entry['engineers'])} has started it."
                   " Ask them first, then pass --started")
             continue

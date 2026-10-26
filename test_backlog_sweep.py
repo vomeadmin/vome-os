@@ -5,7 +5,8 @@ Sam, 2026-10-20: the work filed with OnlyG and Sanjay before triage existed
 gets one pass, and what an answer or an agent fix settles comes off their
 plates. What matters here: only work actually on an engineer's plate is
 swept, each card lands in the group that matches what would happen to it,
-a task an engineer has started is never taken without asking, apply never
+a task an engineer has started is never answered or closed without asking
+(an agent fix takes it over: speed is everything, 2026-10-25), apply never
 runs by accident, and releasing a task never sets a status that emails the
 client.
 """
@@ -184,6 +185,18 @@ def test_a_started_task_is_never_taken_without_asking(tmp_path, monkeypatch):
     bs.run_apply("answer", ["868abc123"], True, False)
     assert called == []
     bs.run_apply("answer", ["868abc123"], True, True)
+    assert len(called) == 1
+
+
+def test_an_agent_fix_takes_a_started_task_over(tmp_path, monkeypatch):
+    # Sam, 2026-10-25: "If the agent can fix them, they should. Speed is
+    # everything."
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    _seed(tmp_path, monkeypatch, _entry(started=True), _record())
+    called = []
+    monkeypatch.setattr(bs, "apply_one",
+                        lambda *a: called.append(a) or {"ok": True})
+    bs.run_apply("fix", ["868abc123"], True, False)
     assert len(called) == 1
 
 
