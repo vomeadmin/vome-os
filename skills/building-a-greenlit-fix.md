@@ -33,3 +33,13 @@ or environment files, `auth_app/` or `authentication_app/`, `permissions.py`,
 billing or payment code, dependency and CI files, and tests. The patch guard
 checks after you and cannot be talked round, and Sam's yes does not change
 it. Refuse those with `attempted: false` and say which rule.
+
+**When there is also a `Previous attempt` section**, your last diff for this
+same fix was refused because its lines did not match the file. It names the
+line, what your diff expected there and what the file actually has, then
+shows the diff. The file did not change; the diff misquoted it (2026-10-25:
+a hunk claimed line 423 for text on line 422). Write the whole diff again
+from the numbered source: copy every context and removed line character for
+character from it, take each `@@` line number from the number printed
+beside the first of those lines, and keep the same fix unless the complaint
+shows it was wrong.

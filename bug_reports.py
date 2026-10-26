@@ -159,6 +159,11 @@ _EXACT_WHERE = re.compile(r"^[\w-]+:[^\s:()]+(:\d+(-\d+)?)?$")
 # (which reads "Fix PR:") leaves it to run_rollup.
 MULTI_PR_LABEL = "Bug report PR:"
 _LEFT_OUT = re.compile(r"Left out:\s*(.+)", re.I | re.S)
+# How sentry_fix.open_pull_request reports a diff the applier refused: the
+# one failure a second fix author run can repair.
+PATCH_REFUSED = "patch does not apply"
+# A refused diff, as kept on the Agent Workflows task and shown to the retry.
+REJECTED_DIFF_CHARS = 20_000
 
 # What a greenlit fix author reads: each edited file whole up to
 # WHOLE_FILE_CHARS (past that, GREENLIT_WINDOW lines either side of each
@@ -744,7 +749,23 @@ def _fix_or_route(ts: str, row: dict, card: dict,
         ok, why = False, "the daily pull request cap is reached"
     if not ok:
         return _ask_greenlight(ts, row, card, why, dry_run)
+    # On its own the agent edits only the `where` file. A fix that needs more
+    # cannot be built that way, so asking first saves a fix author run that
+    # was always going to refuse (group members fix, 2026-10-25: the solo
+    # attempt was shown the serializer but not the view it also needed).
+    alone = _spot_set(card, greenlit=False)
+    needed = _spot_set(card, greenlit=True)
+    if needed - alone:
+        return _ask_greenlight(ts, row, card, f"it changes {len(needed)} "
+                               "files, more than I change without your yes",
+                               dry_run)
     return _build(ts, row, card, greenlit=False, dry_run=dry_run)
+
+
+def _spot_set(card: dict, greenlit: bool) -> set[tuple[str, str]]:
+    """(repo alias, path) for every file the fix edits."""
+    return {(alias, path) for alias, places in _spots(card, greenlit).items()
+            for path, _line in places}
 
 
 def _hard_limit(card: dict) -> str:
@@ -859,9 +880,11 @@ def _auto_route(ts: str, row: dict, card: dict, reason: str,
 
 
 def _offer_route(ts: str, card: dict, reason: str,
-                 dry_run: bool = False, log: bool = False) -> dict:
+                 dry_run: bool = False, log: bool = False,
+                 rejected: list | None = None) -> dict:
     """`log`: this is a failure, not a refusal by design, so it also goes
-    to Agent Workflows for review (a hard limit is not logged)."""
+    to Agent Workflows for review (a hard limit is not logged).
+    `rejected`: (repo alias, diff) the applier refused, kept on the log."""
     text = (f"<@{SAM_SLACK}> I can't build this: {reason.rstrip('. ')}. "
             f"Say `route {_team(card)}` to send it to an engineer, or "
             "`close`.")
@@ -869,20 +892,29 @@ def _offer_route(ts: str, card: dict, reason: str,
         return _dry(ts, card, [f"thread: {text}"]
                     + (["log the failure in Agent Workflows"] if log else []))
     if log:
-        text += _logged_line(_log_failure(ts, card, reason))
+        text += _logged_line(_log_failure(ts, card, reason,
+                                          rejected=rejected))
     _post(text, thread_ts=ts)
     _save(ts, status=GREENLIT)
     return {"status": "ok", "action": "route offered", "reason": reason}
 
 
 def _log_failure(ts: str, card: dict, reason: str,
-                 what: str = "The greenlit build failed") -> str:
+                 what: str = "The greenlit build failed",
+                 rejected: list | None = None) -> str:
     """File a bug report workflow failure in Agent Workflows (Sam,
-    2026-10-20: every failure is reviewed). Returns the task link or ""."""
+    2026-10-20: every failure is reviewed). Returns the task link or "".
+
+    A refused diff goes on the task too. The group members failure
+    (2026-10-25) logged only the applier's error, so nobody could see which
+    hunk was wrong."""
     import workflow_log
 
     code = card.get("code_check") or {}
     repos = ", ".join(sorted(_spots(card, greenlit=True))) or "unknown"
+    diffs = [f"\n**Refused diff ({alias}):**\n```diff\n"
+             f"{diff[:REJECTED_DIFF_CHARS].rstrip()}\n```"
+             for alias, diff in rejected or []]
     return workflow_log.log_issue(
         area="bug reports",
         title=f"{what}: {card.get('headline') or 'a #bug-reports report'}"[
@@ -897,6 +929,7 @@ def _log_failure(ts: str, card: dict, reason: str,
             f"- Files: {', '.join(code.get('files') or []) or '(none)'}",
             f"- References: "
             f"{', '.join(code.get('references') or []) or '(none)'}",
+            *diffs,
         ]),
         channel=CHANNEL, thread_ts=_parent_of(ts) or ts,
         next_step="Work out with Claude what the workflow needs, fix it, "
@@ -927,24 +960,12 @@ def _build(ts: str, row: dict, card: dict, greenlit: bool,
     import sentry_fix
 
     headline = str(card.get("headline") or "")[:60]
-    opened, failed, previews = [], [], []
-    for alias, places in spots.items():
-        proposal, repo = _propose(ts, card, alias, places, len(spots) > 1,
-                                  greenlit=greenlit)
-        if not proposal.get("diff") or not proposal.get("attempted"):
-            failed.append((alias, proposal.get("reason") or "no diff"))
-            continue
-        # A partial build: the fix author wrote what it could and named the
-        # rest (skill building-a-greenlit-fix).
-        left = _LEFT_OUT.search(str(proposal.get("rationale") or ""))
-        if left:
-            failed.append((alias, "left out " + left.group(1).strip()))
-        if dry_run:
-            previews.append(f"PR into {alias} dev branch:\n"
-                            f"{proposal['diff'][:3000]}")
-            continue
-        pr = sentry_fix.open_pull_request(
-            {"issue_id": _issue_key(ts, alias if len(spots) > 1 else ""),
+    several = len(spots) > 1
+    opened, failed, previews, rejected = [], [], [], []
+
+    def open_pr(proposal, repo, alias):
+        return sentry_fix.open_pull_request(
+            {"issue_id": _issue_key(ts, alias if several else ""),
              "triage_summary": headline,
              "source_label": f"#bug-reports, reported by "
                              f"{row.get('reporter') or 'a teammate'}",
@@ -954,6 +975,39 @@ def _build(ts: str, row: dict, card: dict, greenlit: bool,
              "root_cause": (card.get("code_check") or {}).get("finding")
              or ""},
         )
+
+    for alias, places in spots.items():
+        proposal, repo = _propose(ts, card, alias, places, several,
+                                  greenlit=greenlit)
+        if not proposal.get("diff") or not proposal.get("attempted"):
+            failed.append((alias, proposal.get("reason") or "no diff"))
+            continue
+        if dry_run:
+            failed += _left_out(alias, proposal)
+            previews.append(f"PR into {alias} dev branch:\n"
+                            f"{proposal['diff'][:3000]}")
+            continue
+        pr = open_pr(proposal, repo, alias)
+        reason = str(pr.get("reason") or "")
+        if greenlit and not pr.get("opened") and \
+                reason.startswith(PATCH_REFUSED):
+            # A diff that misquotes the file. Sam's yes is worth one more
+            # senior run: the fix author sees the applier's exact complaint
+            # and its own diff, and writes it again from the source.
+            rejected.append((alias, proposal["diff"]))
+            retry, _repo = _propose(
+                ts, card, alias, places, several, greenlit=True,
+                previous_attempt=_previous_attempt(reason, proposal["diff"]))
+            if retry.get("diff") and retry.get("attempted"):
+                proposal = retry
+                pr = open_pr(proposal, repo, alias)
+                if not pr.get("opened") and str(
+                        pr.get("reason") or "").startswith(PATCH_REFUSED):
+                    rejected.append((alias, proposal["diff"]))
+            else:
+                pr = {"reason": f"{reason}. A second attempt wrote no diff: "
+                                f"{retry.get('reason') or 'no reason given'}"}
+        failed += _left_out(alias, proposal)
         if pr.get("opened"):
             opened.append((repo, pr["url"]))
         else:
@@ -968,11 +1022,12 @@ def _build(ts: str, row: dict, card: dict, greenlit: bool,
             # The small fix the agent tried alone did not work out. Sam can
             # still say yes to the whole fix, across every file it names.
             url = _log_failure(ts, card, reason,
-                               what="The agent's own small fix failed")
+                               what="The agent's own small fix failed",
+                               rejected=rejected)
             return _ask_greenlight(ts, row, card, f"I tried the small "
                                    f"version and it did not work ({reason})",
                                    logged=url)
-        return _offer_route(ts, card, reason, log=True)
+        return _offer_route(ts, card, reason, log=True, rejected=rejected)
 
     fix_task = _file_fix_task(card, opened, ts)
     task_url = f"https://app.clickup.com/t/{fix_task}" if fix_task else ""
@@ -1006,8 +1061,23 @@ def _build(ts: str, row: dict, card: dict, greenlit: bool,
             "not_built": [a for a, _r in failed]}
 
 
+def _left_out(alias: str, proposal: dict) -> list:
+    """A partial build: the fix author wrote what it could and named the
+    rest (skill building-a-greenlit-fix)."""
+    left = _LEFT_OUT.search(str(proposal.get("rationale") or ""))
+    return [(alias, "left out " + left.group(1).strip())] if left else []
+
+
+def _previous_attempt(reason: str, diff: str) -> str:
+    """What the fix author is told when its diff did not apply: the
+    applier's complaint, then the diff itself."""
+    return (f"{reason}\n\nThe diff that was refused:\n\n"
+            f"{diff[:REJECTED_DIFF_CHARS]}")
+
+
 def _propose(ts: str, card: dict, alias: str, places: list,
-             several: bool = False, greenlit: bool = False):
+             several: bool = False, greenlit: bool = False,
+             previous_attempt: str = ""):
     """The fix author's diff for one repo, written against the branch it
     will merge into. Same ladder as ticket_fix._propose, minus the Zoho
     ticket, across every place in this repo.
@@ -1045,6 +1115,8 @@ def _propose(ts: str, card: dict, alias: str, places: list,
             "Sam read the problem, this fix and its risk in #bug-reports "
             f"and said yes. Risk as he saw it: {card.get('risk_plain') or ''}"
             " He reviews the pull request before it merges.")
+    if previous_attempt:
+        extra["previous_attempt"] = previous_attempt
     proposal = sentry_fix.propose({
         "root_cause": code.get("finding") or "",
         "proposed_fix": fix,

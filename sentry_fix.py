@@ -100,6 +100,10 @@ def propose(analysis: dict, context: dict,
         # fix author's skill building-a-greenlit-fix reads this section.
         if context.get("greenlight"):
             fix_context["greenlight"] = context["greenlight"]
+        # The applier refused this author's last diff for the same fix; the
+        # skill building-a-greenlit-fix says how to write it again.
+        if context.get("previous_attempt"):
+            fix_context["previous_attempt"] = context["previous_attempt"]
         result = run_agent(
             "engineering.fix_author",
             context=fix_context,

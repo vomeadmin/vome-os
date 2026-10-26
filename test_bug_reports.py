@@ -84,7 +84,9 @@ class Recorder:
         self.diff = {"core": "--- a\n+++ b", "web": "--- a\n+++ b"}
         self.rationale: dict = {}
         self.greenlit_builds: list = []
+        # True or False for every PR, or a list consumed one PR at a time.
         self.pr_opens = True
+        self.retries: list = []
 
 
 @pytest.fixture
@@ -93,9 +95,12 @@ def rec(monkeypatch):
 
     r = Recorder()
 
-    def propose(ts, card, alias, places, several=False, greenlit=False):
+    def propose(ts, card, alias, places, several=False, greenlit=False,
+                previous_attempt=""):
         r.proposed.append((alias, sorted({p for p, _l in places})))
         r.greenlit_builds.append(greenlit)
+        if previous_attempt:
+            r.retries.append((alias, previous_attempt))
         diff = r.diff.get(alias, "")
         return ({"diff": diff, "attempted": bool(diff),
                  "rationale": r.rationale.get(alias, ""),
@@ -104,8 +109,12 @@ def rec(monkeypatch):
 
     def open_pr(issue, proposal, context):
         r.opened.append(context["repo"])
-        if not r.pr_opens:
-            return {"opened": False, "reason": "patch does not apply"}
+        ok = (r.pr_opens.pop(0) if isinstance(r.pr_opens, list)
+              else r.pr_opens)
+        if not ok:
+            return {"opened": False,
+                    "reason": "patch does not apply: x.py: line 3 does not "
+                              "match"}
         return {"opened": True, "url": f"https://pr/{context['repo']}"}
 
     monkeypatch.setattr(bug_reports, "_propose", propose)
@@ -114,9 +123,12 @@ def rec(monkeypatch):
     monkeypatch.setattr(bug_reports, "_refresh_card", lambda ts: {})
     # Failures go to Agent Workflows; record them instead of calling ClickUp.
     r.logged = []
+    r.rejected = []
     monkeypatch.setattr(bug_reports, "_log_failure",
-                        lambda ts, card, reason, what="build": r.logged.append(
-                            (what, reason)) or "https://app.clickup.com/t/AW1")
+                        lambda ts, card, reason, what="build", rejected=None:
+                        r.rejected.extend(rejected or [])
+                        or r.logged.append((what, reason))
+                        or "https://app.clickup.com/t/AW1")
     monkeypatch.setattr(bug_reports, "_post",
                         lambda text, thread_ts="", channel="":
                         r.posts.append((channel or "bug", thread_ts, text))
@@ -496,6 +508,98 @@ def test_a_greenlit_build_that_fails_offers_route_and_never_routes(
     assert "patch does not apply" in rec.posts[-1][2]
     assert not _engineer_assigned(rec)
     assert rec.saved["status"] == bug_reports.GREENLIT
+
+
+# ---------------------------------------------------------------------------
+# A diff the applier refuses gets one more try (group members, 2026-10-25)
+# ---------------------------------------------------------------------------
+
+def test_a_refused_diff_is_written_again_and_opens(rec, monkeypatch):
+    _greenlight_waiting(monkeypatch)
+    rec.pr_opens = [False, True, True]  # core refused, core retry, web
+    out = bug_reports._on_reply(TS, _sam("yes"))
+    assert out["pr_urls"] == ["https://pr/core-repo", "https://pr/web-repo"]
+    assert [a for a, _p in rec.proposed] == ["core", "core", "web"]
+    alias, note = rec.retries[0]
+    assert alias == "core" and len(rec.retries) == 1
+    assert note.startswith("patch does not apply: x.py: line 3")
+    assert "The diff that was refused:\n\n--- a\n+++ b" in note
+    assert rec.logged == []
+
+
+def test_a_diff_refused_twice_offers_route_and_keeps_both_diffs(
+        rec, monkeypatch):
+    _greenlight_waiting(monkeypatch)
+    rec.pr_opens = False
+    out = bug_reports._on_reply(TS, _sam("yes"))
+    assert out["action"] == "route offered"
+    # One retry per repo, never more.
+    assert [a for a, _p in rec.proposed] == ["core", "core", "web", "web"]
+    assert [a for a, _d in rec.rejected] == ["core", "core", "web", "web"]
+    assert rec.saved["status"] == bug_reports.GREENLIT
+
+
+def test_a_retry_that_writes_nothing_says_so(rec, monkeypatch):
+    _greenlight_waiting(monkeypatch)
+    rec.pr_opens = False
+    real = bug_reports._propose
+
+    def second_declines(*args, previous_attempt="", **kw):
+        out, repo = real(*args, previous_attempt=previous_attempt, **kw)
+        return ({"attempted": False, "reason": "unsure"}, repo) \
+            if previous_attempt else (out, repo)
+
+    monkeypatch.setattr(bug_reports, "_propose", second_declines)
+    bug_reports._on_reply(TS, _sam("yes"))
+    assert "A second attempt wrote no diff: unsure" in rec.posts[-1][2]
+
+
+def test_only_a_refused_patch_is_retried(rec, monkeypatch):
+    import sentry_fix
+
+    _greenlight_waiting(monkeypatch)
+    monkeypatch.setattr(sentry_fix, "open_pull_request",
+                        lambda issue, proposal, context:
+                        {"opened": False, "reason": "no write token"})
+    bug_reports._on_reply(TS, _sam("yes"))
+    assert rec.retries == []
+
+
+def test_the_agents_own_build_is_not_retried(rec):
+    rec.pr_opens = False
+    bug_reports.act(TS, _row(), BUG)
+    assert rec.retries == [] and len(rec.proposed) == 1
+
+
+def test_a_fix_needing_more_files_asks_before_trying_alone(rec):
+    card = {**BUG, "code_check": {**BUG["code_check"], "files": [
+        "core:sequence_app/step_exemption/views.py:14",
+        "core:sequence_app/step_exemption/serializers.py:40"]}}
+    out = bug_reports.act(TS, _row(), card)
+    assert out["verdict"] == bug_reports.GREENLIGHT
+    assert rec.proposed == [] and rec.logged == []
+    assert "it changes 2 files, more than I change without your yes" in \
+        rec.posts[-1][2]
+
+
+def test_a_fix_whose_files_are_its_where_still_tries_alone(rec):
+    card = {**BUG, "code_check": {**BUG["code_check"], "files": [
+        "core:sequence_app/step_exemption/views.py:30"]}}
+    out = bug_reports.act(TS, _row(), card)
+    assert out.get("pr_urls") == ["https://pr/core-repo"]
+
+
+def test_a_refused_diff_is_kept_on_the_workflow_task(monkeypatch):
+    import workflow_log
+
+    seen = {}
+    monkeypatch.setattr(workflow_log, "log_issue",
+                        lambda **kw: seen.update(kw) or "u")
+    monkeypatch.setattr(bug_reports, "_parent_of", lambda ts: "")
+    bug_reports._log_failure(TS, GUEST, "patch does not apply: x",
+                             rejected=[("core", "--- a/x.py\n+++ b/x.py\n")])
+    assert "**Refused diff (core):**\n```diff\n--- a/x.py\n+++ b/x.py\n```" \
+        in seen["details"]
 
 
 # ---------------------------------------------------------------------------

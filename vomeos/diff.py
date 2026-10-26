@@ -22,10 +22,20 @@ If one does not match, nothing is applied and the caller is told exactly
 which line disagreed. A rejected patch costs a pull request nobody opened. A
 misapplied one costs a corrupted file in a branch somebody merges.
 
-There is deliberately no fuzz factor and no offset search. `patch(1)` will
-happily apply a hunk three lines away from where it claimed to belong, which
-is a convenience for a human watching the output and a hazard for a machine
-that is not.
+There is deliberately no fuzz factor. `patch(1)` will happily apply a hunk
+whose context only roughly matches, which is a convenience for a human
+watching the output and a hazard for a machine that is not.
+
+WHEN A HUNK MAY MOVE
+--------------------
+The line numbers in an `@@` header are the one part of a diff a model writes
+by counting, and it miscounts. The group members fix (2026-10-25) was
+refused because a hunk claimed line 423 for text that sits on line 422; the
+file had not changed in two months. So a hunk whose lines do not match where
+it claims may still apply, but only where every context and removed line
+matches exactly, and only when that is the one place in the whole file they
+do. Exact and unique is what makes it safe: there is no other text the hunk
+could be describing. Several matches, or none, and nothing is applied.
 """
 
 from __future__ import annotations
@@ -105,59 +115,106 @@ def apply(original: str, diff: str) -> str:
     text = original.replace("\r\n", "\n")
     lines = text.split("\n")
 
+    # Every hunk is placed against the untouched file before any is applied,
+    # so a moved hunk is judged on the same text as the others.
+    placed = sorted(((_locate(lines, hunk), hunk) for hunk in hunks),
+                    key=lambda pair: pair[0])
+    for (start, hunk), (later, _next) in zip(placed, placed[1:]):
+        if start + len(_old_side(hunk)) > later:
+            raise DiffError(
+                f"hunks at lines {start + 1} and {later + 1} overlap; "
+                "nothing was applied."
+            )
+
     # Applied back to front so earlier edits do not shift later line numbers.
-    for hunk in sorted(hunks, key=lambda h: h.old_start, reverse=True):
-        lines = _apply_hunk(lines, hunk)
+    for start, hunk in reversed(placed):
+        lines = _apply_hunk(lines, hunk, start)
 
     result = "\n".join(lines)
     return result.replace("\n", "\r\n") if crlf else result
 
 
-def _apply_hunk(lines: list[str], hunk: Hunk) -> list[str]:
+def _old_side(hunk: Hunk) -> list[str]:
+    """The lines the hunk expects to find: context and removed, in order."""
+    return [entry[1:] for entry in hunk.lines if entry[0] in (" ", "-")]
+
+
+def _matches_at(lines: list[str], index: int, old: list[str]) -> bool:
+    if index + len(old) > len(lines):
+        return False
+    return all(lines[index + i].rstrip() == content.rstrip()
+               for i, content in enumerate(old))
+
+
+def _locate(lines: list[str], hunk: Hunk) -> int:
+    """The 0-based line the hunk applies at, or DiffError.
+
+    Where the header says, when it fits. Otherwise the one place in the file
+    the hunk's lines match exactly (see WHEN A HUNK MAY MOVE). A hunk that
+    only adds lines has nothing to match, so it never moves.
+    """
     index = hunk.old_start - 1
-    if index < 0 or index > len(lines):
+    inside = 0 <= index <= len(lines)
+    old = _old_side(hunk)
+    if inside and _matches_at(lines, index, old):
+        return index
+
+    found = []
+    if any(content.strip() for content in old):
+        found = [i for i in range(len(lines) - len(old) + 1)
+                 if _matches_at(lines, i, old)]
+        if len(found) == 1:
+            return found[0]
+    if not inside:
         raise DiffError(
             f"hunk starts at line {hunk.old_start}, outside a file of "
-            f"{len(lines)} lines"
+            f"{len(lines)} lines; nothing was applied."
         )
+    if found:
+        why = (f"The hunk's lines match {len(found)} other places, so it "
+               "was not moved")
+    else:
+        why = ("The hunk's lines are not anywhere else in the file either: "
+               "the diff misquotes the file, or the file changed since it "
+               "was read")
+    raise DiffError(f"{_first_mismatch(lines, index, old, hunk)} {why}; "
+                    "nothing was applied.")
 
+
+def _first_mismatch(lines: list[str], index: int, old: list[str],
+                    hunk: Hunk) -> str:
+    """The first line that disagrees, named exactly.
+
+    The line number, what was expected and what is actually there, because
+    "patch does not apply" with no detail is the least useful message in
+    software.
+    """
+    for offset, content in enumerate(old):
+        cursor = index + offset
+        if cursor >= len(lines):
+            return (f"hunk at line {hunk.old_start} ran past the end of the "
+                    f"file while looking for {content!r}.")
+        if lines[cursor].rstrip() != content.rstrip():
+            return (f"line {cursor + 1} does not match. Diff expects "
+                    f"{content!r}, file has {lines[cursor]!r}.")
+    return "the hunk does not fit."
+
+
+def _apply_hunk(lines: list[str], hunk: Hunk, index: int) -> list[str]:
     replacement: list[str] = []
     cursor = index
 
     for entry in hunk.lines:
         marker, content = entry[0], entry[1:]
         if marker == " ":
-            _expect(lines, cursor, content, hunk, "context")
             replacement.append(lines[cursor])
             cursor += 1
         elif marker == "-":
-            _expect(lines, cursor, content, hunk, "removed")
             cursor += 1
         elif marker == "+":
             replacement.append(content)
 
     return lines[:index] + replacement + lines[cursor:]
-
-
-def _expect(lines: list[str], cursor: int, content: str, hunk: Hunk,
-            kind: str) -> None:
-    """Verify one line, or refuse the whole patch.
-
-    The error names the line number, what was expected and what is actually
-    there, because "patch does not apply" with no detail is the least useful
-    message in software.
-    """
-    if cursor >= len(lines):
-        raise DiffError(
-            f"hunk at line {hunk.old_start} ran past the end of the file "
-            f"while looking for a {kind} line: {content!r}"
-        )
-    if lines[cursor].rstrip() != content.rstrip():
-        raise DiffError(
-            f"{kind} line {cursor + 1} does not match. "
-            f"Diff expects {content!r}, file has {lines[cursor]!r}. "
-            "The file has changed since it was read; nothing was applied."
-        )
 
 
 def files_in(diff: str) -> list[str]:

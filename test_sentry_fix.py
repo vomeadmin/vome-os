@@ -316,6 +316,84 @@ def test_a_patch_that_no_longer_fits_is_refused():
         diff_tools.apply(moved, patch)
     assert "does not match" in str(exc.value)
     assert "nothing was applied" in str(exc.value)
+    assert "not anywhere else in the file" in str(exc.value)
+
+
+# groups_app/serializers.py around the group members fix (2026-10-25): the
+# fix author's hunk put `return [` on line 423, one below where it is.
+MEMBERS = "\n".join([
+    "    def get_user_sites(self, obj):",
+    "        user_sites = getattr(obj.user, 'member_user_sites', None)",
+    "        if not user_sites:",
+    "            return []",
+    "        return [",
+    "            {'id': str(us.site_id), 'name': us.site.name}",
+    "            for us in user_sites",
+    "        ]",
+    "",
+    "",
+    "class ManageGroupTagsSerializer(serializers.Serializer):",
+])
+
+
+def test_a_miscounted_hunk_applies_where_its_lines_are():
+    patch = (
+        "--- a/s.py\n+++ b/s.py\n@@ -6,4 +6,8 @@\n"
+        "         return [\n"
+        "             {'id': str(us.site_id), 'name': us.site.name}\n"
+        "             for us in user_sites\n"
+        "         ]\n"
+        "+\n"
+        "+    def get_is_invited(self, obj):\n"
+        "+        return bool(obj.has_open_invite)\n"
+    )
+    out = diff_tools.apply(MEMBERS, patch).split("\n")
+    assert out[7] == "        ]"
+    assert out[9] == "    def get_is_invited(self, obj):"
+    assert out[-1] == "class ManageGroupTagsSerializer(serializers.Serializer):"
+
+
+def test_a_hunk_that_matches_two_places_is_not_moved():
+    twice = MEMBERS + "\n" + MEMBERS
+    patch = (
+        "--- a/s.py\n+++ b/s.py\n@@ -5,2 +5,2 @@\n"
+        "         if not user_sites:\n"
+        "-            return []\n"
+        "+            return None\n"
+    )
+    with pytest.raises(diff_tools.DiffError) as exc:
+        diff_tools.apply(twice, patch)
+    assert "match 2 other places" in str(exc.value)
+
+
+def test_a_hunk_at_its_stated_line_never_moves():
+    # Two places match; the header names one of them, so that one is used.
+    twice = MEMBERS + "\n" + MEMBERS
+    patch = (
+        "--- a/s.py\n+++ b/s.py\n@@ -14,2 +14,2 @@\n"
+        "         if not user_sites:\n"
+        "-            return []\n"
+        "+            return None\n"
+    )
+    out = diff_tools.apply(twice, patch).split("\n")
+    assert out[3] == "            return []"
+    assert out[14] == "            return None"
+
+
+def test_moved_hunks_that_overlap_are_refused():
+    patch = (
+        "--- a/s.py\n+++ b/s.py\n@@ -1,2 +1,2 @@\n"
+        "         return [\n"
+        "-            {'id': str(us.site_id), 'name': us.site.name}\n"
+        "+            {'id': str(us.site_id)}\n"
+        "@@ -40,2 +40,2 @@\n"
+        "             {'id': str(us.site_id), 'name': us.site.name}\n"
+        "-            for us in user_sites\n"
+        "+            for us in sites\n"
+    )
+    with pytest.raises(diff_tools.DiffError) as exc:
+        diff_tools.apply(MEMBERS, patch)
+    assert "overlap" in str(exc.value)
 
 
 def test_line_endings_survive():
