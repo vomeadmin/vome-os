@@ -36,17 +36,32 @@ WHERE THE DATA COMES FROM
 
 WHAT GETS SAID, AND WHEN
 ------------------------
-  in CISA KEV                          -> alert the same morning + ClickUp task
-  critical with a fix, runtime code    -> alert the same morning
-  high with a fix, heavily used pkg    -> alert the same morning
-  EPSS at or above the threshold       -> alert the same morning
-  framework or runtime already EOL     -> alert once, then in every digest
+  in CISA KEV                          -> alert the same morning + task
+  critical with a fix, runtime code    -> alert the same morning + task
+  high with a fix, heavily used pkg    -> alert the same morning + task
+  EPSS at or above the threshold       -> alert the same morning + task
+  framework or runtime already EOL     -> alert once + task, then every digest
   everything else (and EOL soon)       -> weekly digest
 
 "Heavily used" is WATCHLIST below. A high advisory on a transitive build tool
 (vome-react pulls in ~2,500 packages) waits for the digest: the first scan
 found 346 high or critical hits, and alerting on all of them would teach the
 channel to ignore this.
+
+WHO OWNS IT
+-----------
+Sam's rule (2026-10-25): backend is OnlyG's, frontend and mobile are
+Sanjay's. Core, database, chats, integrations and the servers' runtimes go
+to OnlyG; the web app, landing page, mobile app and the web build to Sanjay.
+Each alert gets one ClickUp task per package per owner in the Priority
+Queue, assigned to them, and the #eng-infra alert tags them with Sam copied.
+The weekly digest tags nobody (the same rule as sentry_notify: a digest that
+pings people every week gets muted).
+
+The task names the release that clears every advisory the watch tracks on
+that package, not the nearest fix for the one that triggered it: the first
+KEV task said Pillow 10.0.1, which fixes CVE-2023-4863 and leaves 40 critical
+and high advisories that 13.0.0 fixes.
 
 CLAUDE READS, CODE DECIDES
 --------------------------
@@ -239,6 +254,36 @@ def _watchlist() -> set[tuple[str, str]]:
 
 def _label(slug: str) -> str:
     return LABELS.get(slug, slug)
+
+
+# Who fixes what (see WHO OWNS IT). A label, so end-of-life rows, which are
+# keyed by where ("web build", "servers"), route the same way as packages.
+FRONTEND = {"web", "landing", "mobile", "web build", "landing build",
+            "mobile build"}
+OWNER_NAMES = {"onlyg": "OnlyG", "sanjay": "Sanjay"}
+
+
+def owner_of(repo: str) -> str:
+    """"onlyg" or "sanjay" for a repo slug or a label like "web build"."""
+    return "sanjay" if _label(repo) in FRONTEND else "onlyg"
+
+
+def _owners(repos) -> list[str]:
+    return sorted({owner_of(r) for r in repos}, key=list(OWNER_NAMES).index)
+
+
+def _mention(name: str) -> str:
+    """<@U...> for onlyg, sanjay or sam; the plain name when no id is set."""
+    import sentry_notify
+
+    return sentry_notify.mention(name)
+
+
+def _clickup_user(owner: str) -> int | None:
+    import sprint_thread
+
+    engineer = sprint_thread.ENGINEERS.get(owner)
+    return engineer[0] if engineer else None
 
 
 # ---------------------------------------------------------------------------
@@ -1184,19 +1229,24 @@ def _repo_versions(rows: list[Row]) -> str:
                                             reverse=True))
 
 
+def _tally(rows: list[Row]) -> str:
+    """"5 critical, 35 high": advisories by their worst severity."""
+    counts: dict[str, int] = {}
+    for k in {r.key for r in rows}:
+        sev = max((r.severity for r in rows if r.key == k),
+                  key=lambda s: SEVERITY_RANK.get(s, 0))
+        counts[sev] = counts.get(sev, 0) + 1
+    return ", ".join(f"{n} {s.lower()}" for s, n in
+                     sorted(counts.items(),
+                            key=lambda kv: -SEVERITY_RANK.get(kv[0], 0)))
+
+
 def _package_line(package: str, rows: list[Row],
                   links: dict[str, str]) -> str:
     keys = sorted({r.key for r in rows},
                   key=lambda k: -max(SEVERITY_RANK.get(r.severity, 0)
                                      for r in rows if r.key == k))
-    counts: dict[str, int] = {}
-    for k in keys:
-        sev = max((r.severity for r in rows if r.key == k),
-                  key=lambda s: SEVERITY_RANK.get(s, 0))
-        counts[sev] = counts.get(sev, 0) + 1
-    tally = ", ".join(f"{n} {s.lower()}" for s, n in
-                      sorted(counts.items(),
-                             key=lambda kv: -SEVERITY_RANK.get(kv[0], 0)))
+    tally = _tally(rows)
     fixes = [r.fixed for r in rows if r.fixed]
     fix = f", fixed in {max(fixes, key=_vkey)}" if fixes else ", no fix yet"
     shown = ", ".join(f"<{links.get(k, '')}|{k}>" if links.get(k) else k
@@ -1242,21 +1292,50 @@ def _eol_line(e: Eol) -> str:
     return (f"*{name} {e.cycle}* ({where}): support ends {e.eol_date}.")
 
 
+def _task_name(r: Row) -> str:
+    """What one task is about: the package, or the end-of-life cycle."""
+    return r.key if r.key.startswith("EOL:") else r.package
+
+
+def task_groups(rows: list[Row]) -> dict[tuple[str, str], list[Row]]:
+    """(package or EOL key, owner) -> rows. One task each."""
+    out: dict[tuple[str, str], list[Row]] = {}
+    for r in rows:
+        out.setdefault((_task_name(r), owner_of(r.repo)), []).append(r)
+    return out
+
+
+def _owner_note(name: str, owners: list[str],
+                tasks: dict[tuple[str, str], str]) -> str:
+    parts = [f"<{tasks[(name, o)]}|{OWNER_NAMES[o]}'s task>"
+             if tasks.get((name, o)) else OWNER_NAMES[o] for o in owners]
+    return f" Owner: {', '.join(parts)}." if parts else ""
+
+
+def _tags(owners: list[str]) -> str:
+    """The owners tagged, Sam copied, for the top of an alert."""
+    return " ".join([_mention(o) for o in owners]
+                    + [f"cc {_mention('sam')}"])
+
+
 def alert_message(rows: list[Row], links: dict[str, str],
-                  eols: list[Eol], tasks: dict[str, str]) -> str:
+                  eols: list[Eol],
+                  tasks: dict[tuple[str, str], str]) -> str:
     vuln = [r for r in rows if not r.key.startswith("EOL:")]
-    lines = [":rotating_light: *Dependency alert*: "
+    owners = _owners([r.repo for r in vuln]
+                     + [w for e in eols for w in e.where])
+    lines = [f"{_tags(owners)} :rotating_light: *Dependency alert*: "
              + ("something new needs a look today."
                 if len(_group(vuln)) + len(eols) == 1
                 else f"{len(_group(vuln)) + len(eols)} new things need a "
                      "look today.")]
     for package, group in _group(vuln).items():
-        line = "• " + _package_line(package, group, links)
-        if tasks.get(package):
-            line += f" <{tasks[package]}|ClickUp task>"
-        lines.append(line)
+        lines.append("• " + _package_line(package, group, links)
+                     + _owner_note(package, _owners(r.repo for r in group),
+                                   tasks))
     for e in eols:
-        lines.append("• " + _eol_line(e))
+        lines.append("• " + _eol_line(e)
+                     + _owner_note(e.key, _owners(e.where), tasks))
     lines.append("_Daily dependency watch. Each of these is said once; the "
                  "weekly digest keeps the full list._")
     return "\n".join(lines)
@@ -1439,8 +1518,12 @@ def _post(text: str, thread_ts: str = "") -> str:
     return ""
 
 
-def _create_task(package: str, rows: list[Row], links: dict[str, str]) -> str:
-    """One ClickUp task per exploited package. Returns its URL or ""."""
+def _create_task(name: str, owner: str, rows: list[Row],
+                 links: dict[str, str]) -> str:
+    """One ClickUp task for one package (or end-of-life cycle) and one
+    owner, assigned to them. `rows` is everything the watch tracks on it in
+    that owner's repos, so the upgrade named clears all of it. Returns the
+    task URL or ""."""
     token = os.environ.get("CLICKUP_API_TOKEN", "")
     if not token:
         return ""
@@ -1451,34 +1534,64 @@ def _create_task(package: str, rows: list[Row], links: dict[str, str]) -> str:
         TYPE_BUG,
     )
 
-    kev = sorted({r.key for r in rows if r.kev})
-    fixes = [r.fixed for r in rows if r.fixed]
-    target = max(fixes, key=_vkey) if fixes else ""
-    description = "\n".join([
-        f"**{package}** has a vulnerability CISA lists as exploited in the "
-        "wild (Known Exploited Vulnerabilities catalog).", "",
-        f"**Where:** {_repo_versions(rows)}",
-        f"**Upgrade to:** {target or 'no fixed release yet'}", "",
-        "**Advisories**",
-        *[f"- [{k}]({links.get(k, '')}): "
-          f"{next((r.summary for r in rows if r.key == k), '')}"
-          for k in sorted({r.key for r in rows})],
-        "",
-        "Found by the VomeOS dependency watch (dependency_watch.py), which "
-        "reads each repo's lockfile on its live branch.",
-    ])
+    package = rows[0].package
+    who = OWNER_NAMES.get(owner, owner)
+    where = _repo_versions(rows)
+    if name.startswith("EOL:"):
+        product = EOL_NAMES.get(package, package)
+        cycle = name.rsplit(":", 1)[-1]
+        labels = ", ".join(sorted({_label(r.repo) for r in rows}))
+        title = (f"[Security] {product} {cycle} is out of support "
+                 f"({labels}), upgrade to a supported release")
+        body = [f"**{product} {cycle}** no longer gets security fixes "
+                f"({rows[0].summary}).", "",
+                f"**Where:** {where}", f"**Owner:** {who}",
+                f"**Upgrade to:** a supported release, see "
+                f"https://endoflife.date/{package}"]
+    else:
+        fixes = [r.fixed for r in rows if r.fixed]
+        target = max(fixes, key=_vkey) if fixes else ""
+        kev = sorted({r.key for r in rows if r.kev})
+        serious = [r for r in rows if r.severity in ("CRITICAL", "HIGH")]
+        what = (f"{', '.join(kev[:2])} exploited in the wild" if kev
+                else _tally(serious or rows))
+        title = (f"[Security] {package}: {what}"
+                 + (f", upgrade to {target}" if target else ""))
+        body = [f"**{package}** has known vulnerabilities in the versions we "
+                "run" + (", one of them exploited in the wild (CISA KEV)."
+                         if kev else "."), "",
+                f"**Where:** {where}", f"**Owner:** {who}",
+                f"**Upgrade to:** {target or 'no fixed release yet'}"
+                + (" (clears every advisory below)" if target else "")]
+        body += [f"**Exploited in the wild (CISA KEV):** {k} on "
+                 f"{_repo_versions([r for r in rows if r.key == k])}"
+                 for k in kev]
+        keys = sorted({r.key for r in rows},
+                      key=lambda k: (k not in kev, -max(
+                          SEVERITY_RANK.get(r.severity, 0)
+                          for r in rows if r.key == k)))
+        body += ["", f"**Advisories** ({_tally(rows)})"]
+        for k in keys[:20]:
+            r = next(r for r in rows if r.key == k)
+            link = f"[{k}]({links[k]})" if links.get(k) else k
+            body.append(f"- {link} ({r.severity.lower()}): {r.summary}")
+        if len(keys) > 20:
+            body.append(f"- and {len(keys) - 20} more, in the weekly digest")
+    body += ["", "Found by the VomeOS dependency watch (dependency_watch.py), "
+             "which reads each repo's lockfile on its live branch. Posted in "
+             "#eng-infra."]
+    assignee = _clickup_user(owner)
     try:
         resp = httpx.post(
             f"{CLICKUP_BASE}/list/{CLICKUP_LIST}/task",
             headers={"Authorization": token,
                      "Content-Type": "application/json"},
             json={
-                "name": (f"[Security] {package}: {', '.join(kev[:2])} "
-                         f"exploited in the wild"
-                         + (f", upgrade to {target}" if target else ""))[:180],
-                "markdown_description": description,
+                "name": title[:180],
+                "markdown_description": "\n".join(body),
+                "assignees": [assignee] if assignee else [],
                 "status": "queued",
-                "priority": 1,
+                "priority": 1 if any(r.kev for r in rows) else 2,
                 "custom_fields": [
                     {"id": FIELD_TYPE, "value": TYPE_BUG},
                     {"id": FIELD_SOURCE, "value": SOURCE_INTERNAL},
@@ -1490,7 +1603,7 @@ def _create_task(package: str, rows: list[Row], links: dict[str, str]) -> str:
         task_id = str(resp.json().get("id") or "")
         return f"https://app.clickup.com/t/{task_id}" if task_id else ""
     except Exception as exc:
-        print(f"[DEPWATCH] ClickUp task for {package} failed: {exc}")
+        print(f"[DEPWATCH] ClickUp task for {name} ({who}) failed: {exc}")
         return ""
 
 
@@ -1558,23 +1671,33 @@ def run_daily_scan(post: bool = True) -> dict:
               "repeat every morning")
         return {**summary, "status": "no_ledger"}
 
-    tasks: dict[str, str] = {}
-    for package, group in _group([r for r in due if r.kev]).items():
-        existing = next((told[r.ident]["clickup_task_id"] for r in group
-                         if (told.get(r.ident) or {}).get("clickup_task_id")),
-                        "")
+    # One task per package per owner. The first run only files the
+    # exploited ones: everything else there is the baseline, not news.
+    tasks: dict[tuple[str, str], str] = {}
+    wanted = [r for r in due if r.kev] if first else due
+    for (name, owner), group in task_groups(wanted).items():
+        every = task_groups(s.rows).get((name, owner), group)
+        existing = next(
+            (told[r.ident]["clickup_task_id"] for r in every
+             if (told.get(r.ident) or {}).get("clickup_task_id")
+             and not told[r.ident].get("resolved_at")), "")
         if existing:
-            tasks[package] = f"https://app.clickup.com/t/{existing}"
+            tasks[(name, owner)] = f"https://app.clickup.com/t/{existing}"
             continue
-        url = _create_task(package, group, s.links)
+        url = _create_task(name, owner, every, s.links)
         if url:
-            tasks[package] = url
-            ledger.set_task(group, url.rsplit("/", 1)[-1])
+            tasks[(name, owner)] = url
+            ledger.set_task(every, url.rsplit("/", 1)[-1])
 
     if first:
         text, thread = digest_messages(
             s.rows, s.links, s.eols, s.problems, s.inv, 0, None,
             baseline=True)
+        if tasks:
+            text += "\n\n*Assigned today* (exploited in the wild): " + \
+                _tags(_owners_of_tasks(tasks)) + "\n" + "\n".join(
+                    f"• {OWNER_NAMES[o]}: <{url}|{n}>"
+                    for (n, o), url in sorted(tasks.items()))
         ts = _post(text)
         note = claude_note([r for r in s.rows if r.tier in (KEV, URGENT)],
                            s.details) if ts else ""
@@ -1597,6 +1720,10 @@ def run_daily_scan(post: bool = True) -> dict:
         if note:
             _post(note, ts)
     return {**summary, "posted": bool(ts), "tasks": tasks}
+
+
+def _owners_of_tasks(tasks: dict[tuple[str, str], str]) -> list[str]:
+    return sorted({o for _, o in tasks}, key=list(OWNER_NAMES).index)
 
 
 def _digest_every() -> int:

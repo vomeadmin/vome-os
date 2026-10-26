@@ -465,6 +465,9 @@ class FakeLedger:
     def resolve_missing(self, seen, scanned):
         return 0
 
+    def resolved_since(self, since):
+        return 0
+
     def set_task(self, rows, task_id):
         for r in rows:
             FakeLedger.rows[r.ident]["clickup_task_id"] = task_id
@@ -494,8 +497,8 @@ def world(monkeypatch):
         posts.append(text)
         return f"ts{len(posts)}"
 
-    def fake_task(package, rows, links):
-        tasks.append(package)
+    def fake_task(name, owner, rows, links):
+        tasks.append((name, owner))
         return f"https://app.clickup.com/t/task{len(tasks)}"
 
     monkeypatch.setattr(dw, "Ledger", FakeLedger)
@@ -503,6 +506,7 @@ def world(monkeypatch):
     monkeypatch.setattr(dw, "_post", fake_post)
     monkeypatch.setattr(dw, "_create_task", fake_task)
     monkeypatch.setattr(dw, "_ask_claude", lambda prompt: "")
+    monkeypatch.setattr(dw, "_mention", lambda name: f"@{name}")
     monkeypatch.setenv("DEPENDENCY_WATCH_ENABLED", "true")
     return state, posts, tasks
 
@@ -537,7 +541,7 @@ def test_kev_gets_one_task_even_when_slack_fails(world, monkeypatch):
     monkeypatch.setattr(dw, "_post", lambda text, thread_ts="": "")
     dw.run_daily_scan()
     dw.run_daily_scan()
-    assert tasks == ["Pillow"]
+    assert tasks == [("Pillow", "onlyg")]
 
 
 def test_a_failed_baseline_post_is_retried_as_a_baseline(world, monkeypatch):
@@ -605,6 +609,115 @@ def _scan_with_details(state):
     return fake_scan
 
 
+# ---------------------------------------------------------------------------
+# Who owns it: backend is OnlyG's, frontend and mobile are Sanjay's
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("repo,owner", [
+    (CORE.slug, "onlyg"), (DB.slug, "onlyg"),
+    ("vomedjango-chats-app", "onlyg"), ("vomedjango-integrations-app",
+                                        "onlyg"),
+    ("servers", "onlyg"), ("core", "onlyg"),
+    (WEB.slug, "sanjay"), ("vome-landing-page", "sanjay"),
+    ("VomeApp", "sanjay"), ("web build", "sanjay"),
+])
+def test_owner_of(repo, owner):
+    assert dw.owner_of(repo) == owner
+
+
+def test_the_alert_tags_the_owners_and_copies_sam(world):
+    state, posts, tasks = world
+    dw.run_daily_scan()
+    state["findings"] = state["findings"] + [
+        _finding(package="Django", severity="CRITICAL", key="CVE-9",
+                 version="4.2.20", fixed="4.2.25"),
+        _finding(package="handlebars", eco="npm", severity="CRITICAL",
+                 key="CVE-7", repo=WEB.slug, version="4.7.9",
+                 fixed="4.7.10"),
+    ]
+    dw.run_daily_scan()
+    alert = posts[-1]
+    assert alert.startswith("@onlyg @sanjay cc @sam :rotating_light:")
+    # Every same-day alert gets a task now, not only exploited ones.
+    assert sorted(tasks) == [("Django", "onlyg"), ("handlebars", "sanjay")]
+    assert "Owner: <https://app.clickup.com/t/task" in alert
+    assert "|OnlyG's task>" in alert and "|Sanjay's task>" in alert
+
+
+def test_one_owner_tags_only_that_owner(world):
+    state, posts, tasks = world
+    dw.run_daily_scan()
+    state["findings"] = state["findings"] + [
+        _finding(package="handlebars", eco="npm", severity="CRITICAL",
+                 key="CVE-7", repo=WEB.slug, version="4.7.9",
+                 fixed="4.7.10")]
+    dw.run_daily_scan()
+    assert posts[-1].startswith("@sanjay cc @sam ")
+    assert "@onlyg" not in posts[-1]
+
+
+def test_baseline_files_only_exploited_and_names_who_has_them(world):
+    state, posts, tasks = world
+    state["findings"] = [
+        _finding(severity="HIGH", kev=True, key="CVE-2023-4863",
+                 fixed="10.0.1"),
+        _finding(severity="CRITICAL", key="CVE-2026-112393",
+                 fixed="13.0.0"),
+        _finding(package="Django", severity="CRITICAL", key="CVE-9",
+                 version="4.2.20", fixed="4.2.25"),
+    ]
+    dw.run_daily_scan()
+    assert tasks == [("Pillow", "onlyg")]
+    assert "*Assigned today* (exploited in the wild): @onlyg cc @sam" \
+        in posts[0]
+    # An open task is reused when the package comes up again.
+    state["findings"].append(_finding(severity="CRITICAL", key="CVE-NEW",
+                                      fixed="13.0.0"))
+    dw.run_daily_scan()
+    assert tasks == [("Pillow", "onlyg")]
+    assert "|OnlyG's task>" in posts[-1]
+
+
+def test_the_task_names_the_release_that_clears_everything(monkeypatch):
+    """The first KEV task said 10.0.1: right for CVE-2023-4863, wrong for
+    the 40 critical and high advisories 13.0.0 fixes."""
+    sent = {}
+
+    def post(url, headers=None, json=None, timeout=None):
+        sent.update(json)
+        return httpx.Response(200, json={"id": "abc"},
+                              request=httpx.Request("POST", url))
+
+    monkeypatch.setenv("CLICKUP_API_TOKEN", "t")
+    monkeypatch.setattr(dw.httpx, "post", post)
+    monkeypatch.setattr(dw, "_clickup_user", lambda owner: 49257687)
+    rows = [
+        dw._row(_finding(key="CVE-2023-4863", kev=True, fixed="10.0.1",
+                         version="10.0.0",
+                         repo="vomedjango-integrations-app"), dw.WATCHLIST),
+        dw._row(_finding(key="CVE-2026-112393", severity="CRITICAL",
+                         fixed="13.0.0"), dw.WATCHLIST),
+    ]
+    url = dw._create_task("Pillow", "onlyg", rows, {})
+    assert url == "https://app.clickup.com/t/abc"
+    assert sent["name"] == ("[Security] Pillow: CVE-2023-4863 exploited in "
+                            "the wild, upgrade to 13.0.0")
+    assert sent["assignees"] == [49257687]
+    assert sent["priority"] == 1
+    assert "**Owner:** OnlyG" in sent["markdown_description"]
+    assert "CVE-2023-4863 on 10.0.0 in integrations" in \
+        sent["markdown_description"]
+
+
+def test_the_digest_tags_nobody(world, monkeypatch):
+    state, posts, tasks = world
+    dw.run_daily_scan()
+    monkeypatch.setattr(dw, "hn_chatter", lambda days: [])
+    monkeypatch.setattr(dw, "_digest_week_due", lambda today: True)
+    dw.run_weekly_digest()
+    assert "@" not in posts[-1]
+
+
 def test_every_other_week(monkeypatch):
     monkeypatch.setenv("DEPENDENCY_WATCH_DIGEST_EVERY_WEEKS", "2")
     assert dw._digest_week_due(date(2026, 10, 21)) is False  # ISO week 43
@@ -667,6 +780,7 @@ def test_digest_reads_right_and_has_no_em_dash():
     assert "3 resolved since the last digest" in text
     assert "shell-quote" not in text and "shell-quote" in thread[0]
     for message in [text, *thread,
-                    dw.alert_message(rows, {}, eols, {"Pillow": "u"})]:
+                    dw.alert_message(rows, {}, eols,
+                                     {("Pillow", "onlyg"): "u"})]:
         assert "\N{EM DASH}" not in message
         assert "\N{EN DASH}" not in message
