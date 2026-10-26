@@ -53,18 +53,45 @@ WHO OWNS IT
 Sam's rule (2026-10-25): backend is OnlyG's, frontend and mobile are
 Sanjay's. Core, database, chats, integrations and the servers' runtimes go
 to OnlyG; the web app, landing page, mobile app and the web build to Sanjay.
-Each alert gets one ClickUp task per package per owner in the Priority
-Queue, assigned to them, and the #eng-infra alert tags them with Sam copied.
-Anything at alert level with no open task gets one the next morning (the
-first live baseline, which only filed the exploited one, and any task that
-failed to file), in one message that tags the owners.
-The weekly digest tags nobody (the same rule as sentry_notify: a digest that
-pings people every week gets muted).
+The #eng-infra alert tags them with Sam copied. The weekly digest tags
+nobody (the same rule as sentry_notify: a digest that pings people every
+week gets muted).
 
-The task names the release that clears every advisory the watch tracks on
+ONE TASK PER ENGINEER
+---------------------
+Sam's rule (2026-10-26, after 25 separate tasks landed in one morning): each
+engineer gets ONE task in the Priority Queue, "[Security] Backend dependency
+upgrades" or "[Security] Frontend dependency upgrades", and every upgrade at
+alert level is a subtask of it, named
+
+    How urgent · the version we run → the one to move to · how big
+    Critical (exploited) · Pillow 10.0.0, 10.4.0 → 13.0.0 · Major upgrade
+
+  How urgent: Critical = in CISA KEV or EPSS at the threshold. High = a
+    critical or high advisory in code we ship, or out of support. Low = a
+    build tool (BUILD_TOOLS).
+  How big, from the version numbers: Patch, Minor, Major upgrade, or
+    Project (a major upgrade of a framework or runtime, FRAMEWORKS).
+
+Critical, Major and Project upgrades get their own subtask; patch and minor
+bumps (and build tools) share one "Quick upgrades" subtask with a checklist.
+An upgrade is a package with its family (FAMILIES: react-pdf carries
+pdfjs-dist) and its end-of-life cycle: Django's advisories and Django 4.2
+being out of support are one subtask, one move to 5.2.
+
+Every morning the watch rewrites what changed, ticks checklist lines and
+closes subtasks once the live branch shows the upgrade, and closes the
+parent when nothing is left. It only closes or relabels after a run that
+read every repo of that engineer's and heard from every feed: unread is not
+fixed. The tasks are marker rows in the ledger (PLAN, owner, slot). The
+per-package tasks filed before this (Oct 25 and 26) were closed by the first
+run after it, each with a comment linking its subtask.
+
+The target is the release that clears every advisory the watch tracks on
 that package, not the nearest fix for the one that triggered it: the first
 KEV task said Pillow 10.0.1, which fixes CVE-2023-4863 and leaves 40 critical
-and high advisories that 13.0.0 fixes.
+and high advisories that 13.0.0 fixes. A target that is only a release
+candidate says so.
 
 CLAUDE READS, CODE DECIDES
 --------------------------
@@ -81,7 +108,7 @@ FIRST RUN
 ---------
 With an empty ledger nothing is "new", everything is. So the first run posts
 one baseline digest instead of an alert per advisory, and records it all as
-told. KEV findings still get their ClickUp task.
+told. The upgrade tasks are still filed, and the baseline names them.
 
 UNKNOWN IS NOT SAFE
 -------------------
@@ -99,7 +126,7 @@ SWITCHES
 --------
     DEPENDENCY_WATCH_ENABLED            default on. "false" stops both jobs
     SLACK_CHANNEL_ENG_INFRA             where it posts
-    DEPENDENCY_WATCH_CLICKUP_LIST       KEV tasks, default Priority Queue
+    DEPENDENCY_WATCH_CLICKUP_LIST       upgrade tasks, default Priority Queue
     DEPENDENCY_WATCH_EPSS               alert threshold, default 0.1 (10%)
     DEPENDENCY_WATCH_DIGEST_EVERY_WEEKS 1 (weekly) or 2
     DEPENDENCY_WATCH_RUNTIMES           versions the repos cannot tell us, e.g.
@@ -884,6 +911,7 @@ class Eol:
     eol_date: str
     latest: str
     where: list[str]
+    upgrade_to: str = ""  # the newest supported cycle, "24 LTS"
 
     @property
     def key(self) -> str:
@@ -909,6 +937,37 @@ def _runtimes() -> dict[str, str]:
         if product.strip() and version.strip():
             out[product.strip().lower()] = version.strip()
     return out
+
+
+def _upgrade_cycle(cycles: list[dict], today: date) -> str:
+    """The cycle to move to: the newest one supported past the warning
+    window, and an LTS one when the product has them ("24 LTS", not Node 25,
+    which is out of support in months)."""
+    def supported(c: dict) -> bool:
+        eol = c.get("eol")
+        if isinstance(eol, str):
+            try:
+                return date.fromisoformat(eol) > today + timedelta(
+                    days=EOL_SOON_DAYS)
+            except ValueError:
+                return False
+        return eol is not True
+
+    def lts(c: dict) -> bool:
+        value = c.get("lts")
+        if isinstance(value, str):
+            try:
+                return date.fromisoformat(value) <= today
+            except ValueError:
+                return False
+        return bool(value)
+
+    has_lts = any(lts(c) for c in cycles)
+    for c in sorted(cycles, key=lambda c: _vkey(str(c.get("cycle", ""))),
+                    reverse=True):
+        if supported(c) and (lts(c) or not has_lts):
+            return str(c.get("cycle", "")) + (" LTS" if has_lts else "")
+    return ""
 
 
 def _cycle_for(version: str, cycles: list[dict]) -> dict | None:
@@ -986,7 +1045,9 @@ def check_eol(inv: Inventory, today: date | None = None
             same.where = sorted(set(same.where) | where)
             continue
         out.append(Eol(product, version, name, status, eol_date,
-                       str(cycle.get("latest") or ""), sorted(where)))
+                       str(cycle.get("latest") or ""), sorted(where),
+                       _upgrade_cycle(cycles, today)
+                       if status != "ok" else ""))
     return out, problems
 
 
@@ -1091,6 +1152,7 @@ def _eol_rows(eols: list[Eol]) -> list[Row]:
         for where in e.where:
             rows.append(Row(e.key, where, e.product, e.version,
                             "EOL" if e.status == "eol" else "EOL_SOON",
+                            fixed=e.upgrade_to,
                             tier=URGENT if e.status == "eol" else DIGEST,
                             summary=f"supported until {e.eol_date or 'n/a'}"))
     return rows
@@ -1142,8 +1204,7 @@ class Ledger:
             )
 
     def set_task(self, rows: list[Row], task_id: str) -> None:
-        """Kept the moment the task exists, before Slack is tried, so a
-        failed post never leads to a second task for the same package."""
+        """Which subtask holds each row's upgrade."""
         if not self.available or not task_id:
             return
         for r in rows:
@@ -1152,6 +1213,51 @@ class Ledger:
                 "advisory_key = :k AND repo = :r AND package = :p",
                 {"task": task_id, "k": r.key, "r": r.repo, "p": r.package},
             )
+
+    def clear_task(self, task_id: str) -> None:
+        """Forget a task that was closed, so it is never closed again."""
+        if self.available and task_id:
+            store.execute(
+                f"UPDATE {TABLE} SET clickup_task_id = NULL WHERE "
+                "clickup_task_id = :task AND advisory_key <> :plan",
+                {"task": task_id, "plan": self._PLAN},
+            )
+
+    # The upgrade plan's tasks, as marker rows: (PLAN, owner, slot), where
+    # slot is an upgrade, "quick" or "*" (the owner's parent task). The
+    # summary column holds a fingerprint of what was last written to it, so
+    # an unchanged task is not rewritten every morning.
+    _PLAN = "PLAN"
+
+    def plan(self) -> dict[tuple[str, str], dict]:
+        if not self.available:
+            return {}
+        rows = store.query(
+            f"SELECT repo, package, clickup_task_id, summary FROM {TABLE} "
+            "WHERE advisory_key = :plan", {"plan": self._PLAN})
+        return {(r["repo"], r["package"]): dict(r) for r in rows}
+
+    def set_plan(self, owner: str, slot: str, task_id: str,
+                 fingerprint: str) -> None:
+        """Kept the moment the task exists, before Slack is tried, so a
+        failed post never leads to a second task for the same upgrade."""
+        if self.available:
+            store.execute(
+                f"INSERT INTO {TABLE} (advisory_key, repo, package, "
+                "clickup_task_id, summary) VALUES (:plan, :o, :s, :task, "
+                ":fp) ON CONFLICT (advisory_key, repo, package) DO UPDATE "
+                "SET clickup_task_id = EXCLUDED.clickup_task_id, "
+                "summary = EXCLUDED.summary",
+                {"plan": self._PLAN, "o": owner, "s": slot, "task": task_id,
+                 "fp": fingerprint},
+            )
+
+    def drop_plan(self, owner: str, slot: str) -> None:
+        if self.available:
+            store.execute(
+                f"DELETE FROM {TABLE} WHERE advisory_key = :plan AND "
+                "repo = :o AND package = :s",
+                {"plan": self._PLAN, "o": owner, "s": slot})
 
     def record(self, rows: list[Row]) -> None:
         if not self.available:
@@ -1296,16 +1402,9 @@ def _eol_line(e: Eol) -> str:
 
 
 def _task_name(r: Row) -> str:
-    """What one task is about: the package, or the end-of-life cycle."""
+    """How an alert line finds its subtask: the package, or the
+    end-of-life cycle."""
     return r.key if r.key.startswith("EOL:") else r.package
-
-
-def task_groups(rows: list[Row]) -> dict[tuple[str, str], list[Row]]:
-    """(package or EOL key, owner) -> rows. One task each."""
-    out: dict[tuple[str, str], list[Row]] = {}
-    for r in rows:
-        out.setdefault((_task_name(r), owner_of(r.repo)), []).append(r)
-    return out
 
 
 def _owner_note(name: str, owners: list[str],
@@ -1521,95 +1620,6 @@ def _post(text: str, thread_ts: str = "") -> str:
     return ""
 
 
-def _create_task(name: str, owner: str, rows: list[Row],
-                 links: dict[str, str]) -> str:
-    """One ClickUp task for one package (or end-of-life cycle) and one
-    owner, assigned to them. `rows` is everything the watch tracks on it in
-    that owner's repos, so the upgrade named clears all of it. Returns the
-    task URL or ""."""
-    token = os.environ.get("CLICKUP_API_TOKEN", "")
-    if not token:
-        return ""
-    from sentry_agent_fixes import (
-        FIELD_SOURCE,
-        FIELD_TYPE,
-        SOURCE_INTERNAL,
-        TYPE_BUG,
-    )
-
-    package = rows[0].package
-    who = OWNER_NAMES.get(owner, owner)
-    where = _repo_versions(rows)
-    if name.startswith("EOL:"):
-        product = EOL_NAMES.get(package, package)
-        cycle = name.rsplit(":", 1)[-1]
-        labels = ", ".join(sorted({_label(r.repo) for r in rows}))
-        title = (f"[Security] {product} {cycle} is out of support "
-                 f"({labels}), upgrade to a supported release")
-        body = [f"**{product} {cycle}** no longer gets security fixes "
-                f"({rows[0].summary}).", "",
-                f"**Where:** {where}", f"**Owner:** {who}",
-                f"**Upgrade to:** a supported release, see "
-                f"https://endoflife.date/{package}"]
-    else:
-        fixes = [r.fixed for r in rows if r.fixed]
-        target = max(fixes, key=_vkey) if fixes else ""
-        kev = sorted({r.key for r in rows if r.kev})
-        serious = [r for r in rows if r.severity in ("CRITICAL", "HIGH")]
-        what = (f"{', '.join(kev[:2])} exploited in the wild" if kev
-                else _tally(serious or rows))
-        title = (f"[Security] {package}: {what}"
-                 + (f", upgrade to {target}" if target else ""))
-        body = [f"**{package}** has known vulnerabilities in the versions we "
-                "run" + (", one of them exploited in the wild (CISA KEV)."
-                         if kev else "."), "",
-                f"**Where:** {where}", f"**Owner:** {who}",
-                f"**Upgrade to:** {target or 'no fixed release yet'}"
-                + (" (clears every advisory below)" if target else "")]
-        body += [f"**Exploited in the wild (CISA KEV):** {k} on "
-                 f"{_repo_versions([r for r in rows if r.key == k])}"
-                 for k in kev]
-        keys = sorted({r.key for r in rows},
-                      key=lambda k: (k not in kev, -max(
-                          SEVERITY_RANK.get(r.severity, 0)
-                          for r in rows if r.key == k)))
-        body += ["", f"**Advisories** ({_tally(rows)})"]
-        for k in keys[:20]:
-            r = next(r for r in rows if r.key == k)
-            link = f"[{k}]({links[k]})" if links.get(k) else k
-            body.append(f"- {link} ({r.severity.lower()}): {r.summary}")
-        if len(keys) > 20:
-            body.append(f"- and {len(keys) - 20} more, in the weekly digest")
-    body += ["", "Found by the VomeOS dependency watch (dependency_watch.py), "
-             "which reads each repo's lockfile on its live branch. Posted in "
-             "#eng-infra."]
-    assignee = _clickup_user(owner)
-    try:
-        resp = httpx.post(
-            f"{CLICKUP_BASE}/list/{CLICKUP_LIST}/task",
-            headers={"Authorization": token,
-                     "Content-Type": "application/json"},
-            json={
-                "name": title[:180],
-                "markdown_description": "\n".join(body),
-                "assignees": [assignee] if assignee else [],
-                "status": "queued",
-                "priority": 1 if any(r.kev for r in rows) else 2,
-                "custom_fields": [
-                    {"id": FIELD_TYPE, "value": TYPE_BUG},
-                    {"id": FIELD_SOURCE, "value": SOURCE_INTERNAL},
-                ],
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        task_id = str(resp.json().get("id") or "")
-        return f"https://app.clickup.com/t/{task_id}" if task_id else ""
-    except Exception as exc:
-        print(f"[DEPWATCH] ClickUp task for {name} ({who}) failed: {exc}")
-        return ""
-
-
 # ---------------------------------------------------------------------------
 # Runs
 # ---------------------------------------------------------------------------
@@ -1635,6 +1645,676 @@ def scan(repos=None) -> Scan:
     details = {f.key: f.details for f in findings if f.details}
     return Scan(inv, findings, eols, inv.problems + problems + eol_problems,
                 rows, links, details)
+
+
+# ---------------------------------------------------------------------------
+# The upgrade plan: one task per engineer, one subtask per upgrade
+# ---------------------------------------------------------------------------
+
+PARENT_TITLES = {"onlyg": "[Security] Backend dependency upgrades",
+                 "sanjay": "[Security] Frontend dependency upgrades"}
+OWNER_AREAS = {"onlyg": "core, database, chats, integrations and the servers",
+               "sanjay": "the web app, landing page, mobile app and the web "
+                         "build"}
+PARENT, QUICK = "*", "quick"
+CLOSED = "Closed"
+CHECKLIST = "Upgrades"
+
+# Packages one upgrade fixes together: one subtask, named after the first.
+FAMILIES = {"pdfjs-dist": "react-pdf", "pyopenssl": "cryptography"}
+FAMILY_NOTES = {
+    "react-pdf": "react-pdf bundles pdfjs-dist, so one upgrade clears both "
+                 "once the new react-pdf brings pdfjs-dist 4.2.67 or later. "
+                 "Check which pdfjs-dist it pulls in.",
+    "cryptography": "pyOpenSSL pins the cryptography versions it accepts, so "
+                    "upgrade the two together.",
+}
+# A major upgrade of one of these is a project, not a bump.
+FRAMEWORKS = {"django", "nodejs", "python", "react", "react-native", "expo",
+              "astro", "postgresql", "redis"}
+# Build and install tools: they never run in production.
+BUILD_TOOLS = {"virtualenv", "pip", "pipenv", "tox", "nox"}
+# Numbered by year, so a new first number is not a breaking change.
+CALVER = {"certifi", "twisted"}
+
+LEVEL_WORDS = {"critical": "Critical", "high": "High", "low": "Low"}
+PRIORITY = {"critical": 1, "high": 2, "low": 3}
+SIZE_RANK = {"patch": 0, "minor": 1, "major": 2, "project": 3, "nofix": 4}
+SIZE_WORDS = {"patch": "Patch", "minor": "Minor", "major": "Major upgrade",
+              "project": "Project", "nofix": "Replace or wait"}
+SIZE_NOTES = {
+    "patch": "Patch. A drop-in upgrade.",
+    "minor": "Minor. Should be drop-in; skim the changelog.",
+    "major": "Major upgrade. A new major version can break things: read the "
+             "release notes for breaking changes first.",
+    "project": "Project. A major framework or runtime upgrade: read the "
+               "release notes, plan a full test pass, and ship it to staging "
+               "first.",
+    "nofix": "No fixed release yet. Watch the advisory, or replace the "
+             "package.",
+}
+SECTIONS = (
+    ("critical", "**Critical** (exploited in the wild, or likely to be soon): "
+                 "do these first"),
+    ("project", "**Projects** (framework or runtime upgrades): plan these"),
+    ("major", "**Major upgrades**: read the release notes first"),
+    ("nofix", "**No fixed release yet**: watch, or replace the package"),
+    ("quick", "**Quick upgrades**: patch and minor bumps, one checklist"),
+)
+FOOTER = ("Kept up to date by the VomeOS dependency watch "
+          "(dependency_watch.py), which reads each repo's lockfile on its "
+          "live branch every morning and closes this once the upgrade is "
+          "there.")
+
+
+def _unit_of(r: Row) -> str:
+    name = re.sub(r"[-_.]+", "-", r.package).lower()
+    return FAMILIES.get(name, name)
+
+
+def plan_units(rows: list[Row]) -> dict[tuple[str, str], list[Row]]:
+    """(owner, upgrade) -> rows. An upgrade is a package with its family and
+    its end-of-life cycle: Django's advisories and Django 4.2 being out of
+    support are one move to 5.2. Only upgrades with something at alert
+    level, but with every row they have, so the target also clears what
+    only the digest lists (astro 7.3.2, not the 7.2.8 the critical one
+    needs)."""
+    out: dict[tuple[str, str], list[Row]] = {}
+    for r in rows:
+        out.setdefault((owner_of(r.repo), _unit_of(r)), []).append(r)
+    return {k: v for k, v in out.items()
+            if any(r.tier in (KEV, URGENT) for r in v)}
+
+
+def _display(r: Row) -> str:
+    if r.key.startswith("EOL:"):
+        return EOL_NAMES.get(r.package, r.package)
+    return r.package
+
+
+def _moves(unit: str, rows: list[Row]) -> dict[str, tuple[list[str], str]]:
+    """Display name -> (versions we run, version to move to), the upgrade's
+    own package first. The target clears every advisory; an end-of-life
+    cycle gives one only when no advisory does."""
+    names = sorted(dict.fromkeys(_display(r) for r in rows),
+                   key=lambda n: n.lower() != unit)
+    out = {}
+    for name in names:
+        mine = [r for r in rows if _display(r) == name]
+        fixes = [r.fixed for r in mine
+                 if r.fixed and not r.key.startswith("EOL:")]
+        cycles = [r.fixed for r in mine
+                  if r.fixed and r.key.startswith("EOL:")]
+        target = max(fixes, key=_vkey) if fixes else \
+            (cycles[0] if cycles else "")
+        out[name] = (sorted({r.version for r in mine}, key=_vkey), target)
+    return out
+
+
+def _span(versions: list[str]) -> str:
+    if len(versions) > 2:
+        return f"{versions[0]} to {versions[-1]}"
+    return ", ".join(versions)
+
+
+def _target_text(target: str) -> str:
+    if _vkey(target)[-1] == 0:
+        return f"{target} (release candidate)"
+    return target
+
+
+def _move_text(unit: str, rows: list[Row]) -> str:
+    """"Pillow 10.0.0, 10.4.0 → 13.0.0"."""
+    return ", ".join(
+        f"{name} {_span(versions)} → {_target_text(target)}" if target
+        else f"{name} {_span(versions)} (no fix yet)"
+        for name, (versions, target) in _moves(unit, rows).items())
+
+
+def _bump(name: str, current: str, target: str) -> str:
+    a, b = _vkey(current), _vkey(target)
+    if b[:5] <= a[:5]:
+        return "patch"
+    if name.lower() in CALVER or a[0] >= 2000:
+        return "minor"
+    if a[0] != b[0]:
+        return "major"
+    return "minor" if a[1] != b[1] else "patch"
+
+
+def _size(unit: str, rows: list[Row]) -> str:
+    """How big the job is, from the version numbers alone."""
+    worst = "patch"
+    for name, (versions, target) in _moves(unit, rows).items():
+        eol = all(r.key.startswith("EOL:") for r in rows
+                  if _display(r) == name)
+        for v in versions:
+            if target:
+                size = _bump(name, v, target)
+            else:
+                size = "major" if eol else "nofix"
+            if SIZE_RANK[size] > SIZE_RANK[worst]:
+                worst = size
+    if worst == "major" and unit in FRAMEWORKS:
+        return "project"
+    return worst
+
+
+def _level(unit: str, rows: list[Row]) -> str:
+    """How urgent: exploited or likely to be, a build tool, or neither.
+    Read from what alerted: a likely exploit in a devDependency is not."""
+    alerting = [r for r in rows if r.tier in (KEV, URGENT)] or rows
+    if any(r.kev or (r.epss or 0) >= _epss_threshold() for r in alerting):
+        return "critical"
+    return "low" if unit in BUILD_TOOLS else "high"
+
+
+def _slot(unit: str, rows: list[Row]) -> str:
+    """Its own subtask, or a line on the owner's quick-upgrades checklist."""
+    level = _level(unit, rows)
+    if level == "critical" or (level == "high" and _size(unit, rows) in (
+            "major", "project", "nofix")):
+        return unit
+    return QUICK
+
+
+def _section(slot: str, units: dict[str, list[Row]]) -> str:
+    if slot == QUICK:
+        return "quick"
+    rows = units[slot]
+    if _level(slot, rows) == "critical":
+        return "critical"
+    return _size(slot, rows)
+
+
+def _why_level(unit: str, rows: list[Row]) -> str:
+    kev = sorted({r.key for r in rows if r.kev})
+    if kev:
+        return (f"Critical. {', '.join(kev)} "
+                f"{'is' if len(kev) == 1 else 'are'} exploited in the wild "
+                "(CISA KEV).")
+    level = _level(unit, rows)
+    if level == "critical":
+        r = max((r for r in rows if r.tier in (KEV, URGENT)),
+                key=lambda r: r.epss or 0)
+        return (f"Critical. EPSS gives {r.key} {r.epss:.0%} odds of being "
+                "exploited in the next 30 days.")
+    if level == "low":
+        return "Low. A build tool: it never runs in production."
+    vuln = [r for r in rows if not r.key.startswith("EOL:")]
+    parts = [f"advisories in code we ship ({_tally(vuln)})"] if vuln else []
+    for key in dict.fromkeys(r.key for r in rows
+                             if r.key.startswith("EOL:")):
+        r = next(r for r in rows if r.key == key)
+        parts.append(f"{_display(r)} {key.rsplit(':', 1)[-1]} is out of "
+                     f"support ({r.summary})")
+    text = ", and ".join(parts)
+    return f"High. {text[:1].upper()}{text[1:]}."
+
+
+def _package_section(name: str, rows: list[Row], target: str,
+                     links: dict[str, str]) -> list[str]:
+    vuln = [r for r in rows if not r.key.startswith("EOL:")]
+    out = [f"### {name}", f"**Where:** {_repo_versions(rows)}",
+           "**Upgrade to:** " + (_target_text(target) if target
+                                 else "no fixed release yet")
+           + (" (clears every advisory below)" if target and vuln else "")]
+    for key in dict.fromkeys(r.key for r in rows
+                             if r.key.startswith("EOL:")):
+        r = next(r for r in rows if r.key == key)
+        out.append(f"**Out of support:** {name} {key.rsplit(':', 1)[-1]} "
+                   f"gets no more security fixes ({r.summary}). See "
+                   f"https://endoflife.date/{r.package}")
+    kev = sorted({r.key for r in vuln if r.kev})
+    out += [f"**Exploited in the wild (CISA KEV):** {k} on "
+            f"{_repo_versions([r for r in vuln if r.key == k])}" for k in kev]
+    if not vuln:
+        return out
+    keys = sorted({r.key for r in vuln},
+                  key=lambda k: (k not in kev, -max(
+                      SEVERITY_RANK.get(r.severity, 0)
+                      for r in vuln if r.key == k)))
+    out += ["", f"**Advisories** ({_tally(vuln)})"]
+    for k in keys[:20]:
+        r = next(r for r in vuln if r.key == k)
+        link = f"[{k}]({links[k]})" if links.get(k) else k
+        out.append(f"- {link} ({r.severity.lower()}): {r.summary}")
+    if len(keys) > 20:
+        out.append(f"- and {len(keys) - 20} more, in the weekly digest")
+    return out
+
+
+def subtask_title(unit: str, rows: list[Row]) -> str:
+    """How urgent · the version we run → the one to move to · how big."""
+    flag = " (exploited)" if any(r.kev for r in rows) else ""
+    return (f"{LEVEL_WORDS[_level(unit, rows)]}{flag} · "
+            f"{_move_text(unit, rows)} · "
+            f"{SIZE_WORDS[_size(unit, rows)]}")[:180]
+
+
+def subtask_body(unit: str, rows: list[Row], links: dict[str, str]) -> str:
+    owner = owner_of(rows[0].repo)
+    body = [f"**How urgent:** {_why_level(unit, rows)}",
+            f"**How big:** {SIZE_NOTES[_size(unit, rows)]}",
+            f"**Owner:** {OWNER_NAMES[owner]}", ""]
+    if FAMILY_NOTES.get(unit):
+        body += [FAMILY_NOTES[unit], ""]
+    for name, (_, target) in _moves(unit, rows).items():
+        body += _package_section(
+            name, [r for r in rows if _display(r) == name], target,
+            links) + [""]
+    return "\n".join(body + [FOOTER])
+
+
+def quick_items(units: dict[str, list[Row]]) -> list[tuple[str, str]]:
+    """(match prefix, checklist line) per upgrade on the quick checklist.
+    A line is found again by its package name, so a new version number
+    renames it instead of adding a second one."""
+    out = []
+    for unit, rows in sorted(units.items(), key=lambda kv: (
+            _level(*kv) == "low", kv[0])):
+        head = next(iter(_moves(unit, rows)))
+        where = ", ".join(sorted({_label(r.repo) for r in rows}))
+        tool = " · build tool" if _level(unit, rows) == "low" else ""
+        out.append((head, f"{_move_text(unit, rows)} ({where}) · "
+                          f"{SIZE_WORDS[_size(unit, rows)]}{tool}"))
+    return out
+
+
+def quick_title(units: dict[str, list[Row]]) -> str:
+    level = "high" if any(_level(*kv) == "high" for kv in units.items()) \
+        else "low"
+    n = len(units)
+    return (f"{LEVEL_WORDS[level]} · Quick upgrades · {n} "
+            f"package{'s' if n != 1 else ''}")
+
+
+def quick_body(units: dict[str, list[Row]], owner: str,
+               links: dict[str, str]) -> str:
+    body = ["**How urgent:** High: each has a critical or high advisory in "
+            "code we ship. Build tools are Low: they never run in "
+            "production.",
+            "**How big:** Patch and minor upgrades (and build tools): each "
+            "should be drop-in. The checklist ticks itself when the live "
+            "branch shows the upgrade.",
+            f"**Owner:** {OWNER_NAMES[owner]}", ""]
+    for unit, rows in sorted(units.items()):
+        vuln = [r for r in rows if not r.key.startswith("EOL:")]
+        keys = sorted({r.key for r in vuln}, key=lambda k: -max(
+            SEVERITY_RANK.get(r.severity, 0) for r in vuln if r.key == k))
+        shown = ", ".join(f"[{k}]({links[k]})" if links.get(k) else k
+                          for k in keys[:3])
+        more = f" and {len(keys) - 3} more" if len(keys) > 3 else ""
+        body.append(f"- **{_move_text(unit, rows)}** "
+                    f"({_repo_versions(rows)}) · "
+                    f"{SIZE_WORDS[_size(unit, rows)]} · {_tally(vuln)}: "
+                    f"{shown}{more}")
+    return "\n".join(body + ["", FOOTER])
+
+
+def _fingerprint(*parts) -> str:
+    import hashlib
+
+    return hashlib.sha1(json.dumps(parts).encode()).hexdigest()[:16]
+
+
+def _complete(s: "Scan", owner: str) -> bool:
+    """Whether this run saw everything of `owner`'s: every repo read and
+    every feed answered. Only then is a missing finding fixed rather than
+    unseen, so only then does anything close or get relabelled."""
+    repos = {slug for slug in MANIFESTS if owner_of(slug) == owner}
+    if not repos <= s.inv.scanned:
+        return False
+    return not any(p.startswith(("OSV.dev", "CISA KEV", "FIRST EPSS",
+                                 "endoflife.date", "NVD"))
+                   for p in s.problems)
+
+
+@dataclass
+class Plan:
+    parents: dict[str, str] = field(default_factory=dict)  # owner -> id
+    # (owner, slot) -> {"id", "title", "section", "count"}
+    slots: dict[tuple[str, str], dict] = field(default_factory=dict)
+    # (package or EOL key, owner) -> subtask URL, for the alert's links
+    links: dict[tuple[str, str], str] = field(default_factory=dict)
+    created: list[tuple[str, str]] = field(default_factory=list)
+    closed: list[tuple[str, str]] = field(default_factory=list)
+    moved: int = 0
+
+
+def _url(task_id: str) -> str:
+    return f"https://app.clickup.com/t/{task_id}"
+
+
+def _clickup(method: str, path: str, body: dict | None = None) -> dict:
+    resp = httpx.request(
+        method, f"{CLICKUP_BASE}{path}",
+        headers={"Authorization": os.environ.get("CLICKUP_API_TOKEN", ""),
+                 "Content-Type": "application/json"},
+        json=body, timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json() if resp.text.strip() else {}
+
+
+def _new_task(name: str, owner: str, body: str, priority: int,
+              parent: str = "") -> str:
+    """A task in the Priority Queue assigned to `owner`, or a subtask of
+    `parent`. Returns its id, or "" when ClickUp said no."""
+    from sentry_agent_fixes import (
+        FIELD_SOURCE,
+        FIELD_TYPE,
+        SOURCE_INTERNAL,
+        TYPE_BUG,
+    )
+
+    assignee = _clickup_user(owner)
+    payload = {
+        "name": name[:180], "markdown_description": body,
+        "assignees": [assignee] if assignee else [], "status": "queued",
+        "priority": priority,
+        "custom_fields": [{"id": FIELD_TYPE, "value": TYPE_BUG},
+                          {"id": FIELD_SOURCE, "value": SOURCE_INTERNAL}],
+    }
+    if parent:
+        payload["parent"] = parent
+    try:
+        return str(_clickup("POST", f"/list/{CLICKUP_LIST}/task",
+                            payload).get("id") or "")
+    except Exception as exc:
+        print(f"[DEPWATCH] ClickUp task {name[:60]!r} failed: {exc}")
+        return ""
+
+
+def _update(task_id: str, payload: dict) -> bool:
+    try:
+        _clickup("PUT", f"/task/{task_id}", payload)
+        return True
+    except Exception as exc:
+        print(f"[DEPWATCH] ClickUp update of {task_id} failed: {exc}")
+        return False
+
+
+def _close(task_id: str, comment: str) -> bool:
+    try:
+        _clickup("POST", f"/task/{task_id}/comment",
+                 {"comment_text": comment, "notify_all": False})
+        _clickup("PUT", f"/task/{task_id}", {"status": CLOSED})
+        return True
+    except Exception as exc:
+        print(f"[DEPWATCH] closing ClickUp task {task_id} failed: {exc}")
+        return False
+
+
+def _sync_checklist(task_id: str, items: list[tuple[str, str]]) -> bool:
+    """The quick subtask's checklist matches `items`: new lines added, moved
+    versions renamed, and lines no longer open ticked."""
+    try:
+        task = _clickup("GET", f"/task/{task_id}")
+        checklist = next((c for c in task.get("checklists") or []
+                          if c.get("name") == CHECKLIST), None)
+        if checklist is None:
+            checklist = _clickup("POST", f"/task/{task_id}/checklist",
+                                 {"name": CHECKLIST}).get("checklist") or {}
+        cid = checklist["id"]
+        existing = checklist.get("items") or []
+        for prefix, text in items:
+            item = next((i for i in existing
+                         if str(i.get("name", "")).startswith(prefix + " ")),
+                        None)
+            if item is None:
+                _clickup("POST", f"/checklist/{cid}/checklist_item",
+                         {"name": text})
+            elif item.get("name") != text:
+                _clickup("PUT", f"/checklist/{cid}/checklist_item/"
+                                f"{item['id']}", {"name": text})
+        for item in existing:
+            name = str(item.get("name", ""))
+            if not item.get("resolved") and not any(
+                    name.startswith(p + " ") for p, _ in items):
+                _clickup("PUT", f"/checklist/{cid}/checklist_item/"
+                                f"{item['id']}", {"resolved": True})
+        return True
+    except Exception as exc:
+        print(f"[DEPWATCH] checklist on {task_id} failed: {exc}")
+        return False
+
+
+def _render(slot: str, units: dict[str, list[Row]], owner: str,
+            links: dict[str, str]) -> tuple[str, str, list, str]:
+    """(title, description, checklist, level) for one subtask."""
+    if slot == QUICK:
+        level = "high" if any(_level(*kv) == "high"
+                              for kv in units.items()) else "low"
+        return (quick_title(units), quick_body(units, owner, links),
+                quick_items(units), level)
+    rows = units[slot]
+    return (subtask_title(slot, rows), subtask_body(slot, rows, links), [],
+            _level(slot, rows))
+
+
+def parent_body(owner: str, plan: Plan) -> str:
+    lines = [f"Every dependency upgrade the VomeOS dependency watch has open "
+             f"in {OWNER_AREAS[owner]}. One subtask per upgrade, named how "
+             "urgent · the version we run → the one to move to · how big. "
+             "The watch rewrites this list every morning and closes a "
+             "subtask once the live branch shows the upgrade.", ""]
+    mine = sorted(((v["title"], v) for (o, _), v in plan.slots.items()
+                   if o == owner), key=lambda tv: tv[0].lower())
+    for section, heading in SECTIONS:
+        rows = [f"- [{t}]({_url(v['id'])})" for t, v in mine
+                if v["section"] == section]
+        if rows:
+            lines += [heading] + rows + [""]
+    lines += [
+        "**How the labels are decided** (in code, from OSV.dev, CISA KEV, "
+        "FIRST EPSS and endoflife.date):",
+        f"- Critical: exploited in the wild (CISA KEV), or EPSS at or above "
+        f"{_epss_threshold():.0%}. High: a critical or high advisory in code "
+        "we ship, or out of support. Low: a build tool that never runs in "
+        "production.",
+        "- Patch and Minor: drop-in. Major upgrade: a new major version. "
+        "Project: a major upgrade of a framework or runtime (Django, "
+        "Node.js, Python, React, React Native, Astro).",
+    ]
+    return "\n".join(lines)
+
+
+def sync_plan(s: "Scan", ledger, told: dict) -> Plan:
+    """Bring each engineer's upgrade task in line with this morning's scan:
+    a subtask for every upgrade at alert level, relabelled when the facts
+    change, closed when the live branch shows the fix."""
+    plan = Plan()
+    if not os.environ.get("CLICKUP_API_TOKEN"):
+        return plan
+    units = plan_units(s.rows)
+    slots: dict[tuple[str, str], dict[str, list[Row]]] = {}
+    for (owner, unit), rows in units.items():
+        slots.setdefault((owner, _slot(unit, rows)), {})[unit] = rows
+    marks = ledger.plan()
+    for owner in OWNER_NAMES:
+        _sync_owner(owner, {k: v for k, v in slots.items() if k[0] == owner},
+                    marks, s, ledger, plan)
+    _retire_old_tasks(slots, told, s, ledger, plan)
+    return plan
+
+
+def _sync_owner(owner: str, mine: dict, marks: dict, s: "Scan", ledger,
+                plan: Plan) -> None:
+    complete = _complete(s, owner)
+    if complete:
+        for (o, slot), mark in list(marks.items()):
+            if o != owner or slot == PARENT or (o, slot) in mine:
+                continue
+            if _close(mark["clickup_task_id"],
+                      "Done: the live branch now runs a release that clears "
+                      "everything this listed."):
+                ledger.drop_plan(o, slot)
+                plan.closed.append((o, slot))
+    parent = (marks.get((owner, PARENT)) or {}).get("clickup_task_id") or ""
+    if not mine:
+        if parent and complete and _close(
+                parent, "Nothing open: every upgrade on this list is on the "
+                        "live branch."):
+            ledger.drop_plan(owner, PARENT)
+        return
+    if not parent:
+        parent = _new_task(PARENT_TITLES[owner], owner,
+                           "Filling in the upgrades.", 2)
+        if not parent:
+            return
+        ledger.set_plan(owner, PARENT, parent, "")
+        marks[(owner, PARENT)] = {"clickup_task_id": parent, "summary": ""}
+    plan.parents[owner] = parent
+
+    levels = []
+    for (_, slot), units in sorted(mine.items()):
+        title, body, items, level = _render(slot, units, owner, s.links)
+        fp = _fingerprint(title, body, items)
+        mark = marks.get((owner, slot)) or {}
+        tid = mark.get("clickup_task_id") or ""
+        if not tid:
+            tid = _new_task(title, owner, body, PRIORITY[level], parent)
+            if not tid:
+                continue
+            if items:
+                _sync_checklist(tid, items)
+            ledger.set_plan(owner, slot, tid, fp)
+            plan.created.append((owner, slot))
+        elif mark.get("summary") != fp and complete:
+            if _update(tid, {"name": title, "markdown_content": body,
+                             "priority": PRIORITY[level]}) and \
+                    (not items or _sync_checklist(tid, items)):
+                ledger.set_plan(owner, slot, tid, fp)
+        levels.append(level)
+        plan.slots[(owner, slot)] = {
+            "id": tid, "title": title, "section": _section(slot, units),
+            "count": len(units)}
+        for rows in units.values():
+            for r in rows:
+                plan.links[(_task_name(r), owner)] = _url(tid)
+
+    body = parent_body(owner, plan)
+    priority = min((PRIORITY[lv] for lv in levels), default=2)
+    fp = _fingerprint(body, priority)
+    if marks[(owner, PARENT)].get("summary") != fp and _update(
+            parent, {"name": PARENT_TITLES[owner], "markdown_content": body,
+                     "priority": priority}):
+        ledger.set_plan(owner, PARENT, parent, fp)
+
+
+def _retire_old_tasks(slots: dict, told: dict, s: "Scan", ledger,
+                      plan: Plan) -> None:
+    """Tasks from before the plan (one per package, Oct 25 and 26): each is
+    closed with a link to where its upgrade went, and the ledger points at
+    the subtask instead."""
+    current = {m.get("clickup_task_id") for m in ledger.plan().values()}
+    home: dict[tuple[str, str, str], tuple[str, str]] = {}
+    for key, units in slots.items():
+        for rows in units.values():
+            for r in rows:
+                home[r.ident] = key
+    old: dict[str, list[tuple[str, str, str]]] = {}
+    for ident, row in told.items():
+        tid = row.get("clickup_task_id")
+        if tid and tid not in current and ident[0] not in ("PLAN",
+                                                           "BASELINE"):
+            old.setdefault(tid, []).append(ident)
+
+    kept = set()
+    for tid, idents in old.items():
+        key = next((home[i] for i in idents if home.get(i) in plan.slots),
+                   None)
+        if key:
+            slot = plan.slots[key]
+            note = (f"Moved: this upgrade is now the subtask "
+                    f"\"{slot['title']}\" ({_url(slot['id'])}) under "
+                    f"{_url(plan.parents[key[0]])}. The dependency watch "
+                    "keeps one task per engineer with a subtask per "
+                    "upgrade, so this task is closed.")
+        elif all(_complete(s, owner_of(i[1])) for i in idents):
+            note = ("Closed: nothing on this task is at alert level any "
+                    "more. The weekly digest still lists anything open.")
+        else:
+            kept.add(tid)
+            continue
+        if _close(tid, note):
+            ledger.clear_task(tid)
+            plan.moved += 1
+        else:
+            kept.add(tid)
+
+    for key, units in slots.items():
+        if key not in plan.slots:
+            continue
+        tid = plan.slots[key]["id"]
+        stale = [r for rows in units.values() for r in rows
+                 if (told.get(r.ident) or {}).get("clickup_task_id")
+                 not in kept | {tid}]
+        ledger.set_task(stale, tid)
+
+
+def _parent_links(plan: Plan) -> str:
+    """"<url|Backend dependency upgrades> for @OnlyG, ... cc @Sam"."""
+    return ", ".join(
+        f"<{_url(tid)}|{PARENT_TITLES[o].removeprefix('[Security] ')}> for "
+        f"{_mention(o)}" for o, tid in plan.parents.items()
+    ) + f", cc {_mention('sam')}"
+
+
+def _plan_counts(plan: Plan, owner: str) -> str:
+    """"1 critical, 1 project, 5 major upgrades, 6 quick upgrades"."""
+    counts: dict[str, int] = {}
+    for (o, _), v in plan.slots.items():
+        if o == owner:
+            counts[v["section"]] = counts.get(v["section"], 0) + v["count"]
+    words = {"critical": ("critical", "critical"),
+             "project": ("project", "projects"),
+             "major": ("major upgrade", "major upgrades"),
+             "nofix": ("with no fix yet", "with no fix yet"),
+             "quick": ("quick upgrade on one checklist",
+                       "quick upgrades on one checklist")}
+    return ", ".join(f"{counts[s]} {words[s][counts[s] != 1]}"
+                     for s, _ in SECTIONS if counts.get(s))
+
+
+def _plan_list(plan: Plan) -> str:
+    lines = []
+    for owner, tid in plan.parents.items():
+        lines.append(f"*<{_url(tid)}|{PARENT_TITLES[owner]}>* "
+                     f"({OWNER_NAMES[owner]}): {_plan_counts(plan, owner)}")
+        lines += [f"• <{_url(v['id'])}|{v['title']}>"
+                  for (o, _), v in sorted(plan.slots.items()) if o == owner]
+    return "\n".join(lines)
+
+
+def plan_news(plan: Plan, due: list[Row]) -> str:
+    """What the morning's alert does not already say: the old tasks moving
+    into the plan, or a subtask opened for something that did not alert."""
+    if plan.moved:
+        n = plan.moved
+        lines = [f"{_tags(list(plan.parents))} :clipboard: *Dependency "
+                 "upgrades* are now one task per engineer, with a subtask "
+                 "per upgrade:"]
+        lines += [f"• <{_url(tid)}|"
+                  f"{PARENT_TITLES[o].removeprefix('[Security] ')}> "
+                  f"({OWNER_NAMES[o]}): {_plan_counts(plan, o)}"
+                  for o, tid in plan.parents.items()]
+        lines.append(f"Each subtask says how urgent it is, the version we "
+                     f"run → the one to move to, and how big the job is. The "
+                     f"{n} earlier task{'s are' if n != 1 else ' is'} closed, "
+                     "each with a link to its new place.")
+        return "\n".join(lines)
+    alerted = {plan.links.get((_task_name(r), owner_of(r.repo))) for r in due}
+    quiet = [k for k in plan.created
+             if _url(plan.slots[k]["id"]) not in alerted]
+    if not quiet:
+        return ""
+    owners = [o for o in OWNER_NAMES if any(k[0] == o for k in quiet)]
+    return (f"{_tags(owners)} :clipboard: *Dependency upgrades*: "
+            f"{len(quiet)} new subtask{'s' if len(quiet) != 1 else ''}.\n"
+            + "\n".join(f"• <{_url(plan.slots[k]['id'])}|"
+                        f"{plan.slots[k]['title']}>" for k in quiet))
 
 
 def _log_failure(summary: str, details: str) -> None:
@@ -1674,22 +2354,21 @@ def run_daily_scan(post: bool = True) -> dict:
               "repeat every morning")
         return {**summary, "status": "no_ledger"}
 
-    # One task per package per owner, for everything that alerts (on the
-    # first run, everything the baseline would have alerted on).
-    tasks = _file_tasks(due, s, told, ledger)
+    # Each engineer's upgrade task, before anything posts, so the alert can
+    # link the subtask and a failed post never files anything twice.
+    plan = sync_plan(s, ledger, told)
 
     if first:
         text, thread = digest_messages(
             s.rows, s.links, s.eols, s.problems, s.inv, 0, None,
             baseline=True)
-        if tasks:
-            text += (f"\n\n*Assigned*: {len(tasks)} ClickUp tasks for "
-                     f"{_tags(_owners_of_tasks(tasks))}, listed in the "
-                     "thread.")
+        if plan.parents:
+            text += (f"\n\n*Assigned*: {_parent_links(plan)}. One subtask "
+                     "per upgrade, listed in the thread.")
         ts = _post(text)
         note = claude_note([r for r in s.rows if r.tier in (KEV, URGENT)],
                            s.details) if ts else ""
-        replies = ([_task_list(tasks, s.rows)] if tasks else []) + \
+        replies = ([_plan_list(plan)] if plan.slots else []) + \
             ([note] if note else []) + thread
         for reply in replies if ts else []:
             _post(reply, ts)
@@ -1703,70 +2382,17 @@ def run_daily_scan(post: bool = True) -> dict:
     if due:
         eol_keys = {r.key for r in due if r.key.startswith("EOL:")}
         eols = [e for e in s.eols if e.key in eol_keys]
-        ts = _post(alert_message(due, s.links, eols, tasks))
+        ts = _post(alert_message(due, s.links, eols, plan.links))
         if ts:
             ledger.mark_alerted(due)
             note = claude_note(due, s.details)
             if note:
                 _post(note, ts)
-
-    # Anything that alerts but has no open task: what a baseline listed
-    # before tasks were filed for it, or a task that failed to file.
-    open_rows = [r for r in s.rows if r.tier in (KEV, URGENT)
-                 and (_task_name(r), owner_of(r.repo)) not in tasks]
-    filed = _file_tasks(open_rows, s, told, ledger, reuse=False)
-    if filed:
-        _post(f"{_tags(_owners_of_tasks(filed))} :clipboard: *Dependency "
-              f"watch*: {len(filed)} upgrade(s) already on the list now have "
-              "a ClickUp task.\n" + _task_list(filed, s.rows))
-    return {**summary, "posted": bool(ts), "tasks": tasks, "filed": filed}
-
-
-def _file_tasks(rows: list[Row], s: Scan, told: dict, ledger,
-                reuse: bool = True) -> dict[tuple[str, str], str]:
-    """(name, owner) -> task URL for `rows`, one task per package per owner.
-    An open task already on the ledger is reused (and returned only when
-    `reuse`), so a package never gets a second task while one is open."""
-    out: dict[tuple[str, str], str] = {}
-    everything = task_groups(s.rows)
-    for (name, owner), group in task_groups(rows).items():
-        every = everything.get((name, owner), group)
-        existing = next(
-            (told[r.ident]["clickup_task_id"] for r in every
-             if (told.get(r.ident) or {}).get("clickup_task_id")
-             and not told[r.ident].get("resolved_at")), "")
-        if existing:
-            if reuse:
-                out[(name, owner)] = f"https://app.clickup.com/t/{existing}"
-            continue
-        url = _create_task(name, owner, every, s.links)
-        if url:
-            out[(name, owner)] = url
-            ledger.set_task(every, url.rsplit("/", 1)[-1])
-    return out
-
-
-def _task_list(tasks: dict[tuple[str, str], str], rows: list[Row]) -> str:
-    """One line per task: what, where, whose."""
-    lines = []
-    for (name, owner), url in sorted(
-            tasks.items(), key=lambda kv: (list(OWNER_NAMES).index(
-                kv[0][1]), kv[0][0].lower())):
-        group = task_groups(rows).get((name, owner), [])
-        where = ", ".join(sorted({_label(r.repo) for r in group}))
-        if name.startswith("EOL:"):
-            _, product, cycle = name.split(":", 2)
-            what = f"{EOL_NAMES.get(product, product)} {cycle} (end of life)"
-        else:
-            what = name
-        exploited = " exploited," if any(r.kev for r in group) else ""
-        lines.append(f"• *{what}* ({where}){exploited} "
-                     f"<{url}|{OWNER_NAMES[owner]}'s task>")
-    return "\n".join(lines)
-
-
-def _owners_of_tasks(tasks: dict[tuple[str, str], str]) -> list[str]:
-    return sorted({o for _, o in tasks}, key=list(OWNER_NAMES).index)
+    news = plan_news(plan, due)
+    if news:
+        _post(news)
+    return {**summary, "posted": bool(ts), "created": plan.created,
+            "closed": plan.closed, "moved": plan.moved}
 
 
 def _digest_every() -> int:
@@ -1832,6 +2458,15 @@ def _print_scan() -> None:
     print("\n== not checked")
     for p in s.problems:
         print(f"  {p}")
+    print("\n== upgrade plan (the subtasks it would keep)")
+    slots: dict[tuple[str, str], dict[str, list[Row]]] = {}
+    for (owner, unit), rows in plan_units(s.rows).items():
+        slots.setdefault((owner, _slot(unit, rows)), {})[unit] = rows
+    for (owner, slot), units in sorted(slots.items()):
+        title, _, items, _ = _render(slot, units, owner, {})
+        print(f"  {OWNER_NAMES[owner]:7} {title}")
+        for _, line in items:
+            print(f"            [ ] {line}")
 
 
 if __name__ == "__main__":

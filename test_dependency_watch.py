@@ -419,6 +419,7 @@ def test_end_of_life(monkeypatch):
     by = {(e.product, e.version): e for e in eols}
     assert by[("django", "4.2.20")].status == "eol"
     assert by[("django", "4.2.20")].eol_date == "2026-04-30"
+    assert by[("django", "4.2.20")].upgrade_to == "5.2"
     # Two patch releases of one cycle: one line, every repo on it.
     assert [e.where for e in eols if e.product == "django"] == [
         ["core", "database"]]
@@ -472,6 +473,22 @@ class FakeLedger:
         for r in rows:
             FakeLedger.rows[r.ident]["clickup_task_id"] = task_id
 
+    def clear_task(self, task_id):
+        for row in FakeLedger.rows.values():
+            if row.get("clickup_task_id") == task_id:
+                row["clickup_task_id"] = None
+
+    def plan(self):
+        return {(k[1], k[2]): dict(v) for k, v in FakeLedger.rows.items()
+                if k[0] == "PLAN"}
+
+    def set_plan(self, owner, slot, task_id, fingerprint):
+        FakeLedger.rows[("PLAN", owner, slot)] = {
+            "clickup_task_id": task_id, "summary": fingerprint}
+
+    def drop_plan(self, owner, slot):
+        FakeLedger.rows.pop(("PLAN", owner, slot), None)
+
     def mark_alerted(self, rows):
         for r in rows:
             FakeLedger.rows[r.ident].update(
@@ -479,18 +496,71 @@ class FakeLedger:
                 alerted_kev=r.kev)
 
 
+class FakeClickUp:
+    """ClickUp's task, comment and checklist endpoints, in memory."""
+
+    def __init__(self):
+        self.tasks, self.comments, self.checklists = {}, [], {}
+
+    def __call__(self, method, path, body=None):
+        parts = path.strip("/").split("/")
+        if method == "POST" and parts[0] == "list":
+            tid = f"t{len(self.tasks) + 1}"
+            self.tasks[tid] = {**body, "id": tid, "status": "queued"}
+            return {"id": tid}
+        if parts[0] == "task" and parts[-1] == "comment":
+            self.comments.append((parts[1], body["comment_text"]))
+            return {}
+        if parts[0] == "task" and parts[-1] == "checklist":
+            checklist = {"id": f"c{parts[1]}", "name": body["name"],
+                         "items": []}
+            self.checklists[parts[1]] = checklist
+            return {"checklist": checklist}
+        if method == "GET" and parts[0] == "task":
+            checklist = self.checklists.get(parts[1])
+            return {"checklists": [checklist] if checklist else []}
+        if method == "PUT" and parts[0] == "task":
+            self.tasks.setdefault(parts[1], {"id": parts[1]}).update(body)
+            return {}
+        if parts[0] == "checklist":
+            checklist = next(c for c in self.checklists.values()
+                             if c["id"] == parts[1])
+            if method == "POST":
+                checklist["items"].append({
+                    "id": f"i{len(checklist['items'])}",
+                    "name": body["name"], "resolved": False})
+            else:
+                next(i for i in checklist["items"]
+                     if i["id"] == parts[3]).update(body)
+            return {}
+        raise AssertionError(f"unexpected ClickUp call {method} {path}")
+
+    def named(self):
+        return sorted(t["name"] for t in self.tasks.values() if "name" in t)
+
+    def subtasks(self, parent):
+        return [t for t in self.tasks.values() if t.get("parent") == parent]
+
+    def items(self, task_id):
+        return [(i["name"], i["resolved"])
+                for i in self.checklists[task_id]["items"]]
+
+
 @pytest.fixture
 def world(monkeypatch):
     FakeLedger.rows, FakeLedger.baseline = {}, False
-    posts, tasks = [], []
-    state = {"findings": [_finding(severity="HIGH")], "replies": []}
+    posts = []
+    clickup = FakeClickUp()
+    state = {"findings": [_finding(severity="HIGH")], "replies": [],
+             "scanned": {CORE.slug}, "eols": []}
 
     def fake_scan(repos=None):
         inv = dw.Inventory(packages=[dw.Package("PyPI", "Pillow", "10.4.0",
                                                 CORE.slug)],
-                           scanned={CORE.slug})
-        rows = [dw._row(f, dw.WATCHLIST) for f in state["findings"]]
-        return dw.Scan(inv, state["findings"], [], [], rows,
+                           scanned=set(state["scanned"]))
+        rows = [dw._row(f, dw.WATCHLIST) for f in state["findings"]] + \
+            dw._eol_rows(state["eols"])
+        return dw.Scan(inv, state["findings"], state["eols"], [], rows,
                        {f.key: f.link for f in state["findings"]})
 
     def fake_post(text, thread_ts=""):
@@ -501,22 +571,23 @@ def world(monkeypatch):
         posts.append(text)
         return f"ts{len(posts)}"
 
-    def fake_task(name, owner, rows, links):
-        tasks.append((name, owner))
-        return f"https://app.clickup.com/t/task{len(tasks)}"
-
     monkeypatch.setattr(dw, "Ledger", FakeLedger)
     monkeypatch.setattr(dw, "scan", fake_scan)
     monkeypatch.setattr(dw, "_post", fake_post)
-    monkeypatch.setattr(dw, "_create_task", fake_task)
+    monkeypatch.setattr(dw, "_clickup", clickup)
+    monkeypatch.setattr(dw, "_clickup_user",
+                        lambda owner: {"onlyg": 49257687,
+                                       "sanjay": 4434086}[owner])
     monkeypatch.setattr(dw, "_ask_claude", lambda prompt: "")
     monkeypatch.setattr(dw, "_mention", lambda name: f"@{name}")
     monkeypatch.setenv("DEPENDENCY_WATCH_ENABLED", "true")
-    return state, posts, tasks
+    monkeypatch.setenv("CLICKUP_API_TOKEN", "t")
+    monkeypatch.delenv("DEPENDENCY_WATCH_EPSS", raising=False)
+    return state, posts, clickup
 
 
 def test_first_run_is_one_baseline_post_then_silence(world):
-    state, posts, tasks = world
+    state, posts, clickup = world
     result = dw.run_daily_scan()
     assert result["status"] == "baseline"
     assert len(posts) == 1 and "first scan" in posts[0]
@@ -525,7 +596,7 @@ def test_first_run_is_one_baseline_post_then_silence(world):
 
 
 def test_a_new_finding_alerts_once(world):
-    state, posts, tasks = world
+    state, posts, clickup = world
     dw.run_daily_scan()
     state["findings"] = state["findings"] + [
         _finding(package="Django", severity="CRITICAL", key="CVE-9",
@@ -538,18 +609,19 @@ def test_a_new_finding_alerts_once(world):
     assert len(posts) == 2
 
 
-def test_kev_gets_one_task_even_when_slack_fails(world, monkeypatch):
-    state, posts, tasks = world
+def test_kev_gets_one_subtask_even_when_slack_fails(world, monkeypatch):
+    state, posts, clickup = world
     dw.run_daily_scan()
     state["findings"] = [_finding(severity="HIGH", kev=True)]
     monkeypatch.setattr(dw, "_post", lambda text, thread_ts="": "")
     dw.run_daily_scan()
     dw.run_daily_scan()
-    assert tasks == [("Pillow", "onlyg")]
+    # The parent and one Pillow subtask, never a second.
+    assert len(clickup.tasks) == 2
 
 
 def test_a_failed_baseline_post_is_retried_as_a_baseline(world, monkeypatch):
-    state, posts, tasks = world
+    state, posts, clickup = world
     monkeypatch.setattr(dw, "_post", lambda text, thread_ts="": "")
     assert dw.run_daily_scan()["posted"] is False
     monkeypatch.setattr(dw, "_post",
@@ -560,7 +632,7 @@ def test_a_failed_baseline_post_is_retried_as_a_baseline(world, monkeypatch):
 
 
 def test_disabled_does_nothing(world, monkeypatch):
-    state, posts, tasks = world
+    state, posts, clickup = world
     monkeypatch.setenv("DEPENDENCY_WATCH_ENABLED", "false")
     assert dw.run_daily_scan() == {"status": "disabled"}
     assert dw.run_weekly_digest() == {"status": "disabled"}
@@ -568,7 +640,7 @@ def test_disabled_does_nothing(world, monkeypatch):
 
 
 def test_claude_notes_the_alert_in_its_thread(world, monkeypatch):
-    state, posts, tasks = world
+    state, posts, clickup = world
     dw.run_daily_scan()
     sent = []
     monkeypatch.setattr(dw, "_post", lambda text, thread_ts="":
@@ -592,7 +664,7 @@ def test_claude_notes_the_alert_in_its_thread(world, monkeypatch):
 
 
 def test_the_alert_posts_when_claude_is_silent(world, monkeypatch):
-    state, posts, tasks = world
+    state, posts, clickup = world
     dw.run_daily_scan()
     state["findings"] = state["findings"] + [
         _finding(package="Django", severity="CRITICAL", key="CVE-9",
@@ -631,7 +703,7 @@ def test_owner_of(repo, owner):
 
 
 def test_the_alert_tags_the_owners_and_copies_sam(world):
-    state, posts, tasks = world
+    state, posts, clickup = world
     dw.run_daily_scan()
     state["findings"] = state["findings"] + [
         _finding(package="Django", severity="CRITICAL", key="CVE-9",
@@ -643,15 +715,14 @@ def test_the_alert_tags_the_owners_and_copies_sam(world):
     dw.run_daily_scan()
     alert = posts[-1]
     assert alert.startswith("@onlyg @sanjay cc @sam :rotating_light:")
-    # Every same-day alert gets a task now, not only exploited ones.
-    assert sorted(tasks[1:]) == [("Django", "onlyg"),
-                                 ("handlebars", "sanjay")]
-    assert "Owner: <https://app.clickup.com/t/task" in alert
+    # Each line links the subtask that holds it, and nothing else posts.
+    assert "Owner: <https://app.clickup.com/t/" in alert
     assert "|OnlyG's task>" in alert and "|Sanjay's task>" in alert
+    assert len(posts) == 2
 
 
 def test_one_owner_tags_only_that_owner(world):
-    state, posts, tasks = world
+    state, posts, clickup = world
     dw.run_daily_scan()
     state["findings"] = state["findings"] + [
         _finding(package="handlebars", eco="npm", severity="CRITICAL",
@@ -662,103 +733,255 @@ def test_one_owner_tags_only_that_owner(world):
     assert "@onlyg" not in posts[-1]
 
 
-def test_baseline_files_every_alert_and_names_who_has_them(world):
-    state, posts, tasks = world
+# ---------------------------------------------------------------------------
+# The upgrade plan: one task per engineer, one subtask per upgrade
+# ---------------------------------------------------------------------------
+
+DJANGO_EOL = dw.Eol("django", "4.2.20", "4.2", "eol", "2026-04-07", "4.2.24",
+                    ["core"], "5.2 LTS")
+
+
+def test_one_task_per_engineer_with_a_subtask_per_upgrade(world):
+    """Sam, 2026-10-26: 25 separate tasks in one morning was too many. Each
+    engineer gets one task, each upgrade a subtask saying how urgent it is,
+    what version to what, and how big the job is."""
+    state, posts, clickup = world
     state["findings"] = [
         _finding(severity="HIGH", kev=True, key="CVE-2023-4863",
-                 fixed="10.0.1"),
-        _finding(severity="CRITICAL", key="CVE-2026-112393",
-                 fixed="13.0.0"),
+                 fixed="10.0.1", version="10.0.0",
+                 repo="vomedjango-integrations-app"),
+        _finding(severity="CRITICAL", key="CVE-2026-112393", fixed="13.0.0"),
         _finding(package="Django", severity="CRITICAL", key="CVE-9",
-                 version="4.2.20", fixed="4.2.25"),
+                 version="4.2.20", fixed="5.2.17"),
+        _finding(package="anyio", severity="CRITICAL", key="CVE-5",
+                 version="4.14.1", fixed="4.14.2"),
         _finding(package="handlebars", eco="npm", severity="CRITICAL",
                  key="CVE-7", repo=WEB.slug, version="4.7.9",
                  fixed="4.7.10"),
         _finding(package="x", severity="MEDIUM", key="CVE-8"),  # digest
     ]
+    state["eols"] = [DJANGO_EOL]
     dw.run_daily_scan()
-    assert sorted(tasks) == [("Django", "onlyg"), ("Pillow", "onlyg"),
-                             ("handlebars", "sanjay")]
+    assert clickup.named() == [
+        "Critical (exploited) · Pillow 10.0.0, 10.4.0 → 13.0.0 · Major "
+        "upgrade",
+        "High · Django 4.2.20 → 5.2.17 · Project",
+        "High · Quick upgrades · 1 package",
+        "High · Quick upgrades · 1 package",
+        "[Security] Backend dependency upgrades",
+        "[Security] Frontend dependency upgrades",
+    ]
+    backend = clickup.tasks["t1"]
+    assert backend["name"] == "[Security] Backend dependency upgrades"
+    assert backend["assignees"] == [49257687]
+    assert len(clickup.subtasks("t1")) == 3
+    assert [t["name"] for t in clickup.subtasks("t5")] == [
+        "High · Quick upgrades · 1 package"]
+    pillow = next(t for t in clickup.subtasks("t1")
+                  if "Pillow" in t["name"])
+    assert pillow["assignees"] == [49257687] and pillow["priority"] == 1
+    assert "CVE-2023-4863 on 10.0.0 in integrations" in \
+        pillow["markdown_description"]
+    assert clickup.items("t4") == [("anyio 4.14.1 → 4.14.2 (core) · Patch",
+                                    False)]
+    # The parent lists its subtasks by section and takes the top priority.
+    assert backend["priority"] == 1
+    assert "**Critical** (exploited in the wild" in \
+        backend["markdown_content"]
+    assert "- [High · Django 4.2.20 → 5.2.17 · Project](" \
+           "https://app.clickup.com/t/t2)" in backend["markdown_content"]
+
     assert len(posts) == 1
-    assert "*Assigned*: 3 ClickUp tasks for @onlyg @sanjay cc @sam" \
-        in posts[0]
-    task_list = state["replies"][0][1]
-    assert "• *Pillow* (core) exploited, <https://app.clickup.com/t/" \
-        in task_list
-    assert "|Sanjay's task>" in task_list
-    # An open task is reused when the package comes up again.
+    assert ("*Assigned*: <https://app.clickup.com/t/t1|Backend dependency "
+            "upgrades> for @onlyg, <https://app.clickup.com/t/t5|Frontend "
+            "dependency upgrades> for @sanjay, cc @sam.") in posts[0]
+    plan_list = state["replies"][0][1]
+    assert ("• <https://app.clickup.com/t/t3|Critical (exploited) · Pillow "
+            "10.0.0, 10.4.0 → 13.0.0 · Major upgrade>") in plan_list
+    for task in clickup.tasks.values():
+        text = task["name"] + task.get("markdown_description", "") + \
+            task.get("markdown_content", "")
+        assert "\N{EM DASH}" not in text
+
+    # Another Pillow advisory joins the Pillow subtask, never a second one.
     state["findings"].append(_finding(severity="CRITICAL", key="CVE-NEW",
                                       fixed="13.0.0"))
     dw.run_daily_scan()
-    assert len(tasks) == 3
+    assert len(clickup.tasks) == 6
     assert "|OnlyG's task>" in posts[-1]
 
 
-def test_open_alerts_without_a_task_get_one_next_morning(world):
-    """The first live baseline (2026-10-25) filed a task for the exploited
-    Pillow flaw only. The rest get theirs on the next run, in one message
-    that tags the owners, and never twice."""
-    state, posts, tasks = world
+def test_the_old_per_package_tasks_move_into_the_plan(world):
+    """Oct 25 and 26 filed one task per package. The next run closes each
+    with a link to its subtask, says so once, and never again."""
+    state, posts, clickup = world
     state["findings"] = [
         _finding(severity="HIGH", kev=True, key="CVE-2023-4863"),
-        _finding(package="Django", severity="CRITICAL", key="CVE-9",
-                 version="4.2.20", fixed="4.2.25"),
+        _finding(package="anyio", severity="CRITICAL", key="CVE-5",
+                 version="4.14.1", fixed="4.14.2"),
         _finding(package="handlebars", eco="npm", severity="CRITICAL",
                  key="CVE-7", repo=WEB.slug, version="4.7.9",
                  fixed="4.7.10"),
     ]
     FakeLedger.baseline = True
+    old = {"Pillow": "868mmzwwe", "anyio": "868mn4vx1",
+           "handlebars": "868mn4we2"}
     for f in state["findings"]:
         row = dw._row(f, dw.WATCHLIST)
         FakeLedger.rows[row.ident] = {
             "alerted_at": "x", "alerted_severity": row.severity,
-            "alerted_kev": row.kev,
-            "clickup_task_id": "868mmzwwe" if row.kev else None}
+            "alerted_kev": row.kev, "clickup_task_id": old[f.package]}
     result = dw.run_daily_scan()
-    assert sorted(result["filed"]) == [("Django", "onlyg"),
-                                       ("handlebars", "sanjay")]
+    assert result["moved"] == 3
+    assert {clickup.tasks[t]["status"] for t in old.values()} == {"Closed"}
+    notes = dict(clickup.comments)
+    assert notes["868mmzwwe"].startswith(
+        "Moved: this upgrade is now the subtask \"Critical (exploited) · "
+        "Pillow 10.4.0 → 13.0.0 · Major upgrade\" "
+        "(https://app.clickup.com/t/")
     assert len(posts) == 1
-    assert posts[0].startswith("@onlyg @sanjay cc @sam :clipboard:")
-    assert "2 upgrade(s) already on the list now have a ClickUp task" \
-        in posts[0]
-    assert "Pillow" not in posts[0]
+    assert posts[0].startswith(
+        "@onlyg @sanjay cc @sam :clipboard: *Dependency upgrades* are now "
+        "one task per engineer")
+    assert "Backend dependency upgrades> (OnlyG): 1 critical, 1 quick " \
+           "upgrade on one checklist" in posts[0]
+    assert "The 3 earlier tasks are closed" in posts[0]
+    assert {v["clickup_task_id"] for k, v in FakeLedger.rows.items()
+            if k[0] not in ("PLAN",)} <= set(clickup.tasks) - set(old.values())
     dw.run_daily_scan()
-    assert len(posts) == 1 and len(tasks) == 2
+    assert len(posts) == 1 and len(clickup.comments) == 3
 
 
-def test_the_task_names_the_release_that_clears_everything(monkeypatch):
-    """The first KEV task said 10.0.1: right for CVE-2023-4863, wrong for
-    the 40 critical and high advisories 13.0.0 fixes."""
-    sent = {}
+def test_a_subtask_closes_only_after_a_run_that_read_everything(world):
+    state, posts, clickup = world
+    dw.run_daily_scan()  # the Pillow subtask, t2 under t1
+    state["findings"] = []
+    dw.run_daily_scan()  # only core was read: unread is not fixed
+    assert clickup.tasks["t2"]["status"] == "queued"
+    state["scanned"] = set(dw.MANIFESTS)
+    result = dw.run_daily_scan()
+    assert result["closed"] == [("onlyg", "pillow")]
+    assert clickup.tasks["t2"]["status"] == "Closed"
+    assert clickup.tasks["t1"]["status"] == "Closed"  # nothing left on it
+    assert ("PLAN", "onlyg", "*") not in FakeLedger.rows
 
-    def post(url, headers=None, json=None, timeout=None):
-        sent.update(json)
-        return httpx.Response(200, json={"id": "abc"},
-                              request=httpx.Request("POST", url))
 
-    monkeypatch.setenv("CLICKUP_API_TOKEN", "t")
-    monkeypatch.setattr(dw.httpx, "post", post)
-    monkeypatch.setattr(dw, "_clickup_user", lambda owner: 49257687)
-    rows = [
-        dw._row(_finding(key="CVE-2023-4863", kev=True, fixed="10.0.1",
-                         version="10.0.0",
-                         repo="vomedjango-integrations-app"), dw.WATCHLIST),
-        dw._row(_finding(key="CVE-2026-112393", severity="CRITICAL",
-                         fixed="13.0.0"), dw.WATCHLIST),
+def test_quick_upgrades_share_one_checklist_that_keeps_itself(world):
+    state, posts, clickup = world
+    state["scanned"] = set(dw.MANIFESTS)
+    state["findings"] = [
+        _finding(package="anyio", severity="CRITICAL", key="CVE-5",
+                 version="4.14.1", fixed="4.14.2"),
+        _finding(package="certifi", severity="CRITICAL", key="CVE-6",
+                 version="2023.7.22", fixed="2026.10.19", repo=DB.slug),
     ]
-    url = dw._create_task("Pillow", "onlyg", rows, {})
-    assert url == "https://app.clickup.com/t/abc"
-    assert sent["name"] == ("[Security] Pillow: CVE-2023-4863 exploited in "
-                            "the wild, upgrade to 13.0.0")
-    assert sent["assignees"] == [49257687]
-    assert sent["priority"] == 1
-    assert "**Owner:** OnlyG" in sent["markdown_description"]
-    assert "CVE-2023-4863 on 10.0.0 in integrations" in \
-        sent["markdown_description"]
+    dw.run_daily_scan()
+    quick = next(t for t in clickup.tasks.values()
+                 if "Quick upgrades" in t["name"])
+    assert quick["name"] == "High · Quick upgrades · 2 packages"
+    assert clickup.items(quick["id"]) == [
+        ("anyio 4.14.1 → 4.14.2 (core) · Patch", False),
+        ("certifi 2023.7.22 → 2026.10.19 (database) · Minor", False)]
+    # anyio ships; certifi's fix moves on.
+    state["findings"] = [_finding(package="certifi", severity="CRITICAL",
+                                  key="CVE-6", version="2023.7.22",
+                                  fixed="2026.10.20", repo=DB.slug)]
+    dw.run_daily_scan()
+    assert clickup.items(quick["id"]) == [
+        ("anyio 4.14.1 → 4.14.2 (core) · Patch", True),
+        ("certifi 2023.7.22 → 2026.10.20 (database) · Minor", False)]
+    assert quick["name"] == "High · Quick upgrades · 1 package"
+
+
+@pytest.mark.parametrize("name,current,target,size", [
+    ("anyio", "4.14.1", "4.14.2", "patch"),
+    ("djangorestframework", "3.15.2", "3.18.2", "minor"),
+    ("sqlparse", "0.4.4", "0.6.0", "minor"),
+    ("eventsource", "0.1.6", "1.1.1", "major"),
+    ("certifi", "2023.7.22", "2026.10.19", "minor"),
+    ("Twisted", "25.5.0", "26.10.0rc1", "minor"),
+    ("Pillow", "10.0.0", "13.0.0", "major"),
+])
+def test_how_big(name, current, target, size):
+    assert dw._bump(name, current, target) == size
+
+
+def test_django_and_its_end_of_life_are_one_project():
+    rows = [dw._row(_finding(package="Django", severity="CRITICAL",
+                             version="4.2.20", fixed="5.2.17"),
+                    dw.WATCHLIST)] + dw._eol_rows([DJANGO_EOL])
+    units = dw.plan_units(rows)
+    assert list(units) == [("onlyg", "django")]
+    rows = units[("onlyg", "django")]
+    assert dw.subtask_title("django", rows) == \
+        "High · Django 4.2.20 → 5.2.17 · Project"
+    body = dw.subtask_body("django", rows, {})
+    assert ("**How urgent:** High. Advisories in code we ship (1 critical), "
+            "and Django 4.2 is out of support (supported until "
+            "2026-04-07).") in body
+    assert "**How big:** Project." in body
+
+
+def test_node_16_is_a_project_to_the_newest_lts():
+    rows = dw._eol_rows([dw.Eol("nodejs", "16.12.0", "16", "eol",
+                                "2023-09-11", "16.20.2", ["web build"],
+                                "24 LTS")])
+    assert dw.subtask_title("nodejs", rows) == \
+        "High · Node.js 16.12.0 → 24 LTS · Project"
+    assert dw._slot("nodejs", rows) == "nodejs"
+    assert dw.owner_of(rows[0].repo) == "sanjay"
+
+
+def test_the_upgrade_cycle_is_the_newest_supported_lts():
+    today = date(2026, 10, 26)
+    node = [{"cycle": "26", "lts": "2026-10-28", "eol": "2029-04-30"},
+            {"cycle": "25", "lts": False, "eol": "2026-06-01"},
+            {"cycle": "24", "lts": "2025-10-28", "eol": "2028-04-30"},
+            {"cycle": "16", "lts": "2021-10-26", "eol": "2023-09-11"}]
+    assert dw._upgrade_cycle(node, today) == "24 LTS"
+    django = [{"cycle": "6.0", "lts": False, "eol": "2027-04-30"},
+              {"cycle": "5.2", "lts": True, "eol": "2028-04-30"},
+              {"cycle": "4.2", "lts": True, "eol": "2026-04-07"}]
+    assert dw._upgrade_cycle(django, today) == "5.2 LTS"
+    python = [{"cycle": "3.14", "eol": "2030-10-31"},
+              {"cycle": "3.10", "eol": "2026-10-31"}]
+    assert dw._upgrade_cycle(python, today) == "3.14"
+
+
+def test_react_pdf_and_pdfjs_are_one_upgrade():
+    rows = [
+        dw._row(_finding(package="pdfjs-dist", eco="npm", key="CVE-2024-4367",
+                         repo=WEB.slug, version="2.12.313", fixed="4.2.67"),
+                dw.WATCHLIST),
+        dw._row(_finding(package="react-pdf", eco="npm",
+                         key="CVE-2024-34342", repo=WEB.slug,
+                         version="5.7.2", fixed="7.7.3"), dw.WATCHLIST),
+    ]
+    units = dw.plan_units(rows)
+    assert list(units) == [("sanjay", "react-pdf")]
+    assert dw.subtask_title("react-pdf", units[("sanjay", "react-pdf")]) == (
+        "High · react-pdf 5.7.2 → 7.7.3, pdfjs-dist 2.12.313 → 4.2.67 · "
+        "Major upgrade")
+
+
+def test_a_release_candidate_target_says_so():
+    rows = [dw._row(_finding(package="Twisted", key="CVE-3", version="25.5.0",
+                             fixed="26.10.0rc1"), dw.WATCHLIST)]
+    assert dw._move_text("twisted", rows) == \
+        "Twisted 25.5.0 → 26.10.0rc1 (release candidate)"
+
+
+def test_build_tools_are_low_and_wait_on_the_checklist():
+    rows = [dw._row(_finding(package="virtualenv", severity="CRITICAL",
+                             version="20.26.2", fixed="21.14.9",
+                             repo="vomedjango-integrations-app"),
+                    dw.WATCHLIST)]
+    assert dw._level("virtualenv", rows) == "low"
+    assert dw._slot("virtualenv", rows) == dw.QUICK
 
 
 def test_the_digest_tags_nobody(world, monkeypatch):
-    state, posts, tasks = world
+    state, posts, clickup = world
     dw.run_daily_scan()
     monkeypatch.setattr(dw, "hn_chatter", lambda days: [])
     monkeypatch.setattr(dw, "_digest_week_due", lambda today: True)

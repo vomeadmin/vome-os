@@ -90,8 +90,11 @@ dependency_watch.py live lockfiles vs OSV.dev, CISA KEV, EPSS, endoflife.date:
                    07:45 alerts in #eng-infra only for what is new, Wed
                    10:00 digest. Unread repos are "not checked", never clean.
                    Code decides the tiers; Claude only adds a thread note.
-                   Alerts file a task per package per owner (backend
-                   OnlyG, web/landing/mobile Sanjay), tag them, cc Sam
+                   One task per engineer (backend OnlyG, web/landing/
+                   mobile Sanjay), a subtask per upgrade named "how
+                   urgent · from → to · how big", quick bumps on one
+                   checklist; kept in sync and closed by the scan. Alerts
+                   tag the owner, cc Sam
                    NVD (optional key) fills missing severities, never finds
 release_resolutions.py  a live fix -> one resolution draft per client, as a
                    card in the day thread (RELEASE_AUTO_SEND sends clean ones)
