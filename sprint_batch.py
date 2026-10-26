@@ -948,10 +948,17 @@ def _handled(item: dict, open_ids: set, pending: dict) -> str:
     import zoho_actions
 
     ticket_id = str(item.get("ticket_id") or "")
-    # Taken off an engineer's plate by the backlog sweep: the ticket is In
+    # Taken off an engineer's plate by the backlog sweep, or triaged again
+    # by the reconcile (nightly, or a cleanup batch): the ticket is In
     # Progress on purpose, and only an answer sent after it joined the
-    # sprint finishes it (an older acknowledgment does not).
-    adopted = bool((item.get("card") or {}).get("backlog_sweep"))
+    # sprint finishes it (an older acknowledgment does not). On Oct 25 this
+    # sweep finished 25 of 26 reconcile cards within the hour, drafts and
+    # all. A reconcile card that only waits on the client still finishes:
+    # there is nothing in it for Sam to send.
+    card = item.get("card") or {}
+    adopted = bool(card.get("backlog_sweep")) or (
+        bool(card.get("reconciled"))
+        and item.get("category") != "awaiting_client")
     try:
         status = ("Processing" if ticket_id in open_ids
                   else zoho_actions.ticket_status(ticket_id))
