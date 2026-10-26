@@ -596,7 +596,11 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
         card={**card, "incident": {
             "same_as": incident.get("same_as") or [],
             "sentry_issue": incident.get("sentry_issue") or "",
-            "symptom": incident.get("symptom") or ""}},
+            "symptom": incident.get("symptom") or ""},
+            # Triaged on purpose although the ticket is In Progress or
+            # Awaiting Client Response: the sprint keeps it until answered
+            # (sprint_batch._handled).
+            **({"reconciled": True} if reason == "reconcile" else {})},
         draft=draft["text"],
         draft_status=draft["status"],
         draft_why=draft["why"],
