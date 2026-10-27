@@ -1025,8 +1025,35 @@ async def sentry_webhook(request: Request):
     return result
 
 
+def _widget_caller_ok(request: Request, route: str) -> bool:
+    """Whether a /chat/ call really comes from Django.
+
+    Django's support views sign in the user and build session_context
+    themselves, then send SUPPORT_API_KEY in X-Support-Api-Key. Without the
+    check, anyone who finds this server could chat as any email, file
+    tickets as anyone and read anyone's tickets.
+
+    Log-only until CHAT_REQUIRE_API_KEY=1, so the widget keeps working
+    while the Django change that sends the header deploys. Flip it once
+    the "[CHAT AUTH] unsigned" lines stop.
+    """
+    expected = os.environ.get("SUPPORT_API_KEY", "")
+    given = request.headers.get("X-Support-Api-Key", "")
+    if expected and given and hmac.compare_digest(given, expected):
+        return True
+    enforcing = os.environ.get("CHAT_REQUIRE_API_KEY", "") == "1"
+    client = request.client.host if request.client else "unknown"
+    print(
+        f"[CHAT AUTH] unsigned {route} call from {client}"
+        f"{' -- refused' if enforcing else ' -- allowed (log-only)'}"
+    )
+    return not enforcing
+
+
 @app.post("/chat/intake")
 async def chat_intake(request: Request):
+    if not _widget_caller_ok(request, "/chat/intake"):
+        return Response(content="Unauthorized", status_code=401)
     body = await request.json()
     result = run_intake_turn(
         message=body.get("message", ""),
@@ -1041,6 +1068,8 @@ async def chat_intake(request: Request):
 @app.get("/chat/tickets")
 async def chat_tickets(request: Request):
     """Fetch Zoho Desk tickets for a given email address."""
+    if not _widget_caller_ok(request, "/chat/tickets"):
+        return Response(content="Unauthorized", status_code=401)
     email = request.query_params.get("email", "")
     if not email:
         return {"tickets": []}
@@ -1061,7 +1090,9 @@ DJANGO_API_URL = os.environ.get("DJANGO_PROD_API_URL") or os.environ.get(
 SUPPORT_API_KEY = os.environ.get("SUPPORT_API_KEY", "")
 
 
-@app.get("/chat/auth-check")
+# The next four were open to anyone and nothing calls them (Django, the
+# widget and the Command Center all go elsewhere). Ops token only now.
+@app.get("/chat/auth-check", dependencies=[Depends(verify_ops_token)])
 async def chat_auth_check(request: Request):
     """Check a user's auth status via Django."""
     email = request.query_params.get("email", "")
@@ -1080,7 +1111,7 @@ async def chat_auth_check(request: Request):
         return {"found": False, "reason": str(e)}
 
 
-@app.post("/chat/auth-bypass")
+@app.post("/chat/auth-bypass", dependencies=[Depends(verify_ops_token)])
 async def chat_auth_bypass(request: Request):
     """Bypass authentication for a user via Django."""
     body = await request.json()
@@ -1100,7 +1131,8 @@ async def chat_auth_bypass(request: Request):
         return {"bypassed": False, "reason": str(e)}
 
 
-@app.get("/debug/test-ticket-fetch")
+@app.get(
+    "/debug/test-ticket-fetch", dependencies=[Depends(verify_ops_token)])
 async def debug_test_ticket_fetch(request: Request):
     """Test fetching tickets -- shows raw MCP response."""
     from agent import _zoho_desk_call, _unwrap_mcp_result, ZOHO_ORG_ID
@@ -1143,7 +1175,7 @@ async def debug_test_ticket_fetch(request: Request):
     return results
 
 
-@app.get("/debug/mcp-tools")
+@app.get("/debug/mcp-tools", dependencies=[Depends(verify_ops_token)])
 async def debug_mcp_tools():
     """List available tools from the Zoho Desk MCP server."""
     from agent import ZOHO_DESK_MCP_URL

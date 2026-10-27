@@ -49,10 +49,16 @@ request merges, `promote_merged` writes the merge commit into Fix Commit and
 moves the parent and its children to `on dev`, which is where the release
 watcher picks them up and proves them live. Nothing here ever sets `on prod`.
 
+NO DAILY CAP (Sam, 2026-10-26)
+------------------------------
+A bug gets its fix, however many came before it that day. The old cap of 3
+held #9642 and #9643 (Oct 24) and #9653, #9655, #9662 and #9665 (Oct 26)
+with no ledger row and nothing to try them again, so each surfaced in the
+sprint as a `fix N` decision that was never Sam's to make.
+
 SWITCHES
 --------
     TICKET_FIX_ENABLED     default on. "false" proposes nothing.
-    TICKET_FIX_DAILY_CAP   pull requests per day, default 3.
     SENTRY_AUTO_PR_ENABLED the shared kill switch for agent-opened PRs.
 """
 
@@ -124,10 +130,6 @@ RISKS_THE_AGENT_FIXES = ("low", "medium")
 def enabled() -> bool:
     value = os.environ.get("TICKET_FIX_ENABLED", "")
     return value.strip().lower() not in ("false", "0", "no", "off")
-
-
-def daily_cap() -> int:
-    return int(os.environ.get("TICKET_FIX_DAILY_CAP", "3"))
 
 
 # "core:form_app/s.py:120" or "web:src/x.js". A location with commentary
@@ -212,14 +214,6 @@ def _attempted(ticket_id: str, thread_id: str = "") -> bool:
     return not thread_id or not spent_on or spent_on == thread_id
 
 
-def _opened_today() -> int:
-    rows = store.query(
-        f"SELECT COUNT(*) AS n FROM {LEDGER} WHERE outcome = 'pr_opened'"
-        " AND attempted_at >= date_trunc('day', NOW())"
-    )
-    return int(rows[0]["n"]) if rows else 0
-
-
 def _record(ticket_id: str, number: str, outcome: str, reason: str,
             pr_url: str = "", parent: str = "", child: str = "",
             thread_id: str = "") -> None:
@@ -252,7 +246,7 @@ def propose_for_ticket(ticket_id: str, ticket_number: str, account: str,
 
     One attempt per customer message on the agent's own call (`thread_id`
     is the latest one), and never a second pull request for a ticket that
-    has one. Sam's `fix N` may retry, and is not held to the daily cap.
+    has one. Sam's `fix N` may retry.
     """
     try:
         return _propose(ticket_id, ticket_number, account, card, zoho_url,
@@ -271,9 +265,6 @@ def _propose(ticket_id, ticket_number, account, card, zoho_url,
         return {"outcome": "skipped", "reason": reason, "pr_url": ""}
     if not sam_approved and _attempted(ticket_id, thread_id):
         return {"outcome": "skipped", "reason": "already attempted",
-                "pr_url": ""}
-    if not sam_approved and _opened_today() >= daily_cap():
-        return {"outcome": "skipped", "reason": "daily cap reached",
                 "pr_url": ""}
 
     import sentry_code

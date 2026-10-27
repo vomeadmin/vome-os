@@ -507,7 +507,8 @@ def fix_status(ticket: str) -> dict:
                    f"{code.get('verdict') or 'none'}"
                    + (f" ({code.get('confidence')}, risk "
                       f"{code.get('fix_risk')})" if code else "")
-                   + ". propose_fix asks the agent to try (low risk only).")
+                   + ". propose_fix asks the agent to try (low or medium "
+                     "risk).")
     return {"ticket": f"#{number}", "summary": summary, "pr_url": pr,
             "fix_attempt": {k: str(v) for k, v in ledger.items()},
             "release_state": release.get("text"),
@@ -580,7 +581,8 @@ def propose_fix(ticket: str, caller: str) -> dict:
             "next_step": ("The fix author is writing a diff and the patch "
                           "safety check reviews it (a few minutes). Call "
                           "fix_status for the PR, or why there is none. "
-                          "Only low-risk fixes are ever opened, and nothing "
+                          "Only low and medium risk fixes are opened (an "
+                          "engineer reviews medium), and nothing "
                           "is merged by an agent.")}
 
 

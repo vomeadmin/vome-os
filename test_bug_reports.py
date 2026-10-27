@@ -144,7 +144,6 @@ def rec(monkeypatch):
     monkeypatch.setattr(bug_reports, "_clickup", clickup)
     monkeypatch.setattr(bug_reports, "_save",
                         lambda ts, **f: r.saved.update(f))
-    monkeypatch.setattr(bug_reports, "_opened_today", lambda: 0)
     return r
 
 
@@ -325,13 +324,6 @@ def test_engineer_verdict_with_a_workable_fix_still_asks_sam(rec):
     out = bug_reports.act(TS, _row(), {**GUEST, "verdict": "engineer"})
     assert out["verdict"] == bug_reports.GREENLIGHT
     assert not _engineer_assigned(rec)
-
-
-def test_daily_cap_asks_sam_instead_of_routing(rec, monkeypatch):
-    monkeypatch.setattr(bug_reports, "_opened_today", lambda: 99)
-    out = bug_reports.act(TS, _row(), BUG)
-    assert out["verdict"] == bug_reports.GREENLIGHT
-    assert "daily pull request cap" in rec.posts[-1][2]
 
 
 def test_auth_cookie_report_still_routes_to_an_engineer(rec):

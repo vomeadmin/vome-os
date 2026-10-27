@@ -56,16 +56,27 @@ def _tokens(text: str) -> set[str]:
 # lookup_feature
 # ---------------------------------------------------------------------------
 
-def lookup_feature(question: str, language: str = "en") -> dict:
+def _source_state(wait: bool) -> dict:
+    if wait:
+        return product_source.ensure_fresh()
+    return product_source.refresh_in_background()
+
+
+def lookup_feature(
+    question: str, language: str = "en", wait_for_source: bool = True,
+) -> dict:
     """Does it exist, what is it called, how does it work, what are the
     catches. Help centre first, then the product's own words, then caveats.
+
+    wait_for_source=False reads the frontend copy already on disk instead of
+    waiting on a refresh (vic_tools.py, which has a 30 second turn).
     """
     import product_knowledge
     import product_strings
 
     question = (question or "").strip()[:500]
     language = language if language in ("en", "fr") else "en"
-    source_state = product_source.ensure_fresh()
+    source_state = _source_state(wait_for_source)
     sources: dict[str, str] = {}
     result: dict = {"question": question}
 
@@ -300,12 +311,12 @@ def _rank_screens(question: str, limit: int = 4) -> list[dict]:
     return list(by_screen.values())
 
 
-def where_in_app(question: str) -> dict:
+def where_in_app(question: str, wait_for_source: bool = True) -> dict:
     """Which page, and the exact wording of the controls on it."""
     import product_navigation
 
     question = (question or "").strip()[:500]
-    source_state = product_source.ensure_fresh()
+    source_state = _source_state(wait_for_source)
     if not product_navigation.available():
         return {
             "question": question,

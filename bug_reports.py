@@ -21,8 +21,8 @@ FLOW
       2. engineering.bug_report_analyst reads the code (production, the dev
          branches, and RON_DEVELOP) and returns a verdict
       3. a bug with a fix (agent_fix, greenlight, or engineer with one):
-           low risk, under the daily cap -> PR into the dev branch on its
-                                            own, Agent Fixes task
+           low risk        -> PR into the dev branch on its own, Agent Fixes
+                              task (no daily cap: Sam, 2026-10-26)
            otherwise, or the small PR did not work out -> GREENLIGHT: Sam is
                         @-mentioned with the problem, the fix and its repos,
                         and the risk in plain words. Nothing routes.
@@ -92,7 +92,6 @@ and Slack gets a check mark, one line and the link.
 SWITCHES
 --------
     BUG_REPORTS_ENABLED          default on. "false" ignores the channel.
-    BUG_REPORT_FIX_DAILY_CAP     pull requests per day, default 3.
     SLACK_CHANNEL_BUG_REPORTS    default C0CAJ269RAQ.
 
 Backfill (Sam asked for a dry run of the first reports before anything
@@ -256,10 +255,6 @@ store.register_table(
 def enabled() -> bool:
     value = os.environ.get("BUG_REPORTS_ENABLED", "")
     return value.strip().lower() not in ("false", "0", "no", "off")
-
-
-def daily_cap() -> int:
-    return int(os.environ.get("BUG_REPORT_FIX_DAILY_CAP", "3"))
 
 
 # ---------------------------------------------------------------------------
@@ -745,8 +740,6 @@ def _fix_or_route(ts: str, row: dict, card: dict,
         return _auto_route(ts, row, card, "there is no workable fix: "
                            + _why_unworkable(card), dry_run)
     ok, why = ticket_fix.should_attempt(card)
-    if ok and not dry_run and _opened_today() >= daily_cap():
-        ok, why = False, "the daily pull request cap is reached"
     if not ok:
         return _ask_greenlight(ts, row, card, why, dry_run)
     # On its own the agent edits only the `where` file. A fix that needs more
@@ -1442,14 +1435,6 @@ def _hand_back(fix_task: str, closed: list) -> None:
     _offer_route(row["ts"], _card(row),
                  f"a pull request was closed without merging ({closed[0]}), "
                  "so the fix will not ship")
-
-
-def _opened_today() -> int:
-    rows = store.query(
-        f"SELECT COUNT(*) AS n FROM {LEDGER} WHERE pr_url <> ''"
-        " AND updated_at >= date_trunc('day', NOW())"
-    )
-    return int(rows[0]["n"]) if rows else 0
 
 
 # ---------------------------------------------------------------------------

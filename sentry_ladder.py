@@ -24,9 +24,10 @@ THE LADDER (`decide`)
                                                the thread, nothing is built
 
 A FIX that does not work out (the fix author declines, the patch guard
-refuses it, it does not apply) or that would pass the daily PR cap becomes a
-GREENLIGHT with the reason. A greenlit build that does not work out goes to
-an engineer: Sam already said it should be fixed.
+refuses it, it does not apply) becomes a GREENLIGHT with the reason. There
+is no daily PR cap: a bug gets its fix (Sam, 2026-10-26). A greenlit build
+that does not work out goes to an engineer: Sam already said it should be
+fixed.
 
 One task per root cause still holds: an issue whose cause already has a task
 (`sentry_agent_fixes.existing_task`) is a comment on that task, nothing else.
@@ -50,7 +51,6 @@ pointer to where the work went. Capped per run, so the first day is bounded.
 
 SWITCHES
 --------
-    SENTRY_FIX_DAILY_CAP     agent PRs per day, default 3.
     SENTRY_SWEEP_PER_RUN     parked tasks re-run per morning, default 12.
 """
 
@@ -58,7 +58,6 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import datetime, timezone
 
 import httpx
 
@@ -90,10 +89,6 @@ FIX_CONFIDENCE = ("medium", "high")
 
 _ROUTE = re.compile(r"^route\b\s*(backend|frontend)?", re.I)
 _CLOSE = re.compile(r"^(close|no|nope|ignore)\b", re.I)
-
-
-def fix_daily_cap() -> int:
-    return int(os.environ.get("SENTRY_FIX_DAILY_CAP", "3"))
 
 
 def sweep_per_run() -> int:
@@ -187,10 +182,6 @@ def _build(issue: dict, analysis: dict, source: str, *, greenlit: bool,
     import sentry_fix
 
     issue_id = str(issue.get("issue_id") or "")
-    if not greenlit and _fixes_today() >= fix_daily_cap():
-        return _ask(issue, analysis,
-                    f"today's {fix_daily_cap()} agent PRs are already open")
-
     context = {"source": source, "repo": issue.get("repo", ""),
                "branch": issue.get("ref", ""), "issue_id": issue_id}
     gate = dict(analysis)
@@ -509,15 +500,6 @@ def _say(issue: dict, text: str) -> None:
     sentry_ledger.update(str(issue.get("issue_id") or ""), slack_ts=ts,
                          slack_channel=channel)
     sentry_slack._post(channel, text, thread_ts=ts)
-
-
-def _fixes_today() -> int:
-    rows = store.query(
-        f"SELECT COUNT(*) AS n FROM {sentry_ledger.TABLE} WHERE lane = :fix "
-        "AND filed_at >= :start",
-        {"fix": FIX, "start": datetime.now(timezone.utc).replace(
-            hour=0, minute=0, second=0, microsecond=0, tzinfo=None)})
-    return int(rows[0]["n"]) if rows else 0
 
 
 def _row_task(issue_id: str) -> str:

@@ -8,9 +8,13 @@ searches KB, enforces completeness gate, and creates tickets.
 
 import json
 import re
+import time
 from pathlib import Path
 
 import anthropic
+
+import vic_security
+import vic_tools
 
 from agent import (
     fetch_crm_account,
@@ -437,10 +441,14 @@ def _create_ticket_from_intake(
         description, conversation_history,
     )
 
-    # Create Zoho Desk ticket via direct REST API
-    final_email = (
+    # The ticket contact is always the logged-in person who chatted with
+    # Vic, never the volunteer they asked about. Replies go to the
+    # contact, so using the affected email sent our answers about an
+    # admin's database to the volunteer (#9650). The affected user is
+    # kept in the internal note instead.
+    final_email = user_email or (
         affected_email if affected_email and affected_email != "self"
-        else user_email
+        else ""
     )
 
     # Aggregate attachments from every turn in the conversation, not
@@ -596,6 +604,8 @@ def _create_ticket_from_intake(
             f"Ticket created via Support Widget\n\n"
             f"Module: {module}\n"
             f"Platform: {platform}\n"
+            f"Reported by: {user_email or 'unknown'} "
+            f"({session_context.get('user_role', 'unknown')})\n"
             f"Affected user: {affected_email}\n"
             f"Org: {org_name} "
             f"({session_context.get('tier', 'unknown')} tier)\n"
@@ -629,6 +639,144 @@ def _map_tier_to_score(tier: str) -> str:
 # Main orchestrator
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Vic's model call, tools and security handoff
+# ---------------------------------------------------------------------------
+
+# Django gives a turn 30 seconds. Two lookups, and none offered once the
+# budget is spent, leave room for the final answer.
+VIC_TOOL_ROUNDS = 2
+VIC_TOOL_BUDGET_SECONDS = 15
+
+
+def _ask_vic(system_prompt: str, messages: list[dict]) -> str:
+    """Vic's reply text, after any lookups it asks for (vic_tools.py).
+
+    The tools are always declared, because a conversation holding tool
+    blocks must declare them; the last round sets tool_choice to none so
+    the answer comes back as text.
+    """
+    started = time.monotonic()
+    convo = list(messages)
+    for round_number in range(VIC_TOOL_ROUNDS + 1):
+        may_look_up = (
+            round_number < VIC_TOOL_ROUNDS
+            and time.monotonic() - started < VIC_TOOL_BUDGET_SECONDS
+        )
+        response = _client.messages.create(
+            model=SUPPORT_MODEL,
+            max_tokens=1024,
+            system=system_prompt,
+            messages=convo,
+            tools=vic_tools.TOOLS,
+            tool_choice={"type": "auto" if may_look_up else "none"},
+        )
+        if response.stop_reason != "tool_use":
+            break
+        convo.append({"role": "assistant", "content": response.content})
+        convo.append({
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": vic_tools.run_tool(block.name, block.input),
+                }
+                for block in response.content
+                if block.type == "tool_use"
+            ],
+        })
+        print(
+            "[INTAKE] Vic looked up: " + ", ".join(
+                b.name for b in response.content if b.type == "tool_use")
+        )
+    return "".join(
+        block.text for block in response.content if block.type == "text"
+    )
+
+
+def _last_assistant_reply(conversation_history: list) -> str:
+    for turn in reversed(conversation_history or []):
+        if turn.get("role") == "assistant":
+            return str(turn.get("content") or "")
+    return ""
+
+
+def _security_refusal(locale: str | None) -> dict:
+    return {
+        "reply": vic_security.refusal(locale),
+        "status": "collecting",
+        "kb_article": None,
+        "ticket_created": False,
+        "ticket_id": None,
+    }
+
+
+def _hand_security_question_to_team(
+    message: str,
+    session_context: dict,
+    conversation_history: list,
+    attachments: list,
+) -> dict:
+    """The client said yes to "we can send this to our team". File the
+    question they asked, word for word, without the model ever seeing it.
+    """
+    question = ""
+    history = conversation_history or []
+    for i in range(len(history) - 1, -1, -1):
+        turn = history[i]
+        if turn.get("role") == "assistant" and vic_security.is_refusal(
+            str(turn.get("content") or "")
+        ):
+            earlier = [
+                t for t in history[:i] if t.get("role") == "user"
+            ]
+            if earlier:
+                question = str(earlier[-1].get("content") or "")
+            break
+
+    locale = session_context.get("locale")
+    closing = vic_security.handed_off(locale)
+    user_email = session_context.get("user_email", "")
+    ticket_result = _create_ticket_from_intake(
+        extracted={
+            "description": question or message,
+            "module": "other",
+            "platform": session_context.get("platform", "web"),
+            "affected_user_email": user_email or "self",
+        },
+        session_context=session_context,
+        conversation_history=conversation_history,
+        attachments=attachments,
+        current_message=message,
+        current_reply=closing,
+    )
+    created = ticket_result.get("ticket_created", False)
+    if created:
+        log_vic_outcome(
+            outcome="escalated",
+            resolution_type="ticket_created",
+            issue_fingerprint=vic_security.FINGERPRINT,
+            org_id=session_context.get("org_id"),
+            user_email=user_email,
+            user_role=session_context.get("user_role"),
+            ticket_id=ticket_result.get("ticket_id"),
+        )
+    else:
+        closing = (
+            "I'm sorry, I wasn't able to send this to our team right now. "
+            "Please email us at support@vomevolunteer.zohodesk.com and "
+            "we'll follow up with you."
+        )
+    return {
+        "reply": closing,
+        "status": "complete",
+        "kb_article": None,
+        "ticket_created": created,
+        "ticket_id": ticket_result.get("ticket_id"),
+    }
+
+
 def run_intake_turn(
     message: str,
     session_context: dict,
@@ -648,6 +796,27 @@ def run_intake_turn(
     }
     """
     attachments = attachments or []
+    locale = session_context.get("locale")
+    previous_reply = _last_assistant_reply(conversation_history)
+
+    # Step 0: Security and IT questions never reach the model
+    # (vic_security.py). A short yes to the refusal files the question
+    # for the team exactly as it was asked.
+    if (
+        vic_security.is_refusal(previous_reply)
+        and vic_security.is_affirmative(message)
+    ):
+        return _hand_security_question_to_team(
+            message, session_context, conversation_history, attachments,
+        )
+    if not is_quick_reply:
+        screen = vic_security.screen_message(message, previous_reply)
+        if screen.blocked:
+            print(
+                f"[VIC-SECURITY] Refused a message from "
+                f"{session_context.get('user_email')}: {screen.reason}"
+            )
+            return _security_refusal(locale)
 
     # Step 1: Run Claude to get the conversational reply + structured data
     kb_context = None
@@ -710,13 +879,7 @@ def run_intake_turn(
     system_prompt = _build_system_prompt(session_context)
 
     try:
-        response = _client.messages.create(
-            model=SUPPORT_MODEL,
-            max_tokens=1024,
-            system=system_prompt,
-            messages=messages,
-        )
-        response_text = response.content[0].text
+        response_text = _ask_vic(system_prompt, messages)
     except Exception as e:
         print(f"[INTAKE] Claude call failed: {e}")
         return {
@@ -734,6 +897,18 @@ def run_intake_turn(
     kb_query = parsed.get("kb_query")
     issue_fingerprint = parsed.get("issue_fingerprint")
     auth_check_email = parsed.get("auth_check")
+
+    # Step 2a: Last check before the client sees anything, and before any
+    # side effect (an account activation, a ticket) runs. A reply that
+    # carries security or internal detail is replaced with the refusal,
+    # whatever the question looked like (vic_security.py).
+    blocked = vic_security.check_reply(reply_text)
+    if blocked:
+        print(
+            f"[VIC-SECURITY] Blocked a reply to "
+            f"{session_context.get('user_email')}: {', '.join(blocked)}"
+        )
+        return _security_refusal(locale)
 
     # Step 2b: Handle auth check if Claude requested one
     auth_self_served = False
@@ -869,8 +1044,13 @@ def run_intake_turn(
         )
         created = ticket_result.get("ticket_created", False)
 
-        # Log unmatched issue for KB gap tracking
-        if issue_fingerprint and not kb_article_response:
+        # Log unmatched issue for KB gap tracking. Never for a security
+        # question: those must not become help centre articles.
+        if (
+            issue_fingerprint
+            and issue_fingerprint != vic_security.FINGERPRINT
+            and not kb_article_response
+        ):
             check_and_create_kb_task(
                 fingerprint=issue_fingerprint,
                 org_id=session_context.get("org_id"),
@@ -923,7 +1103,12 @@ def run_intake_turn(
             status = "collecting"
 
     # Log unmatched issues on each turn where we have a fingerprint
-    if issue_fingerprint and not kb_article_response and status not in ("deflecting",):
+    if (
+        issue_fingerprint
+        and issue_fingerprint != vic_security.FINGERPRINT
+        and not kb_article_response
+        and status not in ("deflecting",)
+    ):
         check_and_create_kb_task(
             fingerprint=issue_fingerprint,
             org_id=session_context.get("org_id"),

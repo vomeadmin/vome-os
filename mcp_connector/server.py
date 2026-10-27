@@ -572,8 +572,8 @@ def build() -> MCPServer:
         ticket: Annotated[str, Field(description="Ticket number")],
     ) -> dict:
         """Ask the agent to write the fix and open a PR into the dev branch
-        (Sam only). Only low-risk fixes are opened; never merged by an
-        agent. Check the result with fix_status."""
+        (Sam only). Low and medium risk fixes are opened, never high;
+        never merged by an agent. Check the result with fix_status."""
         return await _run("propose_fix", sprint_tools.propose_fix,
                           ticket=ticket, caller=caller())
 

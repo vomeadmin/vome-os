@@ -192,6 +192,30 @@ def ensure_fresh(force: bool = False) -> dict:
         return status()
 
 
+def refresh_in_background() -> dict:
+    """status() now, with a refresh started if the copy is stale.
+
+    For callers that cannot wait on a download. Vic has 30 seconds for a
+    whole chat turn, and ensure_fresh holds the lock for as long as the
+    tarball takes, so Vic reads whatever copy is on disk and the refresh
+    lands for the next question. Starts nothing while another refresh holds
+    the lock.
+    """
+    if _state["mode"] == "local":
+        return status()
+    if _state["mode"] == "unknown" and _local_checkout():
+        return ensure_fresh()
+    age = time.time() - float(_state["fetched_at"] or 0)
+    if _state["fetched_at"] and age < config.product_source_ttl():
+        return status()
+    if _lock.acquire(blocking=False):
+        _lock.release()
+        threading.Thread(
+            target=ensure_fresh, name="vic-source", daemon=True,
+        ).start()
+    return status()
+
+
 def status() -> dict:
     fetched = float(_state["fetched_at"] or 0)
     return {

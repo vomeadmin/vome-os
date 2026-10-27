@@ -66,12 +66,6 @@ import sprint_store
 # agent.get_client_tier: very-high starts at 4000.
 VERY_HIGH_ARR = 4000.0
 
-# What the agent's fix attempt said when it did not open a PR, and whether
-# that means "an engineer should take it". A full daily cap is the agent's
-# limit, not the bug's: it waits for Sam rather than filling the Priority
-# Queue with work the agent would have done the next day.
-NOT_AN_ENGINEER_HANDOFF = {"daily cap reached"}
-
 # Repos whose code Sanjay owns; everything else is OnlyG's.
 FRONTEND_REPOS = {"web", "mobile"}
 
@@ -138,8 +132,6 @@ def should_route(card: dict, fix: dict) -> tuple[bool, str]:
     if lane == "agent_fix":
         if fix.get("pr_url"):
             return False, "the agent opened a fix"
-        if fix.get("reason") in NOT_AN_ENGINEER_HANDOFF:
-            return False, f"agent fix waiting ({fix.get('reason')})"
         return True, "agent_declined"
     return False, f"lane {lane or 'unset'}"
 

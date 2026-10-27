@@ -67,8 +67,6 @@ def test_works_as_designed_is_never_routed_for_him():
 def test_an_agent_fix_stays_with_the_agent_until_it_declines():
     card = _card(lane="agent_fix")
     assert tr.should_route(card, {"pr_url": "https://pr/1"})[0] is False
-    assert tr.should_route(card, {"outcome": "skipped",
-                                  "reason": "daily cap reached"})[0] is False
     assert tr.should_route(card, {"outcome": "declined",
                                   "reason": "touches shared data"}) == (
         True, "agent_declined")

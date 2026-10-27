@@ -74,7 +74,7 @@ def world(monkeypatch):
          "comments": [], "ledger": {}, "proposal": {
              "attempted": True, "diff": "--- a\n+++ b\n", "reason": "ok"},
          "pr": {"opened": True, "url": "https://bb/pr/1", "branch": "b"},
-         "fixes_today": 0, "filed_today": 0, "row_task": "",
+         "filed_today": 0, "row_task": "",
          "proposed_with": []}
 
     monkeypatch.setattr(ladder, "_say", lambda issue, text:
@@ -98,7 +98,6 @@ def world(monkeypatch):
     monkeypatch.setattr(ladder, "_clickup_put",
                         lambda t, body: w["put"].append((t, body)) or True)
     monkeypatch.setattr(ladder, "_repoint", lambda old, new: None)
-    monkeypatch.setattr(ladder, "_fixes_today", lambda: w["fixes_today"])
     monkeypatch.setattr(ladder, "_row_task", lambda i: w["row_task"])
     monkeypatch.setattr(ladder.sentry_ledger, "update",
                         lambda issue_id, **f: w["ledger"].setdefault(
@@ -144,13 +143,6 @@ def test_a_fix_that_will_not_build_asks_sam_with_the_reason(world):
     out = ladder.place(_issue(), GOOD)
     assert out["lane"] == ladder.GREENLIGHT
     assert "patch refused" in world["said"][0]
-
-
-def test_the_daily_pr_cap_asks_instead(world):
-    world["fixes_today"] = 3
-    out = ladder.place(_issue(), GOOD)
-    assert out["lane"] == ladder.GREENLIGHT and "already open" in out["why"]
-    assert world["proposed_with"] == []
 
 
 def test_low_confidence_is_reported_with_no_task(world):

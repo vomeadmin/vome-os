@@ -322,13 +322,12 @@ def test_sam_can_ask_for_a_design_question_fix_but_not_a_risky_one():
     assert ticket_fix.should_attempt(risky, sam_approved=True)[0] is False
 
 
-def test_sams_fix_may_retry_and_skips_the_daily_cap(monkeypatch):
+def test_sams_fix_may_retry(monkeypatch):
     import sentry_code
     import sentry_fix
 
     monkeypatch.setenv("TICKET_FIX_ENABLED", "true")
     monkeypatch.setattr(ticket_fix, "_attempted", lambda t, th="": True)
-    monkeypatch.setattr(ticket_fix, "_opened_today", lambda: 99)
     monkeypatch.setattr(ticket_fix, "_record", lambda *a, **k: None)
     monkeypatch.setattr(sentry_code, "gather",
                         lambda *a, **k: {"files": "src"})
@@ -356,7 +355,6 @@ def test_propose_opens_a_pr_and_files_tasks(monkeypatch):
     filed = []
     monkeypatch.setenv("TICKET_FIX_ENABLED", "true")
     monkeypatch.setattr(ticket_fix, "_attempted", lambda t, th="": False)
-    monkeypatch.setattr(ticket_fix, "_opened_today", lambda: 0)
     monkeypatch.setattr(ticket_fix, "_record", lambda *a, **k: None)
     monkeypatch.setattr(sentry_code, "gather",
                         lambda *a, **k: {"files": "src"})

@@ -85,7 +85,6 @@ def proposing(monkeypatch):
     seen = {"filed": [], "pings": [], "context": {}, "pr_context": {}}
     monkeypatch.setenv("TICKET_FIX_ENABLED", "true")
     monkeypatch.setattr(ticket_fix, "_attempted", lambda t, th="": False)
-    monkeypatch.setattr(ticket_fix, "_opened_today", lambda: 0)
     monkeypatch.setattr(ticket_fix, "_record", lambda *a, **k: None)
     monkeypatch.setattr(ticket_fix, "_pr_target", lambda repo: "development")
     monkeypatch.setattr(ticket_fix, "extra_context", lambda *a: "")
