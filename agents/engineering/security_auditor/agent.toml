@@ -1,0 +1,52 @@
+[identity]
+name = "security_auditor"
+division = "engineering"
+title = "Security Auditor"
+reports_to = "sam"
+hired = "2026-10-26"
+
+[model]
+# Premium tier. The pilot audit on 2026-10-26 found an unauthenticated
+# account takeover (Google mobile sign-in trusting the body email) that had
+# been live for 19 months, and around thirty cross-organization gaps. The
+# value is reading code at depth and refusing to report what the code
+# refutes; a cheap model either misses the takeover or floods #bug-reports
+# with checklist noise that engineers stop reading.
+tier = "premium"
+max_tokens = 8000
+
+[job]
+charter = "charter.md"
+skills = []
+# Read-only code access on what production runs. One area per run, read
+# deeply: the budget is for following a value from the route to the sink,
+# not for skimming more files.
+tools = ["search_code", "read_code_file", "grep_code", "find_files",
+         "recent_commits"]
+max_tool_calls = 45
+requires_context = [
+    "area",
+    "focus",
+    "starting_paths",
+    "already_reported",
+]
+output = "json"
+
+[guards]
+output = ["json_shape", "non_empty"]
+client_facing = false
+
+[limits]
+timeout_seconds = 900
+max_retries = 1
+
+[approval]
+# Its findings become #bug-reports posts. The bug report analyst checks
+# each one against the code again before anything is fixed or routed, and
+# Sam greenlights every fix that touches permissions.
+requires_ceo_approval = false
+escalate_to = "#bug-reports"
+
+[evals]
+path = "evals/cases.jsonl"
+min_agreement = 0.8

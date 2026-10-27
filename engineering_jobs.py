@@ -280,6 +280,27 @@ def _register_dependency_watch() -> None:
     )
 
 
+def _register_security_audit() -> None:
+    """One area of our own code read for security holes each week, findings
+    into #bug-reports (security_audit.py). Sam, 2026-10-26, after the pilot
+    found the Google mobile sign-in takeover."""
+    from security_audit import run_weekly_audit
+
+    # Monday 06:00, before the Monday reports, so a finding's analysis is in
+    # the thread when Sam starts the week. One agent run of up to 15 minutes
+    # plus one #bug-reports analysis per finding (at most six).
+    register_job(
+        "engineering.security_audit",
+        run_weekly_audit,
+        cron=os.environ.get("SECURITY_AUDIT_CRON", "0 6 * * mon"),
+        queue=QUEUE,
+        claim=CLAIM_WEEKLY,
+        time_limit=1800,
+        description="Weekly security audit of one area of our code, "
+                    "findings into #bug-reports",
+    )
+
+
 def register_all() -> None:
     """Register everything engineering owns. Idempotent."""
     _register_sentry()
@@ -288,6 +309,7 @@ def register_all() -> None:
     _register_workflow_log()
     _register_feature_desk()
     _register_dependency_watch()
+    _register_security_audit()
 
 
 # Importing this module registers the work, which is what
