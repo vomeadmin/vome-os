@@ -221,6 +221,44 @@ def test_a_second_failure_in_the_thread_comments_instead(rec):
     assert any(c[1] == "/task/T0/comment" for c in rec.calls)
 
 
+def test_close_thread_closes_only_the_agents_tasks(rec, monkeypatch):
+    seen = []
+    monkeypatch.setattr(wl.store, "ensure_table", lambda t: True)
+    monkeypatch.setattr(wl.store, "query",
+                        lambda sql, p, **k: seen.append(sql)
+                        or [{"task_id": "T0"}])
+    assert wl.close_thread("C1", "1.0", "Sam closed it.") == ["T0"]
+    assert "logged_by = 'agent'" in seen[0]
+    assert ("PUT", "/task/T0", {"status": wl.DONE}) in rec.calls
+    assert ("POST", "/task/T0/comment",
+            {"comment_text": "Sam closed it.", "notify_all": False}) \
+        in rec.calls
+
+
+def test_close_thread_never_raises(rec, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(wl.store, "ensure_table", boom)
+    assert wl.close_thread("C1", "1.0", "note") == []
+
+
+def test_a_failure_after_close_reopens_the_task(rec, monkeypatch):
+    rec.existing = ("T0", "[Bug] Build failed")
+    clickup = wl._clickup
+
+    def closed_task(method, path, body=None):
+        if method == "GET":
+            rec.calls.append((method, path, body))
+            return {"status": {"status": "complete", "type": "closed"}}
+        return clickup(method, path, body)
+
+    monkeypatch.setattr(wl, "_clickup", closed_task)
+    wl.log_issue("bug reports", "t", "again", "- Reason: y",
+                 channel="C1", thread_ts="1.0")
+    assert ("PUT", "/task/T0", {"status": "to do"}) in rec.calls
+
+
 def test_log_issue_never_raises(rec, monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("clickup down")

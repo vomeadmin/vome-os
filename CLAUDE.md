@@ -96,6 +96,11 @@ dependency_watch.py live lockfiles vs OSV.dev, CISA KEV, EPSS, endoflife.date:
                    checklist; kept in sync and closed by the scan. Alerts
                    tag the owner, cc Sam
                    NVD (optional key) fills missing severities, never finds
+security_audit.py  Monday 06:00: the security_auditor agent reads one area of
+                   our own code (rotating, least recently audited first) on
+                   production for tenant, role and sign-in holes; each new
+                   finding becomes a "[Security audit]" post in #bug-reports
+                   and runs the bug report pipeline. Never runs code.
 release_resolutions.py  a live fix -> one resolution draft per client, as a
                    card in the day thread (RELEASE_AUTO_SEND sends clean ones)
 sentry_agent_fixes.py  actionable Sentry issue -> one Agent Fixes task/cause

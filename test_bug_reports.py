@@ -924,6 +924,39 @@ def test_same_reply_twice_runs_once(rec, monkeypatch):
     assert out["reason"] == "reply already handled"
 
 
+def _closing(monkeypatch, follow_ups=()):
+    import workflow_log
+
+    shut = []
+    monkeypatch.setattr(bug_reports, "_follow_ups",
+                        lambda ts: list(follow_ups))
+    monkeypatch.setattr(workflow_log, "close_thread",
+                        lambda c, t, note: shut.append((c, t)) or ["AW1"])
+    return shut
+
+
+def test_sams_close_closes_the_threads_agent_workflows_task(rec, monkeypatch):
+    """Sam, 2026-10-26: `close` on audit 1/31 left its task open."""
+    _greenlight_waiting(monkeypatch)
+    shut = _closing(monkeypatch)
+    out = bug_reports._on_reply(TS, _sam("close"))
+    assert out["workflow_tasks_closed"] == ["AW1"]
+    assert shut == [(bug_reports.CHANNEL, TS)]
+    assert rec.saved["status"] == bug_reports.CLOSED
+    assert rec.posts[-1][2] == ("Closed. Nothing filed. The Agent Workflows "
+                                "task is closed too.")
+
+
+def test_close_keeps_the_task_while_the_report_still_waits(rec, monkeypatch):
+    # Closing a follow-up while the report itself waits on Sam's yes.
+    _greenlight_waiting(monkeypatch)
+    shut = _closing(monkeypatch, [
+        {"ts": "5.0", "status": bug_reports.NEEDS_INFO}])
+    out = bug_reports._on_reply(TS, _sam("close"))
+    assert out["workflow_tasks_closed"] == [] and shut == []
+    assert rec.posts[-1][2] == "Closed. Nothing filed."
+
+
 # ---------------------------------------------------------------------------
 # The icon on each report (Sam, 2026-10-19)
 # ---------------------------------------------------------------------------

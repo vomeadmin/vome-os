@@ -27,7 +27,10 @@ data returned:
    server (a verified token, a signature with an expiry), or taken from
    what the client sent?
 
-Stop on a line as soon as it is settled either way.
+Stop on a line as soon as it is settled either way. Stay inside `focus`:
+other areas have their own week. A `code_excerpt` in your context was
+already read for you, but production wins: if it differs, say so and audit
+what production runs.
 
 ## What counts
 

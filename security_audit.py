@@ -31,9 +31,9 @@ FLOW
          Sanjay. Every permissions fix waits for Sam's yes there.
       4. the run is recorded; a clean run posts nothing.
 
-Seven areas cover core in about seven weeks, then the services and the web
+Eight areas cover core in about eight weeks, then the services and the web
 app; the rotation then starts again, so each area is read roughly every
-three months and changed code is read again on its next turn.
+three months, and changed code is read again on its next turn.
 
 WHAT IT NEVER DOES
 ------------------
@@ -134,10 +134,16 @@ AREAS: tuple[Area, ...] = (
          "guessability, expiry, single use, and what they disclose",
          ("core:mixins.py", "core:organization_app/api.py",
           "core:opportunity_app/api.py", "core:form_app/generic_volunteer")),
-    Area("core-other", "core sequences, analytics, courses and notifications",
+    # Split after the first dry run (2026-10-26): as one area it ran out of
+    # budget in courses and resources and never reached analytics.
+    Area("core-courses", "core courses and resources",
+         "Who can see, enroll in and edit courses and resources: membership, "
+         "admin-only content, and every id bound to the institution",
+         ("core:course_app", "core:resource_app", "core:recognition_app")),
+    Area("core-sequences", "core sequences, analytics and notifications",
          "Institution scope on every read and write, exports and reports",
-         ("core:sequence_app", "core:analytics_app", "core:course_app",
-          "core:notifications_app", "core:resource_app")),
+         ("core:sequence_app", "core:analytics_app",
+          "core:notifications_app", "core:insights_app")),
     Area("database", "volunteer database service",
          "How the service authenticates callers and scopes every query to "
          "the caller's institution",
@@ -199,6 +205,16 @@ PILOT_REPORTED: dict[str, tuple[str, ...]] = {
         "AdminUserV2PrimaryKeyRelatedField and custom tags accept any "
         "volunteer on the platform",
         "Off-Vome hours views: nested permission list and no tenant check",
+        "Bulk duplicate copies another org's role or publishes roles in "
+        "another org's opportunity (opportunity_app/api.py:2259)",
+    ),
+    "core-courses": (
+        "Any volunteer can see, enroll in and take another org's courses, "
+        "including admin-only (course_app/visibility.py:16)",
+        "Course coordinator and watcher ids accept any user and expose "
+        "their name and email",
+        "Course site links, resource folder and course folder accept "
+        "another org's ids",
     ),
     "core-organization": (
         "Admin time off by any email cancels shifts in other orgs",

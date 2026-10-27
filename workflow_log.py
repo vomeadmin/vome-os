@@ -72,6 +72,7 @@ TYPES = ("bug", "idea", "improvement", "question")
 TAG_SLACK = "from slack"
 LOGGED_MARK = "clipboard"  # on the thread's first message once logged
 TAG_AUTO = "auto logged"   # filed by an agent after a failure, not a person
+DONE = "complete"          # the list's closed status
 
 _ASK = re.compile(r"\b(log|add|put|save)\s+(this|it|that)\b", re.I)
 _WHERE = re.compile(r"click\s*up|agent\s+workflows?|\bfor\s+(us|later)\b",
@@ -247,6 +248,7 @@ def log_issue(area: str, title: str, summary: str, details: str,
         link = _permalink(channel, thread_ts) if channel and thread_ts else ""
         if existing:
             task_id, name = existing
+            _reopen(task_id)
             _comment(task_id, "\n".join([
                 f"Happened again ({area}): {summary}", "", details]).strip())
             if channel and thread_ts:
@@ -284,6 +286,52 @@ def log_issue(area: str, title: str, summary: str, details: str,
     except Exception as exc:
         print(f"[WORKFLOW LOG] could not log {area} issue: {exc}")
         return ""
+
+
+def close_thread(channel: str, thread_ts: str, note: str) -> list[str]:
+    """Close what the agents logged from this thread, with `note` as a
+    comment, and return the task ids closed.
+
+    Sam, 2026-10-26: his `close` on a report means it no longer needs the
+    agent (he had fixed security audit 1/31 by hand), but the failure the
+    agent logged for it stayed open in Agent Workflows. Tasks Sam or Ron
+    logged themselves stay open. Never raises.
+    """
+    if not (enabled() and channel and thread_ts):
+        return []
+    try:
+        if not store.ensure_table(LEDGER):
+            return []
+        rows = store.query(
+            f"SELECT DISTINCT task_id FROM {LEDGER} WHERE channel = :c AND"
+            " thread_ts = :th AND logged_by = 'agent' AND task_id IS NOT NULL",
+            {"c": channel, "th": thread_ts},
+        )
+    except Exception as exc:
+        print(f"[WORKFLOW LOG] could not look up {thread_ts}: {exc}")
+        return []
+    closed = []
+    for row in rows:
+        task_id = str(row["task_id"])
+        try:
+            _clickup("PUT", f"/task/{task_id}", {"status": DONE})
+        except Exception as exc:
+            print(f"[WORKFLOW LOG] could not close {task_id}: {exc}")
+            continue
+        _comment(task_id, note)
+        closed.append(task_id)
+    return closed
+
+
+def _reopen(task_id: str) -> None:
+    """A task closed with its thread comes back when the thread fails
+    again (Sam's `fix` after a `close`), so the new failure is seen."""
+    try:
+        task = _clickup("GET", f"/task/{task_id}")
+        if (task.get("status") or {}).get("type") == "closed":
+            _clickup("PUT", f"/task/{task_id}", {"status": "to do"})
+    except Exception as exc:
+        print(f"[WORKFLOW LOG] could not reopen {task_id}: {exc}")
 
 
 # ---------------------------------------------------------------------------

@@ -346,8 +346,12 @@ def _on_reply(ts: str, reply: dict) -> dict:
                           reason="Sam's call")
         if word in ("close", "no"):
             _save(key, status=CLOSED)
-            _post("Closed. Nothing filed.", thread_ts=ts)
-            return {"status": "ok", "action": "closed"}
+            closed = _close_logged(ts, key)
+            _post("Closed. Nothing filed." + (
+                " The Agent Workflows task is closed too." if closed else ""),
+                thread_ts=ts)
+            return {"status": "ok", "action": "closed",
+                    "workflow_tasks_closed": closed}
         # `fix` works anywhere; the other yeses only answer a greenlight.
         if word == "fix" or (asking and _is_yes(text)):
             _save(key, status=GREENLIT)
@@ -372,6 +376,21 @@ def _on_reply(ts: str, reply: dict) -> dict:
     # Ron's "one more on this" after a merged fix went nowhere (Sam,
     # 2026-10-21). Now it is read.
     return _digest(ts, row, reply)
+
+
+def _close_logged(ts: str, closed: str) -> list[str]:
+    """Sam's `close` closes the thread's Agent Workflows task too (Sam,
+    2026-10-26), unless something else in the thread still waits on him:
+    there is one task per thread."""
+    asking = WAITING + (GREENLIGHT, GREENLIT)
+    items = [{**_row(ts), "ts": ts}] + _follow_ups(ts)
+    if any(i["ts"] != closed and i.get("status") in asking for i in items):
+        return []
+    import workflow_log
+
+    return workflow_log.close_thread(
+        CHANNEL, ts, "Sam closed this report in #bug-reports, so it no "
+                     "longer needs a fix from the agent.")
 
 
 def _active(ts: str, row: dict) -> dict:
