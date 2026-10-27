@@ -231,7 +231,8 @@ def _build_system_prompt(session_context: dict) -> str:
     """
     import knowledge
 
-    return knowledge.augment_system_prompt(INTAKE_PROMPT)
+    # client_facing: no root causes from engineering tasks for Vic to repeat.
+    return knowledge.augment_system_prompt(INTAKE_PROMPT, client_facing=True)
 
 
 # ---------------------------------------------------------------------------
@@ -644,9 +645,11 @@ def _map_tier_to_score(tier: str) -> str:
 # ---------------------------------------------------------------------------
 
 # Django gives a turn 30 seconds. Two lookups, and none offered once the
-# budget is spent, leave room for the final answer.
+# budget is spent, leave room for the final answer; every call is also cut
+# off at what is left of the turn, so a slow round cannot run past it.
 VIC_TOOL_ROUNDS = 2
 VIC_TOOL_BUDGET_SECONDS = 15
+VIC_TURN_SECONDS = 24
 
 
 def _ask_vic(system_prompt: str, messages: list[dict]) -> str:
@@ -670,6 +673,8 @@ def _ask_vic(system_prompt: str, messages: list[dict]) -> str:
             messages=convo,
             tools=vic_tools.TOOLS,
             tool_choice={"type": "auto" if may_look_up else "none"},
+            timeout=max(
+                5.0, VIC_TURN_SECONDS - (time.monotonic() - started)),
         )
         if response.stop_reason != "tool_use":
             break
@@ -693,6 +698,20 @@ def _ask_vic(system_prompt: str, messages: list[dict]) -> str:
     return "".join(
         block.text for block in response.content if block.type == "text"
     )
+
+
+def _without_refused_turns(conversation_history: list) -> list:
+    """History minus each refusal and the user turns it answered."""
+    kept: list = []
+    for turn in conversation_history or []:
+        if turn.get("role") == "assistant" and vic_security.is_refusal(
+            str(turn.get("content") or "")
+        ):
+            while kept and kept[-1].get("role") == "user":
+                kept.pop()
+            continue
+        kept.append(turn)
+    return kept
 
 
 def _last_assistant_reply(conversation_history: list) -> str:
@@ -738,6 +757,11 @@ def _hand_security_question_to_team(
     locale = session_context.get("locale")
     closing = vic_security.handed_off(locale)
     user_email = session_context.get("user_email", "")
+    if not user_email:
+        # Django always sends the signed-in email. Without one there is no
+        # one to reply to, and nothing to file.
+        print("[VIC-SECURITY] Security handoff with no user_email, not filed")
+        return _security_refusal(locale)
     ticket_result = _create_ticket_from_intake(
         extracted={
             "description": question or message,
@@ -795,13 +819,19 @@ def run_intake_turn(
         "ticket_id": str | None,
     }
     """
-    attachments = attachments or []
+    # Attachments are upload URLs. Anything else is text a client typed
+    # into the field, which would reach the model unscreened.
+    attachments = [
+        a for a in attachments or []
+        if isinstance(a, str) and re.fullmatch(r"https://\S+", a.strip())
+    ]
     locale = session_context.get("locale")
     previous_reply = _last_assistant_reply(conversation_history)
 
     # Step 0: Security and IT questions never reach the model
-    # (vic_security.py). A short yes to the refusal files the question
-    # for the team exactly as it was asked.
+    # (vic_security.py). A yes to the refusal files the question for the
+    # team exactly as it was asked. Quick replies are screened too:
+    # the flag comes from the client's own request.
     if (
         vic_security.is_refusal(previous_reply)
         and vic_security.is_affirmative(message)
@@ -809,14 +839,22 @@ def run_intake_turn(
         return _hand_security_question_to_team(
             message, session_context, conversation_history, attachments,
         )
-    if not is_quick_reply:
-        screen = vic_security.screen_message(message, previous_reply)
-        if screen.blocked:
-            print(
-                f"[VIC-SECURITY] Refused a message from "
-                f"{session_context.get('user_email')}: {screen.reason}"
-            )
-            return _security_refusal(locale)
+    screen = vic_security.screen_message(
+        message, previous_reply, earlier=[
+            str(t.get("content") or "") for t in conversation_history or []
+            if t.get("role") == "user"
+        ],
+    )
+    if screen.blocked:
+        print(
+            f"[VIC-SECURITY] Refused a message from "
+            f"{session_context.get('user_email')}: {screen.reason}"
+        )
+        return _security_refusal(locale)
+
+    # A refused question and its refusal are never shown to the model
+    # again, so a later "answer anyway" has nothing to answer.
+    model_history = _without_refused_turns(conversation_history)
 
     # Step 1: Run Claude to get the conversational reply + structured data
     kb_context = None
@@ -867,10 +905,18 @@ def run_intake_turn(
         else:
             kb_searched_no_results = True
 
+    # A help centre article that carries security detail (a code's expiry,
+    # how data is protected) is not handed to Vic or shown as a card.
+    if kb_context and not vic_security.safe_text(kb_context):
+        print("[VIC-SECURITY] Dropped a help centre match: security detail")
+        kb_context = None
+        kb_article_response = None
+        kb_searched_no_results = True
+
     messages = _build_intake_messages(
         message=message,
         session_context=session_context,
-        conversation_history=conversation_history,
+        conversation_history=model_history,
         attachments=attachments,
         kb_context=kb_context,
         kb_searched_no_results=kb_searched_no_results,
@@ -964,6 +1010,14 @@ def run_intake_turn(
             if kb_match["action"] == "suggest_with_strong_caveat":
                 flag_stale_article(kb_match)
             kb_article_response = _build_kb_article_response(kb_match)
+
+    # No article card beside a refusal Vic wrote itself, and none whose
+    # own text carries security detail.
+    if kb_article_response and (
+        vic_security.is_refusal(reply_text)
+        or not vic_security.safe_text(json.dumps(kb_article_response))
+    ):
+        kb_article_response = None
 
     # Step 4: Apply completeness gate
     is_complete, missing = check_completeness(extracted, session_context)

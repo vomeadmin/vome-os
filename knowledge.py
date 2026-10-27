@@ -98,15 +98,23 @@ def _truncate(content: str, limit: int) -> str:
     return cut.rstrip() + "\n\n[section truncated]"
 
 
-def build_knowledge_block(category: str | None = None) -> str:
+def build_knowledge_block(
+    category: str | None = None, client_facing: bool = False,
+) -> str:
     """Render the learned-knowledge prompt block. "" when nothing exists.
+
+    client_facing=True leaves out the engineering section (root causes
+    from closed engineering tasks). Vic talks to clients with nobody
+    reviewing first, so it never gets internal causes to repeat.
 
     Always includes the voice guide. Adds the section for `category` when
     the caller already knows it, which the Command Center does (the
     classification is on the ticket row) and the webhook path does not
     (classification is an output of the very call being built).
     """
-    wanted = [VOICE_SECTION_KEY, ENGINEERING_SECTION_KEY, SETUP_SECTION_KEY]
+    wanted = [VOICE_SECTION_KEY, SETUP_SECTION_KEY]
+    if not client_facing:
+        wanted.append(ENGINEERING_SECTION_KEY)
     if category:
         wanted.append(category.strip().lower())
 
@@ -198,7 +206,8 @@ def build_knowledge_block(category: str | None = None) -> str:
 
 
 def augment_system_prompt(
-    base_prompt: str, category: str | None = None
+    base_prompt: str, category: str | None = None,
+    client_facing: bool = False,
 ) -> str:
     """Append the learned-knowledge block to a system prompt.
 
@@ -206,7 +215,7 @@ def augment_system_prompt(
     unchanged when there is nothing learned yet.
     """
     try:
-        block = build_knowledge_block(category)
+        block = build_knowledge_block(category, client_facing)
     except Exception as e:
         print(f"[KNOWLEDGE] augment_system_prompt failed: {e}")
         return base_prompt
