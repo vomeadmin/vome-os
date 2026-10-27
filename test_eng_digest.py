@@ -62,6 +62,17 @@ def test_the_message(monkeypatch):
     assert "\N{EM DASH}" not in text
 
 
+def test_what_the_daily_pass_raised_is_said_with_why():
+    raised = {"u": {"to": 1, "why": "a very-high account (7,000 CAD) has "
+                                    "waited 9 days"}}
+    text = dg.render("onlyg", [_task("u", 1), _task("h", 2)], NOW, raised)
+    assert ("*Raised overnight:* <https://app.clickup.com/t/u|Task u> to "
+            "urgent (a very-high account (7,000 CAD) has waited 9 days)"
+            ) in text
+    assert "Raised overnight" not in dg.render("onlyg", [_task("h", 2)], NOW,
+                                               raised)
+
+
 def test_monday_looks_back_to_friday():
     monday = datetime(2026, 10, 26, 11, 5, tzinfo=timezone.utc)
     assert dg._since(monday).weekday() == 4

@@ -22,6 +22,8 @@ WHAT IT SAYS
     on dev                how many wait for a production merge
     in progress > 3       a nudge: too much started reads as nothing moving
     no priority           the tasks Sam still has to place
+    raised overnight      what eng_escalation's daily pass just raised, and
+                          why (it runs first, inside the same job)
 
 A task with no priority sorts after high and before normal, so a blank
 security finding cannot sink to the bottom while it waits for Sam.
@@ -127,8 +129,10 @@ def _link(task: dict) -> str:
     return f"<{url}|{name}>"
 
 
-def render(owner: str, tasks: list[dict], now: datetime) -> str:
-    """The message for one engineer, or "" when nothing is active."""
+def render(owner: str, tasks: list[dict], now: datetime,
+           raised: dict | None = None) -> str:
+    """The message for one engineer, or "" when nothing is active.
+    `raised` is eng_escalation.run's {task_id: {"to", "why"}}."""
     import sprint_thread
 
     _cid, slack_id, _team, _channel = sprint_thread.ENGINEERS[owner]
@@ -145,6 +149,13 @@ def render(owner: str, tasks: list[dict], now: datetime) -> str:
     rest = len(ordered) - len(pick(ordered, _top()))
     if rest:
         lines.append(f"_{rest} more after these, in ClickUp._")
+
+    mine = [(t, (raised or {})[str(t.get("id"))]) for t in tasks
+            if str(t.get("id")) in (raised or {})]
+    if mine:
+        lines.append("*Raised overnight:* " + "; ".join(
+            f"{_link(t)} to {eng_priority.name(r['to'])} ({r['why']})"
+            for t, r in mine))
 
     since = _since(now)
     new = [t for t in tasks if (_created(t) or now) >= since
@@ -179,6 +190,14 @@ def run_daily_digest(now: datetime | None = None) -> dict:
     import weekly_engineering_report as report
 
     now = now or datetime.now(timezone.utc)
+    # The daily raise-only pass first, so the list shows today's order.
+    try:
+        import eng_escalation
+
+        raised = eng_escalation.run(now, dry_run=_dry_run())
+    except Exception as exc:
+        print(f"[ENG DIGEST] escalation pass failed: {exc}")
+        raised = {}
     out = {}
     for owner, (clickup_id, _sid, _team, channel) in \
             sprint_thread.ENGINEERS.items():
@@ -186,7 +205,7 @@ def run_daily_digest(now: datetime | None = None) -> dict:
         if tasks is None:
             out[owner] = "ClickUp unreadable, nothing posted"
             continue
-        text = render(owner, tasks, now)
+        text = render(owner, tasks, now, raised)
         if not text:
             out[owner] = "nothing active"
         elif _dry_run():

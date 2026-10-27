@@ -719,6 +719,14 @@ def run_engineering_report(
         message = _format_friday(
             flow, standing, history, window_start, window_end
         )
+        # The week's priority review (eng_escalation): what the daily pass
+        # raised, what has no priority, and stale in-progress work.
+        try:
+            from eng_escalation import week_review
+
+            message += "\n\n" + week_review(tasks, now)
+        except Exception as exc:
+            print(f"[eng-report] priority review skipped: {exc}")
     else:
         message = _format_monday(
             flow, standing, weekend, window_end, prev_key
