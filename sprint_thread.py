@@ -1636,8 +1636,16 @@ def _route(item: dict, who: str) -> str:
     if not out.get("routed"):
         return f"*{n}.* not routed: {out.get('why')}."
     task = out["task"]
-    urgent = (f" Urgent ({out['urgent']}): {key} and you were pinged."
-              if out.get("urgent") else "")
+    # The engineer is pinged only for an urgent task (eng_priority); a
+    # very-high account alone is high priority and waits for his morning
+    # list (Sam, 2026-10-27).
+    if out.get("urgent") and out.get("pinged"):
+        urgent = f" Urgent ({out['urgent']}): {key} and you were pinged."
+    elif out.get("urgent"):
+        urgent = (f" Urgent for you ({out['urgent']}). {key} has it at high "
+                  "priority, in his morning list, with no ping.")
+    else:
+        urgent = ""
     if item.get("sent_at"):
         # Already acknowledged earlier: nothing is owed now, so the ticket
         # is the engineer's from here.

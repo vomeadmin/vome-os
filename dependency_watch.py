@@ -1426,7 +1426,12 @@ def alert_message(rows: list[Row], links: dict[str, str],
     vuln = [r for r in rows if not r.key.startswith("EOL:")]
     owners = _owners([r.repo for r in vuln]
                      + [w for e in eols for w in e.where])
-    lines = [f"{_tags(owners)} :rotating_light: *Dependency alert*: "
+    # Tags only for what is urgent on eng_priority's ladder: exploited in
+    # the wild or critical. The rest is on the owner's task and in his
+    # morning list (Sam, 2026-10-27: a single "high" tagged OnlyG and Sam).
+    loud = any(r.kev or r.severity == "CRITICAL" for r in vuln)
+    lines = [(f"{_tags(owners)} " if loud else "")
+             + ":rotating_light: *Dependency alert*: "
              + ("something new needs a look today."
                 if len(_group(vuln)) + len(eols) == 1
                 else f"{len(_group(vuln)) + len(eols)} new things need a "

@@ -1245,7 +1245,9 @@ def test_a_line_that_is_not_a_command_makes_it_direction():
     ("go all recommended", "go"),
     ("go with your recommendations", "go"),
     ("build all recommended", "go"),
-    ("build all", "build"),
+    ("build all", "go"),
+    ("Build everything", "go"),
+    ("mine all", "build"),
 ])
 def test_all_means_every_open_item(text, verb):
     command = fd.parse_command(text, PEOPLE)
@@ -1276,6 +1278,20 @@ def test_go_reopens_a_logged_item_for_the_analysis(monkeypatch, desk):
     assert seen["approved"] == ["5"]
     saved = json.loads(desk["saves"][-1]["items"])
     assert saved["5"]["state"] == "" and saved["5"]["recorded"] is False
+
+
+def test_go_takes_items_back_from_sams_build_now_list(monkeypatch, desk):
+    # The People table thread after `build all` placed 3 to 6 on his list.
+    items = {**PEOPLE, **{n: {"n": n, "verdict": "decision",
+                              "state": fd.BUILD_NOW, "placed": "build"}
+                          for n in ("3", "4", "5", "6")}}
+    seen = {}
+    monkeypatch.setattr(fd, "_row", lambda ts: _row(items))
+    monkeypatch.setattr(fd, "analyse", lambda ts, **k: seen.update(k))
+    fd._on_reply("1.1", {"ts": "9", "user": SAM, "text": "go 3 4 5 6"})
+    assert seen["approved"] == ["3", "4", "5", "6"]
+    saved = json.loads(desk["saves"][-1]["items"])
+    assert all(saved[n]["state"] == "" for n in ("3", "4", "5", "6"))
 
 
 def test_an_approved_item_too_big_to_build_comes_back_as_a_question(desk):

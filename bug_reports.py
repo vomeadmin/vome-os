@@ -29,8 +29,11 @@ FLOW
          engineer    -> only with no workable fix (none described, no exact
                         location) or a hard limit (migration, infrastructure
                         or settings, data). The reporter's task (or a new
-                        Priority Queue task) to OnlyG / Sanjay, a post in
-                        their channel.
+                        Priority Queue task) to OnlyG / Sanjay, at the
+                        priority the analyst set (eng_priority's ladder). A
+                        post in their channel only when it is urgent;
+                        everything else is in their morning list (Sam,
+                        2026-10-27).
          decision    -> Sam is asked in the thread
          needs_info  -> the reporter is asked in the thread
          not_a_bug, already_fixed, reporter_fix -> see below
@@ -106,6 +109,7 @@ import re
 
 import httpx
 
+import eng_priority
 from vomeos import store
 
 CHANNEL = os.environ.get("SLACK_CHANNEL_BUG_REPORTS", "C0CAJ269RAQ")
@@ -1499,24 +1503,32 @@ def _route(ts: str, row: dict, card: dict, team: str, reason: str = "",
             f"sent in {channels} for communication about it.",
         ])
 
+    priority = _priority(card)
     task_id = _engineer_task(row, card, ts, [e[1] for e in engineers],
-                             reason)
+                             reason, priority)
     task_url = f"https://app.clickup.com/t/{task_id}" if task_id else ""
     link = _permalink(ts)
-    for _key, _clickup_id, slack_id, label, channel in engineers:
-        _post("\n".join(p for p in (
-            f"<@{slack_id}> New {label} bug from #bug-reports "
+    # No task means nothing holds the work, so the engineer is told anyway.
+    tell = eng_priority.URGENT if not task_id else priority
+    pinged = False
+    for key, _clickup_id, _slack_id, label, _channel in engineers:
+        outcome = eng_priority.ping(key, task_id, "\n".join(p for p in (
+            f"New {label} bug from #bug-reports "
             f"({row.get('reporter') or 'a teammate'}): *{headline}*",
             f"Details and the agent's analysis are on ClickUp: {task_url}"
             if task_url else str(card.get("engineer_summary") or ""),
             f"Report: {link}" if link else "",
-        ) if p), channel=channel)
+        ) if p), tell)
+        pinged = pinged or outcome in ("pinged", "threaded")
 
     _save(ts, status=ROUTED, team=team, task_id=task_id)
-    if task_url:
-        text = (f":white_check_mark: Logged on ClickUp for {names} and sent "
-                f"in {channels} for communication about it.\n"
-                f"<{task_url}|{headline}>")
+    if task_url and pinged:
+        text = (f":white_check_mark: Logged on ClickUp for {names} as "
+                f"urgent and sent in {channels}.\n<{task_url}|{headline}>")
+    elif task_url:
+        text = (f":white_check_mark: Logged on ClickUp for {names}, "
+                f"{eng_priority.name(priority)} priority. It will be in the "
+                f"morning list, no ping.\n<{task_url}|{headline}>")
     else:
         text = (f":warning: Sent to {names} in {channels}, but the ClickUp "
                 f"task could not be saved. <@{SAM_SLACK}> it needs logging.")
@@ -1525,12 +1537,19 @@ def _route(ts: str, row: dict, card: dict, team: str, reason: str = "",
             "task": task_id}
 
 
+def _priority(card: dict) -> int:
+    """The analyst's priority on eng_priority's ladder. A card from before
+    the field existed is normal."""
+    return eng_priority.from_name(card.get("priority"), eng_priority.NORMAL)
+
+
 def _engineer_task(row: dict, card: dict, ts: str, ids: list,
-                   reason: str) -> str:
+                   reason: str, priority: int = eng_priority.NORMAL) -> str:
     """The reporter's task when it is in Priority Queue, otherwise a new
     Priority Queue task linked to it. Either way: assigned to the engineers
     alone, an open engineer status, Source = Slack, Type kept if the
-    reporter set one, and the analysis as a comment."""
+    reporter set one, a priority (raised, never lowered: the reporter may
+    have set one), and the analysis as a comment."""
     task_id = row.get("task_id") or ""
     task = {}
     if task_id:
@@ -1539,7 +1558,8 @@ def _engineer_task(row: dict, card: dict, ts: str, ids: list,
         except Exception as exc:
             print(f"[BUG REPORTS] could not read {task_id}: {exc}")
     if not task or (task.get("list") or {}).get("id") != PRIORITY_QUEUE:
-        new = _create_task(card, ts, ids, reason, row.get("text") or "")
+        new = _create_task(card, ts, ids, reason, row.get("text") or "",
+                           priority)
         if task_id and new:
             _link(task_id, new)
             _comment(task_id, "Routed to an engineer. Work is tracked on "
@@ -1551,6 +1571,8 @@ def _engineer_task(row: dict, card: dict, ts: str, ids: list,
         "add": ids, "rem": [SAM_CLICKUP] if SAM_CLICKUP not in ids else []}}
     if status not in ENGINEER_OPEN:
         body["status"] = "queued"
+    if eng_priority.higher(priority, eng_priority.of_task(task)):
+        body["priority"] = priority
     try:
         _clickup("PUT", f"/task/{task_id}", body)
     except Exception as exc:
@@ -1573,34 +1595,32 @@ def _route_extra(ts: str, row: dict, card: dict) -> str:
     """The part of a report no agent may do (a one-off data update beside
     the code fix) goes to the backend engineer as its own Priority Queue
     task, linked to the reporter's. Data work is backend work. Returns the
-    thread line. The report itself stays on the fix's track."""
+    thread line. The report itself stays on the fix's track.
+
+    One step below the report's priority and never a ping: on 2026-10-26
+    fifteen of these ("check whether this was already used") each pinged
+    OnlyG beside the bug they belonged to (Sam, 2026-10-27)."""
     engineers = _engineers("backend")
     extra = str(card.get("also_needs") or "").strip()
+    priority = eng_priority.below(_priority(card))
     task_id = _create_task(
         {**card, "headline": f"{card.get('headline') or 'Bug report'}: "
                              f"{extra}"[:180],
          "engineer_summary": extra},
         ts, [e[1] for e in engineers],
         "this part of a greenlit fix is work agents never do",
-        row.get("text") or "")
+        row.get("text") or "", priority)
     if row.get("task_id") and task_id:
         _link(row["task_id"], task_id)
     url = f"https://app.clickup.com/t/{task_id}" if task_id else ""
     names = _names(engineers)
-    for _key, _cid, slack_id, label, channel in engineers:
-        _post("\n".join(p for p in (
-            f"<@{slack_id}> New {label} task from #bug-reports, beside an "
-            f"agent fix: *{extra}*",
-            f"ClickUp: {url}" if url else "",
-            f"Report: {_permalink(ts)}",
-        ) if p), channel=channel)
-    channels = " and ".join(f"<#{e[4]}>" for e in engineers)
-    return (f"Also logged on ClickUp for {names} and sent in {channels}: "
+    return (f"Also logged on ClickUp for {names}, "
+            f"{eng_priority.name(priority)} priority, in the morning list: "
             f"{extra}" + (f" <{url}|task>" if url else ""))
 
 
 def _create_task(card: dict, ts: str, assignees: list, reason: str,
-                 report: str = "") -> str:
+                 report: str = "", priority: int = eng_priority.NORMAL) -> str:
     description = _comment_text(card, ts, reason)
     if report:
         description += f"\n\n## The report\n{report}"
@@ -1610,6 +1630,7 @@ def _create_task(card: dict, ts: str, assignees: list, reason: str,
             "markdown_description": description,
             "assignees": assignees,
             "status": "queued",
+            "priority": priority,
             "custom_fields": [
                 {"id": FIELD_SOURCE, "value": SOURCE_SLACK},
                 {"id": FIELD_TYPE, "value": TYPE_BUG},
@@ -1643,7 +1664,8 @@ def _comment_text(card: dict, ts: str, reason: str = "") -> str:
     code = card.get("code_check") or {}
     lines = [
         f"**Agent analysis** ({card.get('verdict')}, team "
-        f"{card.get('team')}, found on {card.get('found_on')})",
+        f"{card.get('team')}, found on {card.get('found_on')}, "
+        f"priority {eng_priority.name(_priority(card))})",
         str(card.get("analysis") or ""),
     ]
     if card.get("engineer_summary"):

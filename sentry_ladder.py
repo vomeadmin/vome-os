@@ -266,7 +266,11 @@ def _ask(issue: dict, analysis: dict, why: str) -> dict:
 
 
 def _route(issue: dict, analysis: dict, why: str, team: str = "") -> dict:
-    """A Priority Queue task for the engineer, a post in their channel."""
+    """A Priority Queue task for the engineer at the severity's priority
+    (S1 urgent, S2 high, S3 normal). A post in their channel only for S1;
+    the rest is in their morning list (Sam, 2026-10-27: eight Sentry posts
+    in a week, three of them one broker outage)."""
+    import eng_priority
     import sprint_thread
 
     issue_id = str(issue.get("issue_id") or "")
@@ -287,17 +291,23 @@ def _route(issue: dict, analysis: dict, why: str, team: str = "") -> dict:
         _repoint(old_task, task_id)
 
     headline = issue.get("triage_summary") or issue.get("title") or ""
-    sentry_slack._post(channel, "\n".join(p for p in (
-        f"<@{slack_id}> New {label} bug from Sentry: *{headline}*",
+    priority = sentry_agent_fixes.PRIORITY.get(
+        (issue.get("severity") or "").lower(), eng_priority.NORMAL)
+    # No task means nothing holds the work, so the engineer is told anyway.
+    outcome = eng_priority.ping(key, task_id, "\n".join(p for p in (
+        f"New {label} bug from Sentry: *{headline}*",
         f"Cause, fix and evidence are on ClickUp: {_task_url(task_id)}"
         if task_id else str(analysis.get("root_cause") or ""),
         issue.get("permalink") or "",
-    ) if p))
+    ) if p), priority if task_id else eng_priority.URGENT)
     sentry_ledger.update(issue_id, lane=ENGINEER)
-    _say(issue, (f":white_check_mark: Sent to {name} ({why}). "
+    told = ("pinged" if outcome in ("pinged", "threaded") else
+            f"{eng_priority.name(priority)} priority, in the morning list")
+    _say(issue, (f":white_check_mark: Sent to {name} ({why}), {told}. "
                  + (f"<{_task_url(task_id)}|ClickUp>" if task_id else
                     f"<@{SAM_SLACK}> the ClickUp task could not be saved.")))
-    return {"lane": ENGINEER, "task_id": task_id, "engineer": key}
+    return {"lane": ENGINEER, "task_id": task_id, "engineer": key,
+            "pinged": outcome in ("pinged", "threaded")}
 
 
 def _report(issue: dict, analysis: dict, why: str) -> dict:

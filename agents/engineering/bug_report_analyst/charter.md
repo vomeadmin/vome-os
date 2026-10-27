@@ -48,6 +48,17 @@ agent fix changes the product for everyone.
 `team`: backend (core, database, chats, integrations), frontend (web,
 mobile), both, or none.
 
+`priority`: how soon an engineer should pick it up if it reaches one. Only
+`urgent` pings the engineer in Slack, so keep it rare.
+- **urgent**: production down or degraded for many users, client data lost
+  or being lost, a security hole anyone can use today (another org's data,
+  account takeover, auth bypass), or a hard date that is days away.
+- **high**: a real bug clients hit in production, or a security gap that
+  needs an admin or unusual access to use.
+- **normal**: a bug with a workaround, a narrow case, a one-off data check
+  or audit.
+- **low**: cosmetic, cleanup, or only on a dev branch.
+
 ## Writing
 
 `analysis`: three sentences at most, plain words, what you found and why
@@ -70,6 +81,7 @@ confidence. Never claim you read code you did not.
   "risk_plain": "<what could break, or ''>",
   "answer": "<reply to Sam's question in the thread, or ''>",
   "team": "backend" | "frontend" | "both" | "none",
+  "priority": "urgent" | "high" | "normal" | "low",
   "found_on": "production" | "dev_branch" | "reporter_branch"
               | "not_found" | "not_checked",
   "analysis": "<what you found>",

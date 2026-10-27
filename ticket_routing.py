@@ -41,14 +41,21 @@ Sam approved for fixes (2026-10-19).
 
 URGENT
 ------
-Only urgent work interrupts anyone, in Slack:
+Sam is interrupted in #support-sprints for his own rule (2026-10-19):
     a very-high account (ARR 4000+, agent.get_client_tier), or
     the same symptom from another account (the incident matcher, high
     confidence, a second account; one customer writing twice is not an
     incident).
-An urgent routed ticket is posted in the engineer's channel and to Sam in
-#support-sprints. An urgent agent fix asks Sam to merge now. Everything
-else is ClickUp only (the assignee is notified by ClickUp itself).
+An urgent agent fix asks Sam to merge now.
+
+The engineer is pinged on a narrower rule (Sam, 2026-10-27: 17 "URGENT"
+posts in eight days, because most enterprise accounts clear 4000 ARR). The
+task's priority follows eng_priority's ladder: the same problem from two or
+more accounts is URGENT and pinged once; a very-high or important account
+alone is HIGH; anything else NORMAL. A ticket joining a task raises the
+task's priority when it outranks it, and pings only when that makes the
+task urgent. Everything below urgent is ClickUp only and reaches the
+engineer in the morning digest.
 
 SWITCH
 ------
@@ -162,6 +169,17 @@ def urgency(arr: float, account: str, incident: dict) -> str:
     return ""
 
 
+def priority_for(item: dict, arr: float, incident: dict) -> int:
+    """The engineer task's priority on eng_priority's ladder."""
+    import eng_priority
+
+    if _other_accounts(incident, item.get("account") or ""):
+        return eng_priority.URGENT
+    if arr >= VERY_HIGH_ARR or item.get("important"):
+        return eng_priority.HIGH
+    return eng_priority.NORMAL
+
+
 def arr_of(account: str) -> float:
     """ARR from the account label sprint.build_context writes:
     "Sarasota County (very-high, 7000 CAD combined ARR)"."""
@@ -210,7 +228,7 @@ def _existing_task(item: dict, incident: dict) -> tuple[dict, str]:
             raise RuntimeError(f"could not read task {filed['id']}")
         if live.get("shipped"):
             continue
-        return (dict(filed),
+        return ({**filed, "priority": live.get("priority")},
                 f"same problem as #{other.get('ticket_number')}")
     import clickup_search
 
@@ -230,7 +248,8 @@ def _existing_task(item: dict, incident: dict) -> tuple[dict, str]:
             continue
         return ({"id": task["id"],
                  "url": task.get("url")
-                 or f"https://app.clickup.com/t/{task['id']}"},
+                 or f"https://app.clickup.com/t/{task['id']}",
+                 "priority": live.get("priority")},
                 "already linked to this ticket")
     return {}, ""
 
@@ -273,6 +292,18 @@ def _comment(task_id: str, text: str) -> None:
     resp.raise_for_status()
 
 
+def _set_priority(task_id: str, priority: int) -> None:
+    import httpx
+
+    resp = httpx.put(
+        f"https://api.clickup.com/api/v2/task/{task_id}",
+        headers={"Authorization": os.environ.get("CLICKUP_API_TOKEN", ""),
+                 "Content-Type": "application/json"},
+        json={"priority": priority}, timeout=30,
+    )
+    resp.raise_for_status()
+
+
 def route(item: dict, card: dict, fix: dict, incident: dict,
           arr: float, owner: str = "") -> dict:
     """File or join the engineer's task for a triaged item. Never raises.
@@ -304,12 +335,14 @@ def route(item: dict, card: dict, fix: dict, incident: dict,
 
 def _route(item: dict, card: dict, incident: dict, arr: float,
            reason: str, forced: str = "") -> dict:
+    import eng_priority
     import sprint_thread
     import zoho_actions
 
     number = item.get("ticket_number")
     account = item.get("account") or ""
     urgent = urgency(arr, account, incident)
+    priority = priority_for(item, arr, incident)
     zoho_url = zoho_actions.ticket_url(item.get("ticket_id"))
     summary = _title(card.get("live_question") or item.get("summary") or "")
 
@@ -320,7 +353,16 @@ def _route(item: dict, card: dict, incident: dict, arr: float,
         _comment(task["id"],
                  f"Also reported on #{number} ({account}): {summary}\n"
                  f"Zoho: {zoho_url}"
-                 + (f"\nURGENT: {urgent}" if urgent else ""))
+                 + (f"\nWhy it matters: {urgent}" if urgent else ""))
+        # One bug, one ping: a join pings only when it makes the task
+        # urgent (868mka0f8 was pinged four times on 2026-10-20).
+        raised = eng_priority.higher(priority, task.get("priority"))
+        if raised:
+            try:
+                _set_priority(task["id"], priority)
+            except Exception as exc:
+                print(f"[ROUTE] #{number} priority not raised: {exc}")
+        ping = raised and priority == eng_priority.URGENT
         how = f"joined ({joined})"
     else:
         body = {
@@ -336,20 +378,21 @@ def _route(item: dict, card: dict, incident: dict, arr: float,
                 {"id": sprint_thread.FIELD_SOURCE,
                  "value": sprint_thread.SOURCE_ZOHO_TICKET},
             ] + _fields(item, card, arr),
+            # #9596 (2026-10-20) and 29 of OnlyG's tasks on 2026-10-27 had
+            # no priority; every routed task now carries the ladder's.
+            "priority": priority,
         }
-        if urgent:
-            body["priority"] = 1  # ClickUp: urgent
-        elif item.get("important"):
-            body["priority"] = 2  # ClickUp: high, an important client
         created = sprint_thread._clickup_create(sprint_thread.PRIORITY_QUEUE,
                                                 body)
         task = {"id": created.get("id"),
                 "url": created.get("url")
                 or f"https://app.clickup.com/t/{created.get('id')}"}
+        ping = priority == eng_priority.URGENT
         how = "created"
 
     filed = {"id": task["id"], "url": task["url"], "owner": owner,
-             "urgent": bool(urgent), "how": how, "reason": reason}
+             "urgent": bool(urgent), "priority": priority, "how": how,
+             "reason": reason}
     sprint_store.set_eng_task(item["id"], filed)
     item["eng_task"] = filed
 
@@ -371,20 +414,24 @@ def _route(item: dict, card: dict, incident: dict, arr: float,
     except Exception as exc:
         print(f"[ROUTE] #{number} Zoho owner not moved: {exc}")
 
+    if ping:
+        eng_priority.ping(
+            owner, task["id"],
+            f"URGENT {team} ticket ({urgent}): {summary}\n"
+            f"ClickUp: {task['url']} · Zoho: {zoho_url}",
+            eng_priority.URGENT)
     if urgent:
-        sprint_thread._post(
-            f":rotating_light: <@{slack_id}> URGENT {team} ticket "
-            f"({urgent}): {summary}\nClickUp: {task['url']} · Zoho: "
-            f"{zoho_url}", channel=channel)
         sprint_thread.alert_sam(
             f"urgent:{task['id']}",
             f"*Urgent, with {owner}:* #{number} {account}: {summary}\n"
             f"Why urgent: {urgent}. ClickUp: {task['url']}\n"
             "Nothing was sent to the client. The acknowledgment is ready "
             "in your sprint.")
-    print(f"[ROUTE] #{number} {how} {task['url']} for {owner} ({reason})"
-          + (f" URGENT: {urgent}" if urgent else ""))
-    return {"routed": True, "why": reason, "task": filed, "urgent": urgent}
+    print(f"[ROUTE] #{number} {how} {task['url']} for {owner} ({reason}), "
+          f"priority {eng_priority.name(priority)}"
+          + (", pinged" if ping else ""))
+    return {"routed": True, "why": reason, "task": filed, "urgent": urgent,
+            "priority": priority, "pinged": ping}
 
 
 def flag_urgent_fix(item: dict, card: dict, pr_url: str, incident: dict,
@@ -451,8 +498,10 @@ def _read_state(task_id: str) -> dict:
              for a in task.get("assignees") or []]
     # "declined" itself still counts until the old column's tasks are moved.
     declined = status == "declined" or _resolution(task) == RESOLUTION_DECLINED
+    import eng_priority
+
     return {"status": status, "shipped": status in SHIPPED and not declined,
-            "declined": declined,
+            "declined": declined, "priority": eng_priority.of_task(task),
             "assignee": ", ".join(n for n in names if n),
             # Where the task sits now, for the sprint card's links line.
             "name": task.get("name") or "",

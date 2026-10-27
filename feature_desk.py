@@ -52,19 +52,19 @@ Priority Queue), `no N`, `close`. He can also say it in his own words
 ("move Ron's task into Sam Build Now"); the requester's existing task is
 moved, never copied, and build now adds no analysis (Sam, 2026-10-21).
 
-Several at once (Sam, 2026-10-27): one command per line ("Go 1A" / "Go
-3A" / "log 5"), and `go all` (or "build all recommended") for every open
-item as recommended. What builds together is one branch and ONE pull
-request per repo, and a later `go` on the same thread joins that pull
-request while it is open. An item already there is said and skipped. An
-item Sam said go to that turns out more than an agent can build comes back
-to him as a question and stays open, never quietly logged. Every build
-that stops is also logged in Agent Workflows.
-Every other reply, from anyone, is read
-against the whole thread (Sam's is also direction on shape), and the agent
-chimes in only when it is asked something, a verdict changes, or a reply
-contradicts the code. Then it posts a line or two and the items that
-changed, never the whole card again. Ron and Sam talking stays theirs.
+Several at once (Sam, 2026-10-27): one command per line ("Go 1A" / "Go 3A"
+/ "log 5"), and `go all` (or "build all") for every open item as
+recommended; `mine all` puts them all on Sam Build Now. What builds
+together is one branch and ONE pull request per repo, and a later `go` on
+the same thread joins that pull request while it is open. An item already
+there is said and skipped. An item Sam said go to that turns out more than
+an agent can build comes back to him as a question and stays open, never
+quietly logged. Every build that stops is also logged in Agent Workflows.
+Every other reply, from anyone, is read against the whole thread (Sam's is
+also direction on shape), and the agent chimes in only when it is asked
+something, a verdict changes, or a reply contradicts the code. Then it
+posts a line or two and the items that changed, never the whole card again.
+Ron and Sam talking stays theirs.
 
 ClickUp is the record of where a thread landed (Sam, 2026-10-19), so
 nothing is written to the linked task while any item is still open. Once
@@ -136,7 +136,6 @@ _TARGET = re.compile(r"(\d+)\s*([a-z])?\b", re.I)
 # open item, as recommended (Sam, 2026-10-27). Nothing else may be left.
 _ALL = re.compile(r"\b(?:all|everything|every item|recommended|"
                   r"recommendations?|as|the|with|your|of them|items)\b", re.I)
-_RECOMMENDED = re.compile(r"\brecommend", re.I)
 _ENGINEER = re.compile(r"\b(?:to\s+)?(onlyg|onlygod|sanjay|backend|frontend)"
                        r"\b", re.I)
 _TASK_ID = re.compile(r"\b(86[a-z0-9]{7})\b")
@@ -400,17 +399,18 @@ def parse_command(text: str, items: dict) -> dict | None:
     match = _COMMAND.match(text.strip().strip("`*_").rstrip(".!"))
     if not match:
         return None
-    verb, rest = match.group(1).lower(), match.group(2).strip()
-    verb = {"mine": "build", "g": "go"}.get(verb, verb)
+    said, rest = match.group(1).lower(), match.group(2).strip()
+    verb = {"mine": "build", "g": "go"}.get(said, said)
     engineer = ""
     if verb == "route":
         found = _ENGINEER.search(rest)
         engineer = found.group(1).lower() if found else ""
         rest = _ENGINEER.sub(" ", rest).strip()
     if rest and _ALL.search(rest) and not _ALL.sub("", rest).strip(" ,.!"):
-        # "build all recommended" is the agent building them, not Sam's
-        # Build Now list: the recommendation is what gets built.
-        if verb == "build" and _RECOMMENDED.search(rest):
+        # "build all" is the agent building them as recommended, not Sam's
+        # Build Now list (2026-10-27: `build all` moved items 3 to 6 of the
+        # People table onto his list). `mine all` is his list.
+        if said == "build":
             verb = "go"
         rest = ""
     targets = []
