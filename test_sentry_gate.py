@@ -403,17 +403,78 @@ def test_backend_and_mobile_route_to_different_channels(monkeypatch):
     assert mobile.stack == sentry_projects.MOBILE
 
 
-def test_the_web_projects_are_mapped_and_flagged_empty(monkeypatch):
-    # They exist and receive nothing, which is worse than missing because it
-    # reads as coverage on a dashboard. Mapped so they route correctly the
-    # day the SDK is fixed, and flagged so the gap is not forgotten.
+def test_the_web_projects_are_mapped_and_triaged(monkeypatch):
+    # Both report since 2026-10-24, so they are off the empty list, and prod
+    # is in the default triage set alongside core.
     _clear(monkeypatch)
     web = sentry_projects.route("vome-react-prod")
     assert web.qualified_repo == "vomeadmin/vome-react"
     assert web.stack == sentry_projects.FRONTEND
     described = sentry_projects.describe()
-    assert "vome-react-prod" in described["receiving_nothing"]
-    assert "vome-react-dev" in described["receiving_nothing"]
+    assert "vome-react-prod" not in described["receiving_nothing"]
+    assert "vome-react-dev" not in described["receiving_nothing"]
+    assert "vome-react-prod" in sentry_projects.triaged_slugs()
+
+
+def test_browser_injected_noise_from_vome_react_prod_is_dropped(monkeypatch):
+    # Real titles and culprits from the first three days of vome-react-prod.
+    _clear(monkeypatch)
+    for title, culprit, rule in (
+        ("TypeError: undefined is not an object (evaluating "
+         "'window.__firefox__.reader')",
+         "global code(opportunity-board/x)", "title"),
+        ("ReferenceError: Can't find variable: __firefox__",
+         "global code(me/x)", "title"),
+        ("TypeError: undefined is not an object (evaluating "
+         "'window.ethereum.selectedAddress = undefined')",
+         "global code(me/x)", "title"),
+        ("TypeError: undefined is not an object (evaluating "
+         "'window._META.IABInnerFrame')",
+         "?(opportunity-board/x)", "title"),
+        ("Error: Invalid call to runtime.sendMessage(). Tab not found.",
+         "https://www.vomevolunteer.com/opportunity-board/x", "title"),
+        ("BrowserAuthError: user_cancelled: User cancelled the flow.",
+         "t [as constructor](17.b883b31a.chunk)", "title"),
+        ("ServerError: access_denied: The user has denied access to the "
+         "scope requested by the client application.",
+         "t(17.d86a3ff7.chunk)", "title"),
+        ("Error: reCAPTCHA Timeout (b)",
+         "?(recaptcha/releases/x/recaptcha__en.js)", "title"),
+        ("TypeError: Cannot read properties of null (reading 'postMessage')",
+         "chrome.runtime.sendMessage(firstInjectScript)", "culprit"),
+        ("Error: Could not load \"overlay\".", "?(maps/api/js)", "culprit"),
+        ("ReferenceError: Can't find variable: HTMLDialogElement",
+         "?(maps/api/js)", "culprit"),
+    ):
+        decision = gate.check(_signal(
+            project="vome-react-prod", title=title, culprit=culprit,
+            exception_type=title.split(":", 1)[0],
+        ))
+        assert decision.blocked, title
+        assert decision.rule == rule, title
+
+
+def test_real_vome_react_bugs_still_pass(monkeypatch):
+    # The paired assertion: issues from the same three days that are, or may
+    # be, bugs in our code. A second sign-in started while one is open, our
+    # own Maps wrapper, a render loop, missing data, stale chunks.
+    _clear(monkeypatch)
+    for title, culprit in (
+        ("BrowserAuthError: interaction_in_progress: Interaction is "
+         "currently in progress.", "t(17.b883b31a.chunk)"),
+        ("Error: Google Maps did not load", "?(18.ed4cdfb1.chunk)"),
+        ("Error: Maximum update depth exceeded.", "$c(19.f26b3b0e.chunk)"),
+        ("TypeError: Cannot read properties of undefined (reading "
+         "'opportunity_role')", "?(18.ed4cdfb1.chunk)"),
+        ("TypeError: Cannot read properties of null (reading 'destroy')",
+         "kt._destructor(19.f26b3b0e.chunk)"),
+        ("SyntaxError: Unexpected token '<'", "?(18.8f0e9492.chunk)"),
+    ):
+        decision = gate.check(_signal(
+            project="vome-react-prod", title=title, culprit=culprit,
+            exception_type=title.split(":", 1)[0],
+        ))
+        assert decision.passed, (title, decision)
 
 
 def test_every_github_repo_is_under_vomeadmin(monkeypatch):

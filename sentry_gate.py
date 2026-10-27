@@ -121,14 +121,32 @@ IGNORED_EXCEPTION_TYPES = {
 # Substrings matched against the issue title, for the errors whose type is
 # generic and whose message is the identifying part.
 IGNORED_TITLE_PATTERNS = (
-    # Browser noise, for vome-react. Its two projects (vome-react-dev and
-    # vome-react-prod) exist but receive nothing, so none of these fire yet.
+    # Browser noise, for vome-react.
     "ResizeObserver loop limit exceeded",
     "ResizeObserver loop completed with undelivered notifications",
     "Loading chunk",
     "Loading CSS chunk",
     "Failed to fetch dynamically imported module",
     "NetworkError when attempting to fetch resource",
+    # Scripts the browser injects into our page, from the first three days
+    # of vome-react-prod (2026-10-24 to 26). None of these names appear in
+    # vome-react's source. `__firefox__` is Firefox for iOS (VOME-REACT-PROD-Y,
+    # -Z, -10), `window.ethereum` a crypto wallet extension (-11),
+    # `window._META` the Facebook and Instagram in-app browser (-1Y), and
+    # `runtime.sendMessage` an extension talking to a tab that closed (-E).
+    "__firefox__",
+    "window.ethereum",
+    "window._META",
+    "runtime.sendMessage",
+    # Microsoft sign-in: the person closed the popup or declined consent
+    # (VOME-REACT-PROD-5, -6, -17, -1X). A choice, not a failure.
+    #
+    # Deliberately NOT here: `interaction_in_progress` (-7), which means our
+    # code started a second sign-in while one was open, a real bug.
+    "BrowserAuthError: user_cancelled",
+    "ServerError: access_denied",
+    # Google's reCAPTCHA script timed out on a slow connection (-J).
+    "reCAPTCHA Timeout",
     # Generic, both platforms.
     "Non-Error promise rejection captured",
     "The operation was aborted",
@@ -163,6 +181,14 @@ IGNORED_CULPRIT_PATTERNS = tuple(
         r"^anonymous$",
         r"/node_modules/",
         r"gtm\.js|googletagmanager|analytics\.js|fbevents\.js",
+        # Google Maps' own script failing inside itself, on old Safari or a
+        # blocked request (VOME-REACT-PROD-N, -12). Our code calling Maps
+        # wrongly has our chunk as its culprit and still comes through.
+        r"maps/api/js",
+        # An extension's content script, by its function name. The title is a
+        # generic "reading 'postMessage'" that our own code could also raise,
+        # so the culprit is the identifying part (VOME-REACT-PROD-2, -A, -R).
+        r"firstInjectScript",
         # An engineer typing in a production Django shell. Four of the twenty
         # new django-core-prod issues in one week were this: a DoesNotExist, a
         # FieldError on a mistyped keyword, an AttributeError on a constant

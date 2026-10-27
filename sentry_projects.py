@@ -48,10 +48,9 @@ WHAT IS NOT COVERED
 Every repository has its projects now, but a project with no events is not an
 instrumented service, it is an empty box with a name on it, and it reads as
 coverage on every dashboard. `RECEIVING_NOTHING` below lists the ones still
-empty: vome-react (the SDK is in, the DSN is missing at build time), chats
-and integrations (no SDK init yet), django-db dev and the mobile dev project.
-vome-react matters most: it is the interface customers spend their day in,
-and today a blank schedule page leaves no trace anywhere.
+empty: chats and integrations (no SDK init yet), the landing page, django-db
+dev and the mobile dev project. vome-react came off the list on 2026-10-26:
+its DSN reached the build and prod has reported since 2026-10-24.
 
 None of these are fixable here. They are SDK work in the services themselves.
 
@@ -231,18 +230,14 @@ _PROJECTS: tuple[Project, ...] = (
     # has @sentry/react, a sourcemap upload step in its build, and an init in
     # src/utils/sentry.js.
     #
-    # NOT YET RECEIVING ANYTHING as of 2026-10-02: zero issues and zero spans
-    # in both projects. Zero SPANS is the telling part, because a browser SDK
-    # sends performance transactions whether or not anything breaks, so this
-    # is a dormant SDK rather than a quiet fortnight.
+    # Silent until 2026-10-24, because Create React App inlines
+    # REACT_APP_SENTRY_DSN at BUILD time and the build never had it. The prod
+    # workflow now writes the DSN into .env before building.
     #
-    # The cause is almost certainly the DSN. `src/utils/sentry.js` reads
-    # `process.env.REACT_APP_SENTRY_DSN` and no-ops without it, and Create
-    # React App inlines REACT_APP_* at BUILD time, so setting it on the host
-    # at runtime never reaches the bundle.
-    #
-    # Mapped and triaged anyway, so the day the DSN lands the routing already
-    # works and nobody has to remember this file exists.
+    # Its traces are minified until a release has source maps in Sentry.
+    # The workflow builds and uploads them only when the SENTRY_AUTH_TOKEN
+    # secret is set (added 2026-10-26). An analyst reading a minified frame
+    # is reading `19.f26b3b0e.chunk.js:2 in $c`, which says nothing.
     Project(
         slug="vome-react-prod",
         aliases=("prod-vome-web",),
@@ -260,8 +255,8 @@ _PROJECTS: tuple[Project, ...] = (
         # of code nobody is running.
         ref="master",
         notes=(
-            "No events yet. REACT_APP_SENTRY_DSN is probably missing at "
-            "build time; CRA inlines it, so a runtime variable does nothing."
+            "Reporting since 2026-10-24. Traces are readable only for "
+            "releases with source maps uploaded (SENTRY_AUTH_TOKEN in CI)."
         ),
     ),
     Project(
@@ -277,7 +272,7 @@ _PROJECTS: tuple[Project, ...] = (
         # spelled differently from the backend repos, which is exactly the
         # kind of thing a per-project ref field exists to hold.
         ref="develop",
-        notes="No events yet. Same build-time DSN cause as vome-react-prod.",
+        notes="Same repo as vome-react-prod, different branch.",
     ),
     # The marketing site, Astro, static on S3 and CloudFront. Projects created
     # 2026-10-23 for broken scripts and failed contact form submissions.
@@ -351,8 +346,6 @@ RECEIVING_NOTHING = (
     "django-chats-dev",
     "django-integrations-prod",
     "django-integrations-dev",
-    "vome-react-prod",
-    "vome-react-dev",
     "landing-page-prod",
     "landing-page-dev",
     "vome-app-dev",
