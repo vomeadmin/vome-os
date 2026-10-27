@@ -13,7 +13,7 @@ To propose a change: edit a diagram or add a register row, set its status,
 and regenerate. A new AI session should read this file, `CLAUDE.md`, and the
 ClickUp handoff page (doc 3dztm-3311, page 3dztm-6351) before acting.
 
-**As of:** 2026-10-23
+**As of:** 2026-10-27
 
 ## Status key
 
