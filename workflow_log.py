@@ -24,6 +24,12 @@ has a number and no ClickUp, so it does not match).
 
     "Log this for us on ClickUp"     "@Vome Agent log this"
     "log this as an idea on clickup" "add it to agent workflows"
+    "agent error: it re-asked go 3"  "log this as an agent error"
+
+"Agent error" (Sam, 2026-10-27) is how Sam flags a workflow that went wrong
+when he is away from his desk: it is always a bug, his words go on the task
+as his note, and the whole thread goes on as comments, so the task carries
+everything when it is worked later.
 
 FLOW
 ----
@@ -72,12 +78,18 @@ TYPES = ("bug", "idea", "improvement", "question")
 TAG_SLACK = "from slack"
 LOGGED_MARK = "clipboard"  # on the thread's first message once logged
 TAG_AUTO = "auto logged"   # filed by an agent after a failure, not a person
+TAG_ERROR = "agent error"  # Sam or Ron flagged a workflow that went wrong
 DONE = "complete"          # the list's closed status
 
 _ASK = re.compile(r"\b(log|add|put|save)\s+(this|it|that)\b", re.I)
 _WHERE = re.compile(r"click\s*up|agent\s+workflows?|\bfor\s+(us|later)\b",
                     re.I)
 _MENTION = re.compile(r"<@([A-Z0-9]+)(\|[^>]*)?>")
+# "agent error": with a log ask anywhere, or on its own at the start.
+_ERROR = re.compile(r"\bagent\s+(?:error|failure|bug)s?\b", re.I)
+_ERROR_FIRST = re.compile(r"^\W*agent\s+(?:error|failure|bug)s?\b", re.I)
+THREAD_CHUNK = 9000      # characters per ClickUp comment
+THREAD_MAX = 27000       # the most of a thread copied onto a task
 
 LEDGER = "vomeos_workflow_log"
 store.register_table(
@@ -109,9 +121,11 @@ def wants(event: dict, mentioned: bool = False) -> bool:
     bot = os.environ.get("SLACK_BOT_USER_ID", "")
     mentioned = mentioned or bool(bot and f"<@{bot}" in text)
     plain = _MENTION.sub("", text)
+    if _ERROR_FIRST.search(plain):
+        return True
     if not _ASK.search(plain):
         return False
-    return mentioned or bool(_WHERE.search(plain))
+    return mentioned or bool(_WHERE.search(plain) or _ERROR.search(plain))
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +194,7 @@ def _log(channel: str, ts: str, thread_ts: str, message: dict) -> dict:
             str(card.get("summary") or ""), "",
             str(card.get("details") or ""),
         ]).strip())
+        _attach_thread(task_id, thread)
         _record(ts, task_id, name)
         url = f"https://app.clickup.com/t/{task_id}"
         _mark_logged(channel, thread_ts)
@@ -189,8 +204,12 @@ def _log(channel: str, ts: str, thread_ts: str, message: dict) -> dict:
 
     kind = str(card.get("type") or "question").lower()
     kind = kind if kind in TYPES else "question"
+    error = bool(_ERROR.search(request))
+    if error:
+        kind = "bug"
     name = f"[{kind.capitalize()}] {card.get('title') or 'From Slack'}"[:180]
     description = "\n".join([
+        f"**{who}'s note:** {request}", "",
         f"**Summary:** {card.get('summary') or ''}", "",
         "**Details**", str(card.get("details") or ""), "",
         f"**Next step:** {card.get('next_step') or ''}", "",
@@ -205,14 +224,29 @@ def _log(channel: str, ts: str, thread_ts: str, message: dict) -> dict:
         "assignees": [SAM_CLICKUP],
     })
     task_id = str(task.get("id") or "")
-    for tag in (kind, TAG_SLACK):
+    for tag in (kind, TAG_SLACK) + ((TAG_ERROR,) if error else ()):
         _tag(task_id, tag)
+    _attach_thread(task_id, thread)
     _record(ts, task_id, name)
     url = task.get("url") or f"https://app.clickup.com/t/{task_id}"
     _mark_logged(channel, thread_ts)
     _post(channel, thread_ts, ":white_check_mark: Logged on ClickUp in Agent "
           f"Workflows: <{url}|{name}>")
     return {"status": "ok", "task": task_id, "type": kind}
+
+
+def _attach_thread(task_id: str, thread: str) -> None:
+    """The thread as it was when logged, on the task as comments: the
+    summary is the agent's reading, this is what was actually said. The
+    newest part is kept when it is too long."""
+    if not task_id or not thread:
+        return
+    text = thread[-THREAD_MAX:]
+    chunks = [text[i:i + THREAD_CHUNK]
+              for i in range(0, len(text), THREAD_CHUNK)]
+    for i, chunk in enumerate(chunks, 1):
+        part = f" ({i}/{len(chunks)})" if len(chunks) > 1 else ""
+        _comment(task_id, f"Slack thread when logged{part}:\n\n{chunk}")
 
 
 def _fallback(request: str) -> dict:

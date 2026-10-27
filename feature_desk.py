@@ -51,6 +51,15 @@ or option B of it), `build N` (Sam Build Now: he builds it himself), `log N`
 Priority Queue), `no N`, `close`. He can also say it in his own words
 ("move Ron's task into Sam Build Now"); the requester's existing task is
 moved, never copied, and build now adds no analysis (Sam, 2026-10-21).
+
+Several at once (Sam, 2026-10-27): one command per line ("Go 1A" / "Go
+3A" / "log 5"), and `go all` (or "build all recommended") for every open
+item as recommended. What builds together is one branch and ONE pull
+request per repo, and a later `go` on the same thread joins that pull
+request while it is open. An item already there is said and skipped. An
+item Sam said go to that turns out more than an agent can build comes back
+to him as a question and stays open, never quietly logged. Every build
+that stops is also logged in Agent Workflows.
 Every other reply, from anyone, is read
 against the whole thread (Sam's is also direction on shape), and the agent
 chimes in only when it is asked something, a verdict changes, or a reply
@@ -120,9 +129,14 @@ MAX_ROUNDS = 4
 MAX_ITEMS = 6
 
 _TASK_LINK = re.compile(r"app\.clickup\.com/t/(?:\d+/)?([a-z0-9]+)")
-_COMMAND = re.compile(r"^(go|build|mine|log|leave|route|no)\b\s*(.*)$",
+_COMMAND = re.compile(r"^(go|g|build|mine|log|leave|route|no)\b\s*(.*)$",
                       re.I)
 _TARGET = re.compile(r"(\d+)\s*([a-z])?\b", re.I)
+# "go all", "go with your recommendations", "build all recommended": every
+# open item, as recommended (Sam, 2026-10-27). Nothing else may be left.
+_ALL = re.compile(r"\b(?:all|everything|every item|recommended|"
+                  r"recommendations?|as|the|with|your|of them|items)\b", re.I)
+_RECOMMENDED = re.compile(r"\brecommend", re.I)
 _ENGINEER = re.compile(r"\b(?:to\s+)?(onlyg|onlygod|sanjay|backend|frontend)"
                        r"\b", re.I)
 _TASK_ID = re.compile(r"\b(86[a-z0-9]{7})\b")
@@ -166,6 +180,8 @@ FINAL = (PR_OPEN, LOGGED, DECLINED, EXISTS, FRONTEND, BUILD_NOW, LEFT,
 # it was, and a placed item can be placed again.
 PLACEABLE = ("", WAITING_SAM, HELD, NEEDS_INFO, LOGGED, LEFT, BUILD_NOW,
              ROUTED)
+# Sam's `go` has nothing to build on these.
+GO_SKIPS = (PR_OPEN, EXISTS, FRONTEND)
 PLACES = {"build": "Sam Build Now", "log": "Raw Intake",
           "leave": "Sam's Priority Queue"}
 ENGINEER_OPEN = ("queued", "in progress", "escalated")
@@ -219,6 +235,10 @@ def pr_enabled() -> bool:
     return _on("FEATURE_DESK_PR_ENABLED")
 
 
+BEYOND_AGENT = ("You said go, but this is more than an agent can build on "
+                "its own (see above). Tell me how to narrow it and I'll add "
+                "it to the same pull request, or `build {n}` (you build "
+                "it), `log {n}` (Raw Intake for later).")
 ANALYSING_TEXT = ("Analysing this. I'll check it against the backend and "
                   "reply here with what can be built and what needs Sam.")
 ASK_SAM_TEXT = (f"<@{SAM_SLACK}> analyse this, or place it as is? "
@@ -313,14 +333,23 @@ def _on_reply(ts: str, reply: dict) -> dict:
             _post("Closed. Nothing more will be built or filed from this "
                   "thread.", thread_ts=ts)
             return {"status": "ok", "action": "closed"}
-        command = parse_command(text, items) or parse_placement(text, items)
+        placement = parse_placement(text, items)
+        commands = parse_commands(text, items) or (
+            [placement] if placement else None)
         if row.get("status") == AWAITING:
             asked = _ANALYSE.match(text)
-            if asked or (command and command["verb"] == "go"):
+            if asked or any(c["verb"] == "go" for c in commands or []):
                 return _analyse_now(ts, asked.group(1).strip() if asked
                                     else "")
-        if command:
-            return _command(ts, row, items, command)
+        if commands:
+            result = {}
+            for i, command in enumerate(commands):
+                if i:
+                    # The command before may have saved new item states.
+                    row = _row(ts) or row
+                    items = _items(row) or items
+                result = _command(ts, row, items, command)
+            return result
     if row.get("status") == AWAITING:
         # Nothing is read until Sam asks for it: that is the saving.
         return {"status": "skipped", "reason": "waiting for Sam"}
@@ -372,12 +401,18 @@ def parse_command(text: str, items: dict) -> dict | None:
     if not match:
         return None
     verb, rest = match.group(1).lower(), match.group(2).strip()
-    verb = "build" if verb == "mine" else verb
+    verb = {"mine": "build", "g": "go"}.get(verb, verb)
     engineer = ""
     if verb == "route":
         found = _ENGINEER.search(rest)
         engineer = found.group(1).lower() if found else ""
         rest = _ENGINEER.sub(" ", rest).strip()
+    if rest and _ALL.search(rest) and not _ALL.sub("", rest).strip(" ,.!"):
+        # "build all recommended" is the agent building them, not Sam's
+        # Build Now list: the recommendation is what gets built.
+        if verb == "build" and _RECOMMENDED.search(rest):
+            verb = "go"
+        rest = ""
     targets = []
     if rest:
         cleaned = re.sub(r"\b(and|item|items)\b|[,&]", " ", rest, flags=re.I)
@@ -393,6 +428,37 @@ def parse_command(text: str, items: dict) -> dict | None:
     if verb == "route":
         command["engineer"] = engineer
     return command
+
+
+def parse_commands(text: str, items: dict) -> list[dict] | None:
+    """One command per line ("Go 1A" / "Go 3A" / "log 5"), or several on
+    one line split by `;`. Every line must be a command (a thank-you line is
+    skipped), else the whole message is direction. The same verb merges into
+    one command, and `go` runs last so its builds share one pull request.
+
+    Sam, 2026-10-27: six `go` lines in one message were read as free text,
+    and the desk answered "go 3 opens the pull request" to a go 3."""
+    lines = [line for line in re.split(r"[\n;]+", text)
+             if line.strip(" `*_.!")]
+    if len(lines) < 2:
+        command = parse_command(text, items)
+        return [command] if command else None
+    merged: dict[tuple, dict] = {}
+    for line in lines:
+        if _CHAT.match(line.strip()):
+            continue
+        command = parse_command(line, items)
+        if not command:
+            return None
+        key = (command["verb"], command.get("engineer", ""))
+        if key not in merged:
+            merged[key] = command
+            continue
+        seen = merged[key]["targets"]
+        seen += [t for t in command["targets"] if t not in seen]
+    if not merged:
+        return None
+    return sorted(merged.values(), key=lambda c: c["verb"] == "go")
 
 
 def parse_placement(text: str, items: dict) -> dict | None:
@@ -429,6 +495,13 @@ def _open_targets(verb: str, items: dict) -> list[tuple[str, str]]:
     if verb in ("build", "log", "leave", "route"):
         return [(n, "") for n, item in items.items()
                 if item.get("state") in PLACEABLE]
+    if verb == "go":
+        # Logged by the architect, not placed by Sam: `go all` means it too
+        # (2026-10-27, items 5 and 6 of the People table thread).
+        return [(n, "") for n, item in items.items()
+                if item.get("state") not in FINAL
+                or (item.get("state") == LOGGED and not item.get("placed")
+                    and not item.get("clickup"))]
     return [(n, "") for n, item in items.items()
             if item.get("state") not in FINAL]
 
@@ -458,6 +531,19 @@ def _command(ts: str, row: dict, items: dict, command: dict) -> dict:
     # for the option he picked has not been written yet.
     # LOGGED counts while nothing is recorded yet: a build that fell through
     # before 2026-10-19 was logged, and Sam's `go` is how it is retried.
+    # Already there, frontend only or already in a PR: nothing to build, so
+    # it is said and left (2026-10-27: `go 1A` on an item that was already
+    # there went back to the architect as direction).
+    done = [n for n, _ in command["targets"]
+            if items[n].get("state") in GO_SKIPS]
+    if done:
+        _post("Nothing to build for "
+              + ", ".join(f"{n} ({_landed(items[n])})" for n in done) + ".",
+              thread_ts=ts)
+        command = {**command, "targets": [t for t in command["targets"]
+                                          if t[0] not in done]}
+        if not command["targets"]:
+            return {"status": "ok", "action": "nothing to build"}
     ready = [n for n, opt in command["targets"]
              if not opt and items[n].get("verdict") == "agent_build"
              and not items[n].get("pr_url")
@@ -465,7 +551,14 @@ def _command(ts: str, row: dict, items: dict, command: dict) -> dict:
                   or (items[n].get("state") == LOGGED
                       and not items[n].get("recorded")))]
     rest = [(n, opt) for n, opt in command["targets"] if n not in ready]
-    results = [_build(ts, row, items, n, sam_approved=True) for n in ready]
+    for n, _ in rest:
+        if items[n].get("state") in FINAL:
+            # Logged, left or placed, and Sam now says go: it is open again,
+            # or the re-analysis below could never touch it (_merge).
+            items[n].update(state="", recorded=False)
+    if rest:
+        _save(ts, items=json.dumps(items))
+    results = _build_all(ts, row, items, ready, sam_approved=True)
     _record(ts, row, items)
     if rest:
         direction = "; ".join(
@@ -608,6 +701,12 @@ def act(ts: str, row: dict, card: dict, items: dict,
                 item["analysis"] = (f"{item.get('analysis') or ''} "
                                     f"Not built by an agent: {why}.").strip()
                 verdict = "log"
+        if verdict == "log" and item.get("sam_approved"):
+            # Sam said go. Work the agent can't take on is a question back
+            # to him and stays open, never quietly logged (2026-10-27: his
+            # `go 5A` and `go 6A` came back "Logged for Sam").
+            verdict = item["verdict"] = "decision"
+            item["question"] = BEYOND_AGENT.format(n=n)
         if verdict == "decision":
             item["state"] = WAITING_SAM
             asks_sam = True
@@ -644,10 +743,12 @@ def act(ts: str, row: dict, card: dict, items: dict,
     footer = []
     if asks_sam:
         footer.append(f"<@{SAM_SLACK}> reply `go N` (agent builds it, "
-                      "`go NB` for option B), `build N` (Sam Build Now), "
-                      "`log N` (Raw Intake), `route N onlyg` or `sanjay`, "
-                      "`leave N` (stays in your Priority Queue), `no N`, or "
-                      "tell me how you'd shape it.")
+                      "`go NB` for option B), `go all` (every item as "
+                      "recommended, one pull request), `build N` (Sam Build "
+                      "Now), `log N` (Raw Intake), `route N onlyg` or "
+                      "`sanjay`, `leave N` (stays in your Priority Queue), "
+                      "`no N`, or tell me how you'd shape it. One per line "
+                      "is fine.")
     if any(i.get("state") == NEEDS_INFO for n, i in items.items()
            if only is None or n in only):
         who = row.get("requester_id") or ""
@@ -662,7 +763,7 @@ def act(ts: str, row: dict, card: dict, items: dict,
     _post(text, thread_ts=ts)
     _save(ts, items=json.dumps(items))
 
-    results = [_build(ts, row, items, n) for n in to_build]
+    results = _build_all(ts, row, items, to_build)
     _record(ts, row, items, card.get("summary") or "")
     return {"status": "ok", "items": {n: i.get("verdict")
                                       for n, i in items.items()},
@@ -768,13 +869,52 @@ def _needs_context(proposal: dict) -> bool:
     return bool(_MISSING_SOURCE.search(str(proposal.get("reason") or "")))
 
 
+def _build_all(ts: str, row: dict, items: dict, ns: list,
+               sam_approved: bool = False) -> list:
+    """Items built together share one branch and one pull request per repo,
+    and join the request's pull request while it is still open (Sam,
+    2026-10-27: a request with several items is one change, reviewed and
+    merged once). An item that stops is said in the thread and the rest
+    still go."""
+    batches: dict[str, dict] = {}
+    results = []
+    for n in ns:
+        alias = str((items[n].get("build") or {}).get("repo") or "")
+        batch = batches.setdefault(alias, _batch(items, alias))
+        results.append(_build(ts, row, items, n, sam_approved=sam_approved,
+                              batch=batch))
+    finished = {}
+    for batch in batches.values():
+        finished.update({r["n"]: r for r in _finish(ts, row, items, batch)})
+    return [finished.get(r.get("n"), r) if isinstance(r, dict) else r
+            for r in results]
+
+
+def _batch(items: dict, alias: str) -> dict:
+    """Where this request's builds in one repo go: the branch of its pull
+    request that is still open, else a new branch cut on the first
+    commit."""
+    for item in items.values():
+        if (item.get("state") == PR_OPEN and item.get("pr_branch")
+                and item.get("pr_url") and not item.get("merged")
+                and (item.get("build") or {}).get("repo") == alias):
+            return {"branch": item["pr_branch"], "pr_url": item["pr_url"],
+                    "fix_task": item.get("fix_task") or "", "base": "",
+                    "repo": None, "written": []}
+    return {"branch": "", "pr_url": "", "fix_task": "", "base": "",
+            "repo": None, "written": []}
+
+
 def _build(ts: str, row: dict, items: dict, n: str,
-           sam_approved: bool = False) -> dict:
-    """fix_author writes the diff, patch safety checks it, a PR opens into
-    the dev branch. Anything that stops it is said in the thread, and the
-    item goes to Sam rather than disappearing."""
+           sam_approved: bool = False, batch: dict | None = None) -> dict:
+    """fix_author writes the diff, patch safety checks it, and it is
+    committed to the batch's branch. Anything that stops it is said in the
+    thread, and the item goes to Sam rather than disappearing. With no
+    batch it is a batch of one and its pull request opens here."""
     item = items[n]
     sam_approved = sam_approved or bool(item.get("sam_approved"))
+    if sam_approved:
+        item["sam_approved"] = True
     ok, why = _can_build(item)
     if not ok:
         # The plan itself is unbuildable; no word of Sam's changes that.
@@ -795,7 +935,12 @@ def _build(ts: str, row: dict, items: dict, n: str,
                   thread_ts=ts)
             return {"n": n, "built": False, "reason": why}
 
-    proposal, repo = _propose(ts, item)
+    own = batch is None
+    if own:
+        batch = _batch(items, str((item.get("build") or {}).get("repo")))
+    # After the first item the builder reads the branch, so a second item
+    # in the same file is written on top of the first, not against it.
+    proposal, repo = _propose(ts, item, ref=batch["branch"])
     if not proposal.get("diff"):
         reason = proposal.get("reason") or "no diff"
         if _needs_context(proposal):
@@ -818,67 +963,90 @@ def _build(ts: str, row: dict, items: dict, n: str,
             _save(ts, items=json.dumps(items))
             _post(f"*{n}* needs more source than the builder was given: "
                   f"{reason.rstrip('. ')}. <@{SAM_SLACK}> say `go {n}` to "
-                  f"try again, or "
-                  f"`log {n}`.", thread_ts=ts)
+                  f"try again, or `log {n}`."
+                  + _failure_line(ts, row, item, reason), thread_ts=ts)
             return {"n": n, "built": False, "reason": reason}
         return _fell_through(ts, row, items, n,
                              f"the builder declined: {reason}")
-    pr = _open_pr(ts, row, item, proposal, repo)
-    if not pr.get("opened"):
+    batch["repo"] = repo
+    written = _write(ts, item, proposal, repo, batch)
+    if not written.get("ok"):
         # The diff was written and checked; only the host refused (a token,
         # a permission, a network error). That is fixable, so the item
         # waits for `go N` again instead of being logged as if the plan
         # were wrong (2026-10-19: a 403 on branch creation logged item 1).
-        why = str(pr.get("reason") or "unknown")
+        why = str(written.get("reason") or "unknown")
         item["state"] = HELD
         _save(ts, items=json.dumps(items))
         _post(f"*{n}* is written and passed the safety check, but the pull "
               f"request couldn't open: {why}. <@{SAM_SLACK}> once that's "
-              f"fixed, say `go {n}` to try again.", thread_ts=ts)
+              f"fixed, say `go {n}` to try again."
+              + _failure_line(ts, row, item, why), thread_ts=ts)
         return {"n": n, "built": False, "reason": why}
-
-    fix_task = _file_fix_task(item, repo, pr["url"], ts, row)
-    task_url = f"https://app.clickup.com/t/{fix_task}" if fix_task else ""
-    item.update(state=PR_OPEN, pr_url=pr["url"], fix_task=fix_task,
-                pr_day=_today(), sam_approved=sam_approved)
-    if row.get("task_id"):
-        _comment(row["task_id"], f"Item {n} built by an agent: {pr['url']}\n"
-                                 f"Agent Fixes task: {task_url}")
-        _link(row["task_id"], fix_task)
-        item["recorded"] = True
+    item.update(sam_approved=sam_approved,
+                risks=str(proposal.get("risks") or ""))
+    batch["written"].append(n)
     _save(ts, items=json.dumps(items))
-    build = item.get("build") or {}
-    # The PR line first, then the check mark if this was the last open item.
-    _post("\n".join(line for line in (
-        f"*{n}. Pull request open:* <{pr['url']}|into "
-        f"{repo.alias} development>. Sam reviews and merges.",
-        f"_What the frontend gets:_ {build.get('contract')}"
-        if build.get("contract") else "",
-        f"_Unsure about:_ {proposal.get('risks')}"
-        if proposal.get("risks") else "",
-        f"ClickUp: <{task_url}|Agent Fixes task>" if task_url else "",
-    ) if line), thread_ts=ts)
-    _record(ts, row, items)
-    return {"n": n, "built": True, "pr_url": pr["url"]}
+    if own:
+        return (_finish(ts, row, items, batch) or [{"n": n}])[0]
+    return {"n": n, "built": True}
 
 
 def _fell_through(ts: str, row: dict, items: dict, n: str,
                   why: str) -> dict:
+    """A build that stopped for good. Logged for Sam, unless Sam said go:
+    then it stays open on the thread as a question (Sam, 2026-10-27)."""
     item = items[n]
     item["analysis"] = f"{item.get('analysis') or ''} Build stopped: " \
                        f"{why}.".strip()
-    line = _log(ts, row, items, n)
+    if item.get("sam_approved"):
+        item.update(state=WAITING_SAM, verdict="decision",
+                    question=BEYOND_AGENT.format(n=n))
+        line = f"<@{SAM_SLACK}> {item['question']}"
+    else:
+        line = _log(ts, row, items, n)
     _save(ts, items=json.dumps(items))
-    _post(f"*{n}* didn't build ({why}). {line}", thread_ts=ts)
+    _post(f"*{n}* didn't build ({why}). {line}"
+          + _failure_line(ts, row, item, why), thread_ts=ts)
     return {"n": n, "built": False, "reason": why}
 
 
-def _propose(ts: str, item: dict):
+def _failure_line(ts: str, row: dict, item: dict, why: str) -> str:
+    """A build that stopped, in Agent Workflows for Sam and Claude to work
+    through later (Sam, 2026-10-20: every workflow failure is logged)."""
+    import workflow_log
+
+    build = item.get("build") or {}
+    url = workflow_log.log_issue(
+        area="feature desk",
+        title=f"Feature desk build stopped: {item.get('title') or 'item'}"[
+            :150],
+        summary=f"Item {item.get('n')} of a #feature-requests post did not "
+                f"build. Reason: {str(why).rstrip('. ')}.",
+        details="\n".join([
+            f"- Reason: {why}",
+            f"- Plan: {build.get('plan') or '(none)'}",
+            f"- Repo: {build.get('repo') or '(none)'}",
+            f"- Anchors: {', '.join(build.get('anchors') or []) or '(none)'}",
+            f"- Evidence: `{item.get('evidence') or ''}`",
+            f"- Requester's task: https://app.clickup.com/t/{row['task_id']}"
+            if row.get("task_id") else "- Requester's task: (none)",
+        ]),
+        channel=CHANNEL, thread_ts=ts,
+        next_step="Work out with Claude what the desk or the builder needs, "
+                  "fix it, then say go again in the thread.",
+    )
+    return (f"\nLogged for review in Agent Workflows: <{url}|task>"
+            if url else "")
+
+
+def _propose(ts: str, item: dict, ref: str = ""):
     """The fix author's diff for the plan, against the dev branch it will
-    merge into. Each edited file comes with its import blocks, and every
-    path:line the evidence or plan cites comes as read-only reference, so
-    the builder can add an import and copy a precedent it was told to copy
-    (2026-10-21: three bare windows made it refuse, rightly)."""
+    merge into (or `ref`, the request's branch once an item is on it). Each
+    edited file comes with its import blocks, and every path:line the
+    evidence or plan cites comes as read-only reference, so the builder can
+    add an import and copy a precedent it was told to copy (2026-10-21:
+    three bare windows made it refuse, rightly)."""
     import sentry_code
     import sentry_fix
     import sentry_projects
@@ -888,7 +1056,7 @@ def _propose(ts: str, item: dict):
     repo = repo_map().get(str(build.get("repo") or ""))
     if not repo:
         return {"reason": f"unknown repo {build.get('repo')!r}"}, repo
-    ref = sentry_projects.fix_target(repo.slug) or repo.branch
+    ref = ref or sentry_projects.fix_target(repo.slug) or repo.branch
     anchors = [a.rsplit(":", 1) for a in build.get("anchors") or []]
     refs = sentry_code.references(
         f"{item.get('evidence') or ''}\n{build.get('plan') or ''}\n"
@@ -913,54 +1081,142 @@ def _propose(ts: str, item: dict):
     return proposal, repo
 
 
-def _open_pr(ts: str, row: dict, item: dict, proposal: dict, repo) -> dict:
-    """Branch, commit, PR into the dev branch. The same apply-and-verify
-    step as sentry_fix.open_pull_request, with a body that describes a
-    requested change rather than a bug."""
+def _write(ts: str, item: dict, proposal: dict, repo, batch: dict) -> dict:
+    """Apply the diff and commit it to the batch's branch, cutting the
+    branch from the dev branch on the first item. The same apply-and-verify
+    step as sentry_fix.open_pull_request. {"ok"} or {"reason"}."""
     import sentry_fix
     import sentry_projects
     from vomeos.integrations import code_write
 
-    ref = sentry_projects.fix_target(repo.slug)
-    if not ref:
-        return {"opened": False, "reason": f"no dev branch for {repo.slug}"}
+    base = sentry_projects.fix_target(repo.slug)
+    if not base:
+        return {"ok": False, "reason": f"no dev branch for {repo.slug}"}
+    batch["base"] = base
     contents, error = sentry_fix._apply_to_repo(
-        repo.slug, ref, repo.host, repo.owner, proposal["diff"])
+        repo.slug, batch["branch"] or base, repo.host, repo.owner,
+        proposal["diff"])
     if error:
-        return {"opened": False, "reason": f"patch does not apply: {error}"}
+        return {"ok": False, "reason": f"patch does not apply: {error}"}
 
     writer = code_write.writer_for(repo.host)
     kwargs = {"owner": repo.owner} if repo.host == "github" and repo.owner \
         else {}
     if not writer.configured(**kwargs):
-        return {"opened": False, "reason": "no write token configured"}
+        return {"ok": False, "reason": "no write token configured"}
 
     title = str(item.get("title") or "Requested backend change")
-    branch = code_write.branch_name(f"feature-{_issue_key(ts)}-{item['n']}",
-                                    title[:40])
     message = f"Feature request: {title}"[:100]
     try:
-        created = writer.create_branch(repo.slug, branch, ref, **kwargs)
-        if not created.ok:
-            return {"opened": False, "reason": "could not branch: "
+        if not batch["branch"]:
+            branch = code_write.branch_name(
+                f"feature-{_issue_key(ts)}-{item['n']}", title[:40])
+            created = writer.create_branch(repo.slug, branch, base, **kwargs)
+            if not created.ok:
+                return {"ok": False, "reason": "could not branch: "
                                                + _host_error(created.error)}
+            batch["branch"] = branch
         for path, body in contents.items():
-            written = writer.commit_file(repo.slug, branch, path, body,
-                                         message, **kwargs)
+            written = writer.commit_file(repo.slug, batch["branch"], path,
+                                         body, message, **kwargs)
             if not written.ok:
-                return {"opened": False,
+                return {"ok": False,
                         "reason": f"could not commit {path}: "
                                   + _host_error(written.error)}
+    except code_write.WriteDenied as exc:
+        return {"ok": False, "reason": f"refused: {exc}"}
+    return {"ok": True}
+
+
+def _finish(ts: str, row: dict, items: dict, batch: dict) -> list[dict]:
+    """One pull request for everything the batch wrote, or the items added
+    to the request's open one. One thread message and one Agent Fixes task
+    either way."""
+    ns = batch["written"]
+    if not ns:
+        return []
+    repo = batch["repo"]
+    alias = getattr(repo, "alias", "the repo")
+    built = [items[n] for n in ns]
+    label = ", ".join(ns)
+    added = bool(batch["pr_url"])
+    if added:
+        url, fix_task = batch["pr_url"], batch["fix_task"]
+        if fix_task:
+            _comment(fix_task, "Added to the same pull request:\n"
+                     + "\n".join(_fix_lines(item) for item in built))
+    else:
+        pr = _open_pr(ts, row, built, repo, batch)
+        if not pr.get("opened"):
+            why = str(pr.get("reason") or "unknown")
+            for item in built:
+                item["state"] = HELD
+            _save(ts, items=json.dumps(items))
+            _post(f"*{label}* written and passed the safety check, but the "
+                  f"pull request couldn't open: {why}. <@{SAM_SLACK}> once "
+                  f"that's fixed, say `go {' '.join(ns)}` to try again."
+                  + _failure_line(ts, row, built[0], why), thread_ts=ts)
+            return [{"n": n, "built": False, "reason": why} for n in ns]
+        url = pr["url"]
+        fix_task = _file_fix_task(built, repo, url, ts, row)
+    task_url = f"https://app.clickup.com/t/{fix_task}" if fix_task else ""
+    for item in built:
+        item.update(state=PR_OPEN, pr_url=url, fix_task=fix_task,
+                    pr_day=_today(), pr_branch=batch["branch"])
+    if row.get("task_id"):
+        _comment(row["task_id"],
+                 f"Item{'s' if len(ns) > 1 else ''} {label} built by an "
+                 f"agent: {url}\nAgent Fixes task: {task_url}")
+        if not added:
+            _link(row["task_id"], fix_task)
+        for item in built:
+            item["recorded"] = True
+    _save(ts, items=json.dumps(items))
+    lines = [f"*{label}. Added to the open pull request:* <{url}|into "
+             f"{alias} development>." if added else
+             f"*{label}. Pull request open:* <{url}|into {alias} "
+             f"development>. Sam reviews and merges."]
+    for item in built:
+        build = item.get("build") or {}
+        which = f"{item['n']}. " if len(built) > 1 else ""
+        if build.get("contract"):
+            lines.append(f"_{which}What the frontend gets:_ "
+                         f"{build['contract']}")
+        if item.get("risks"):
+            lines.append(f"_{which}Unsure about:_ {item['risks']}")
+    if task_url and not added:
+        lines.append(f"ClickUp: <{task_url}|Agent Fixes task>")
+    # The PR line first, then the check mark if this was the last open item.
+    _post("\n".join(lines), thread_ts=ts)
+    _record(ts, row, items)
+    return [{"n": n, "built": True, "pr_url": url} for n in ns]
+
+
+def _open_pr(ts: str, row: dict, built: list, repo, batch: dict) -> dict:
+    """The pull request from the batch's branch into the dev branch, with a
+    body that describes requested changes rather than a bug."""
+    import sentry_fix
+    from vomeos.integrations import code_write
+
+    writer = code_write.writer_for(repo.host)
+    kwargs = {"owner": repo.owner} if repo.host == "github" and repo.owner \
+        else {}
+    titles = [str(i.get("title") or "Requested backend change")
+              for i in built]
+    title = titles[0] + (f" (+{len(titles) - 1} more)"
+                         if len(titles) > 1 else "")
+    message = f"Feature request: {title}"[:100]
+    try:
         opened = writer.open_pull_request(
-            repo.slug, branch, ref, title=message,
-            body=_pr_body(ts, row, item, proposal), **kwargs)
+            repo.slug, batch["branch"], batch["base"], title=message,
+            body=_pr_body(ts, row, built), **kwargs)
     except code_write.WriteDenied as exc:
         return {"opened": False, "reason": f"refused: {exc}"}
     if not opened.ok:
         return {"opened": False,
                 "reason": "could not open PR: " + _host_error(opened.error)}
     return {"opened": True, "url": sentry_fix._pr_url(opened.data),
-            "branch": branch}
+            "branch": batch["branch"]}
 
 
 def _host_error(error: str) -> str:
@@ -974,32 +1230,38 @@ def _host_error(error: str) -> str:
     return text[:200]
 
 
-def _pr_body(ts: str, row: dict, item: dict, proposal: dict) -> str:
-    build = item.get("build") or {}
+def _pr_body(ts: str, row: dict, built: list) -> str:
     link = _permalink(ts)
-    return "\n".join([
+    lines = [
         "Built automatically from a #feature-requests post. **Not reviewed "
-        "by a person.** The architect judged it an additive change that "
-        "follows an existing pattern; check that it does.",
+        "by a person.** The architect judged each item an additive change "
+        "that follows an existing pattern; check that it does.",
         "",
         f"**Requested by** {row.get('requester') or 'a teammate'}"
         + (f" · [Slack]({link})" if link else "")
         + (f" · [ClickUp](https://app.clickup.com/t/{row['task_id']})"
            if row.get("task_id") else ""),
-        "",
-        "### What was asked",
-        str(item.get("title") or ""),
-        "",
-        "### Why this shape",
-        str(item.get("analysis") or ""),
-        f"Precedent: `{item.get('evidence')}`" if item.get("evidence")
-        else "",
-        "",
-        "### What the frontend gets",
-        str(build.get("contract") or "see the diff"),
-        "",
-        "### What the author was unsure about",
-        str(proposal.get("risks") or "none identified"),
+    ]
+    for item in built:
+        build = item.get("build") or {}
+        lines += [
+            "",
+            f"## {item.get('n')}. {item.get('title') or ''}"
+            if len(built) > 1 else "### What was asked",
+            "" if len(built) > 1 else str(item.get("title") or ""),
+            "",
+            "### Why this shape",
+            str(item.get("analysis") or ""),
+            f"Precedent: `{item.get('evidence')}`" if item.get("evidence")
+            else "",
+            "",
+            "### What the frontend gets",
+            str(build.get("contract") or "see the diff"),
+            "",
+            "### What the author was unsure about",
+            str(item.get("risks") or "none identified"),
+        ]
+    return "\n".join(lines + [
         "",
         "---",
         "No migration, no new model, no auth, permission or billing code: "
@@ -1007,14 +1269,25 @@ def _pr_body(ts: str, row: dict, item: dict, proposal: dict) -> str:
     ])
 
 
-def _file_fix_task(item: dict, repo, pr_url: str, ts: str,
+def _fix_lines(item: dict) -> str:
+    build = item.get("build") or {}
+    return "\n".join([
+        f"**{item.get('n')}. {item.get('title') or ''}**",
+        f"**Shape:** {item.get('shape') or ''}",
+        f"**Plan:** {build.get('plan') or ''}",
+        f"**Contract:** {build.get('contract') or ''}",
+        f"**Precedent:** `{item.get('evidence') or ''}`",
+    ])
+
+
+def _file_fix_task(built: list, repo, pr_url: str, ts: str,
                    row: dict) -> str:
-    """The Agent Fixes parent. Its "Fix PR:" line is what
-    ticket_fix.promote_merged follows to `on dev` once the PR merges, and
-    the release watcher proves it live from there."""
+    """The Agent Fixes parent, one per pull request. Its "Fix PR:" line is
+    what ticket_fix.promote_merged follows to `on dev` once the PR merges,
+    and the release watcher proves it live from there."""
     import ticket_fix as tf
 
-    build = item.get("build") or {}
+    titles = "; ".join(str(i.get("title") or "") for i in built)
     description = "\n".join([
         "**Requested backend change built by an agent from "
         "#feature-requests.** Not reviewed by a person. Merge into the dev "
@@ -1026,14 +1299,11 @@ def _file_fix_task(item: dict, repo, pr_url: str, ts: str,
         f"**Requester's task:** https://app.clickup.com/t/{row['task_id']}"
         if row.get("task_id") else "",
         "",
-        f"**Shape:** {item.get('shape') or ''}",
-        f"**Plan:** {build.get('plan') or ''}",
-        f"**Contract:** {build.get('contract') or ''}",
-        f"**Precedent:** `{item.get('evidence') or ''}`",
+        *[_fix_lines(item) + "\n" for item in built],
     ])
     try:
         task = _clickup("POST", f"/list/{tf.AGENT_FIXES_LIST}/task", {
-            "name": f"[Feature request] {item.get('title') or ''}"[:180],
+            "name": f"[Feature request] {titles}"[:180],
             "markdown_description": description,
             "status": "in progress",
             "custom_fields": [
@@ -1058,10 +1328,12 @@ def _opened_today() -> int:
         " WHERE updated_at >= date_trunc('day', NOW())"
     )
     today = _today()
-    return sum(
-        1 for r in rows or [] for item in _items(dict(r)).values()
+    # Items share a pull request now, so it is the urls that are counted.
+    return len({
+        item.get("pr_url") or id(item)
+        for r in rows or [] for item in _items(dict(r)).values()
         if item.get("pr_day") == today and not item.get("sam_approved")
-    )
+    })
 
 
 def _today() -> str:
@@ -1566,18 +1838,22 @@ def _requester_tag(ts: str) -> str:
 
 
 def pr_merged(pr_url: str, commit: str) -> list[str]:
-    """The PR merged into the dev branch: the requester can test it."""
+    """The PR merged into the dev branch: the requester can test it. One
+    message per thread, naming every item the PR carried."""
     out = []
     for ts, row, items in _items_with(pr_url):
-        for n, item in items.items():
-            if item.get("pr_url") != pr_url or item.get("merged"):
-                continue
-            item["merged"] = commit
-            _save(ts, items=json.dumps(items))
-            _post(f":test_tube: *{n}. Merged into development* ({commit}). "
-                  f"{_requester_tag(ts)}it's ready to test on dev. I'll post "
-                  "here again when it's live in production.", thread_ts=ts)
-            out.append(f"feature desk {ts} item {n} merged")
+        ns = [n for n, item in items.items()
+              if item.get("pr_url") == pr_url and not item.get("merged")]
+        if not ns:
+            continue
+        for n in ns:
+            items[n]["merged"] = commit
+        _save(ts, items=json.dumps(items))
+        _post(f":test_tube: *{', '.join(ns)}. Merged into development* "
+              f"({commit}). {_requester_tag(ts)}it's ready to test on dev. "
+              "I'll post here again when it's live in production.",
+              thread_ts=ts)
+        out.append(f"feature desk {ts} item {', '.join(ns)} merged")
     return out
 
 
@@ -1585,34 +1861,39 @@ def fix_live(fix_task_id: str) -> list[str]:
     """The release watcher proved the merged commit live in production."""
     out = []
     for ts, row, items in _items_with(fix_task_id):
-        for n, item in items.items():
-            if item.get("fix_task") != fix_task_id or item.get("live"):
-                continue
-            item["live"] = True
-            _save(ts, items=json.dumps(items))
-            _post(f":rocket: *{n}. Live in production.* "
-                  f"{_requester_tag(ts)}it's out for everyone now.",
-                  thread_ts=ts)
-            out.append(f"feature desk {ts} item {n} live")
+        ns = [n for n, item in items.items()
+              if item.get("fix_task") == fix_task_id
+              and not item.get("live")]
+        if not ns:
+            continue
+        for n in ns:
+            items[n]["live"] = True
+        _save(ts, items=json.dumps(items))
+        _post(f":rocket: *{', '.join(ns)}. Live in production.* "
+              f"{_requester_tag(ts)}it's out for everyone now.",
+              thread_ts=ts)
+        out.append(f"feature desk {ts} item {', '.join(ns)} live")
     return out
 
 
 def pr_closed(pr_url: str) -> list[str]:
-    """The PR was closed without merging. The item is not shipping as
-    built, so it goes back to Sam and the thread loses its check mark."""
+    """The PR was closed without merging. Its items are not shipping as
+    built, so they go back to Sam and the thread loses its check mark."""
     out = []
     for ts, row, items in _items_with(pr_url):
-        for n, item in items.items():
-            if item.get("pr_url") != pr_url:
-                continue
-            item.update(state=HELD, closed_pr=pr_url, pr_url="",
-                        recorded=False)
-            _save(ts, items=json.dumps(items), status=OPEN)
-            _unreact(ts)
-            _post(f"*{n}*: the pull request was closed without merging, so "
-                  f"this isn't shipping as built. <@{SAM_SLACK}> `go {n}` "
-                  f"builds it again, or `log {n}`.", thread_ts=ts)
-            out.append(f"feature desk {ts} item {n} PR closed")
+        ns = [n for n, item in items.items() if item.get("pr_url") == pr_url]
+        if not ns:
+            continue
+        for n in ns:
+            items[n].update(state=HELD, closed_pr=pr_url, pr_url="",
+                            pr_branch="", recorded=False)
+        _save(ts, items=json.dumps(items), status=OPEN)
+        _unreact(ts)
+        _post(f"*{', '.join(ns)}*: the pull request was closed without "
+              f"merging, so this isn't shipping as built. <@{SAM_SLACK}> "
+              f"`go {' '.join(ns)}` builds it again, or "
+              f"`log {' '.join(ns)}`.", thread_ts=ts)
+        out.append(f"feature desk {ts} item {', '.join(ns)} PR closed")
     return out
 
 

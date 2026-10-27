@@ -68,6 +68,9 @@ def desk(monkeypatch):
     monkeypatch.setattr(fd, "_clickup", clickup)
     monkeypatch.setattr("clickup_tasks.move_clickup_task", lambda task, to:
                         calls["moves"].append((task, to)) or True)
+    calls["failures"] = []
+    monkeypatch.setattr("workflow_log.log_issue", lambda **k:
+                        calls["failures"].append(k) or "https://cu/AW1")
     return calls
 
 
@@ -335,7 +338,7 @@ def test_sams_go_builds_with_pull_requests_off(monkeypatch, desk):
     stops the agent opening PRs on its own."""
     monkeypatch.delenv("FEATURE_DESK_PR_ENABLED", raising=False)
     proposed = []
-    monkeypatch.setattr(fd, "_propose", lambda ts, item:
+    monkeypatch.setattr(fd, "_propose", lambda ts, item, **k:
                         proposed.append(item["n"]) or
                         ({"reason": "declined"}, None))
     items = {"1": {**_build_item(), "state": fd.HELD}}
@@ -347,10 +350,10 @@ def test_sams_go_builds_with_pull_requests_off(monkeypatch, desk):
 def test_a_refused_pull_request_waits_for_a_retry(monkeypatch, desk):
     """2026-10-19: Bitbucket refused the branch (token scope) and the item
     was logged, so `go 1` could never try again."""
-    monkeypatch.setattr(fd, "_propose", lambda ts, item:
+    monkeypatch.setattr(fd, "_propose", lambda ts, item, **k:
                         ({"diff": "--- a/x.py\n+++ b/x.py\n"}, None))
-    monkeypatch.setattr(fd, "_open_pr", lambda *a: {
-        "opened": False, "reason": "could not branch: " + fd._host_error(
+    monkeypatch.setattr(fd, "_write", lambda *a: {
+        "ok": False, "reason": "could not branch: " + fd._host_error(
             'HTTP 403: {"error": {"message": "Your credentials lack one or '
             'more required privilege scopes."}}')})
     items = {"1": {**_build_item(), "state": fd.HELD}}
@@ -373,7 +376,7 @@ def test_go_retries_a_build_that_was_logged_by_a_failure(monkeypatch, desk):
 def test_the_daily_cap_holds_but_sam_lifts_it(monkeypatch, desk):
     monkeypatch.setenv("FEATURE_DESK_PR_ENABLED", "true")
     monkeypatch.setattr(fd, "_opened_today", lambda: 99)
-    monkeypatch.setattr(fd, "_propose", lambda ts, item:
+    monkeypatch.setattr(fd, "_propose", lambda ts, item, **k:
                         ({"reason": "declined"}, None))
     items = {"1": _build_item()}
     held = fd._build("1.1", {"task_id": "T1"}, items, "1")
@@ -382,7 +385,7 @@ def test_the_daily_cap_holds_but_sam_lifts_it(monkeypatch, desk):
     tried = fd._build("1.1", {"task_id": "T1"}, items, "1",
                       sam_approved=True)
     assert "builder declined" in tried["reason"]
-    assert items["1"]["state"] == fd.LOGGED
+    assert items["1"]["state"] == fd.WAITING_SAM
 
 
 # The fix author's own words on profile status, 2026-10-21 (trimmed).
@@ -402,7 +405,7 @@ def test_a_builder_short_of_source_waits_for_go(monkeypatch, desk, proposal):
     """2026-10-21: Sam said `go 1` on profile status, the builder could not
     see the imports or get_is_invited, and the item was logged. Missing
     source is fixable, so the item waits for `go 1` again."""
-    monkeypatch.setattr(fd, "_propose", lambda ts, item: (proposal, None))
+    monkeypatch.setattr(fd, "_propose", lambda ts, item, **k: (proposal, None))
     items = {"1": {**_build_item(), "state": fd.HELD}}
     result = fd._build("1.1", {"task_id": "T1"}, items, "1",
                        sam_approved=True)
@@ -430,7 +433,7 @@ def test_the_source_a_builder_asks_for_comes_with_the_next_go(monkeypatch,
         f"Still not shown: {v4}:1500 and {v4}:1328.",
     ])
     propose = fd._propose
-    monkeypatch.setattr(fd, "_propose", lambda ts, item: (
+    monkeypatch.setattr(fd, "_propose", lambda ts, item, **k: (
         {"reason": next(reasons), "needs_context": True}, None))
     items = {"1": {**_build_item(), "state": fd.HELD}}
     fd._build("1.1", {"task_id": "T1"}, items, "1", sam_approved=True)
@@ -451,13 +454,21 @@ def test_the_source_a_builder_asks_for_comes_with_the_next_go(monkeypatch,
     assert (v4, 1328) in seen["refs"] and (v4, 1500) in seen["refs"]
 
 
-def test_a_real_refusal_is_still_logged(monkeypatch, desk):
-    monkeypatch.setattr(fd, "_propose", lambda ts, item: (
+def test_a_real_refusal_goes_back_to_sam(monkeypatch, desk):
+    """Not held for a retry like missing source: the plan itself is
+    refused. Sam said go, so it is his question now (2026-10-27), and
+    without his go it is logged as before."""
+    monkeypatch.setattr(fd, "_propose", lambda ts, item, **k: (
         {"reason": "it needs a migration", "needs_context": False}, None))
     items = {"1": {**_build_item(), "state": fd.HELD}}
     fd._build("1.1", {"task_id": "T1"}, items, "1", sam_approved=True)
-    assert items["1"]["state"] == fd.LOGGED
+    assert items["1"]["state"] == fd.WAITING_SAM
     assert "builder declined" in desk["posts"][-1]
+    monkeypatch.setenv("FEATURE_DESK_PR_ENABLED", "true")
+    monkeypatch.setattr(fd, "_opened_today", lambda: 0)
+    items = {"1": _build_item()}
+    fd._build("1.1", {"task_id": "T1"}, items, "1")
+    assert items["1"]["state"] == fd.LOGGED
 
 
 def test_an_unchecked_build_goes_to_sam_not_the_builder(monkeypatch, desk):
@@ -537,7 +548,8 @@ def test_sam_go_on_a_held_build_builds_it(monkeypatch, desk):
     monkeypatch.setattr(fd, "_build", lambda ts, row, items, n, **k:
                         desk["builds"].append((n, k)))
     fd._on_reply("1.1", {"ts": "2", "user": SAM, "text": "go 1"})
-    assert desk["builds"] == [("1", {"sam_approved": True})]
+    assert [(n, k["sam_approved"]) for n, k in desk["builds"]] == [
+        ("1", True)]
 
 
 def test_sam_go_on_a_decision_reanalyses_with_his_choice(monkeypatch, desk):
@@ -1197,3 +1209,170 @@ def test_an_unanalysed_task_carries_the_request(monkeypatch):
     assert sent["markdown_description"].startswith(
         "Let admins copy a week of shifts.")
     assert "Architect" not in sent["markdown_description"]
+
+
+# ---------------------------------------------------------------------------
+# Several items at once (Sam, 2026-10-27): six `go` lines in one message
+# were read as direction, the desk answered "go 3 opens the pull request",
+# `go 5A` and `go 6A` came back logged, and each item was its own PR.
+# ---------------------------------------------------------------------------
+
+SAMS_GO = "Go 1A\nGo 2\nGo 3A\nGo 4A\nG 5A\nGo 6A"
+PEOPLE = {"1": {"n": "1", "verdict": "already_exists", "state": fd.EXISTS},
+          "2": {"n": "2", "verdict": "already_exists", "state": fd.EXISTS},
+          **{n: {"n": n, "verdict": "decision", "state": fd.WAITING_SAM}
+             for n in "3456"}}
+
+
+def test_one_command_per_line_is_one_command():
+    assert fd.parse_commands(SAMS_GO, PEOPLE) == [{
+        "verb": "go", "targets": [("1", "A"), ("2", ""), ("3", "A"),
+                                  ("4", "A"), ("5", "A"), ("6", "A")]}]
+
+
+def test_mixed_lines_place_first_and_build_last():
+    commands = fd.parse_commands("go 3\nlog 5; no 6\nthanks", PEOPLE)
+    assert [c["verb"] for c in commands] == ["log", "no", "go"]
+
+
+def test_a_line_that_is_not_a_command_makes_it_direction():
+    assert fd.parse_commands("go 3\nbut keep hours on the role",
+                             PEOPLE) is None
+
+
+@pytest.mark.parametrize("text,verb", [
+    ("go all", "go"),
+    ("go all recommended", "go"),
+    ("go with your recommendations", "go"),
+    ("build all recommended", "go"),
+    ("build all", "build"),
+])
+def test_all_means_every_open_item(text, verb):
+    command = fd.parse_command(text, PEOPLE)
+    assert command["verb"] == verb
+    assert [n for n, _ in command["targets"]] == ["3", "4", "5", "6"]
+
+
+def test_sams_message_builds_what_is_open_and_skips_what_is_there(
+        monkeypatch, desk):
+    seen = {}
+    monkeypatch.setattr(fd, "_row", lambda ts: _row(PEOPLE))
+    monkeypatch.setattr(fd, "analyse", lambda ts, **k: seen.update(k))
+    fd._on_reply("1.1", {"ts": "9", "user": SAM, "text": SAMS_GO})
+    assert desk["posts"] == [
+        "Nothing to build for 1 (already there), 2 (already there)."]
+    assert seen["approved"] == ["3", "4", "5", "6"]
+    assert "build item 3 using option A" in seen["direction"]
+    assert "item 1" not in seen["direction"]
+
+
+def test_go_reopens_a_logged_item_for_the_analysis(monkeypatch, desk):
+    items = {"5": {"n": "5", "verdict": "log", "state": fd.LOGGED,
+                   "recorded": True}}
+    seen = {}
+    monkeypatch.setattr(fd, "_row", lambda ts: _row(items))
+    monkeypatch.setattr(fd, "analyse", lambda ts, **k: seen.update(k))
+    fd._on_reply("1.1", {"ts": "9", "user": SAM, "text": "go 5A"})
+    assert seen["approved"] == ["5"]
+    saved = json.loads(desk["saves"][-1]["items"])
+    assert saved["5"]["state"] == "" and saved["5"]["recorded"] is False
+
+
+def test_an_approved_item_too_big_to_build_comes_back_as_a_question(desk):
+    items = {"5": {"n": "5", "title": "Hours", "verdict": "log",
+                   "sam_approved": True, "analysis": "A new aggregate."}}
+    fd.act("1.1", {"task_id": "T1"}, {"summary": "People"}, items)
+    assert items["5"]["state"] == fd.WAITING_SAM
+    assert items["5"]["verdict"] == "decision"
+    assert "You said go" in desk["posts"][0]
+    assert "Needs your call" in desk["posts"][0]
+    assert desk["comments"] == []
+
+
+def test_an_approved_build_that_stops_stays_open_and_is_logged(
+        monkeypatch, desk):
+    monkeypatch.setattr(fd, "_propose", lambda ts, item, **k: (
+        {"reason": "the helper does not exist"}, None))
+    items = {"1": {**_build_item(), "state": fd.HELD}}
+    fd._build("1.1", {"task_id": "T1"}, items, "1", sam_approved=True)
+    assert items["1"]["state"] == fd.WAITING_SAM
+    assert "You said go" in desk["posts"][-1]
+    assert "Agent Workflows" in desk["posts"][-1]
+    assert desk["failures"][0]["area"] == "feature desk"
+
+
+class _Repo:
+    alias, slug, host, owner = "core", "core-slug", "bitbucket", ""
+
+
+def _batching(monkeypatch, desk):
+    """_propose, _write, _open_pr and the Agent Fixes task recorded."""
+    seen = {"refs": [], "prs": [], "fix_tasks": []}
+
+    def propose(ts, item, ref=""):
+        seen["refs"].append(ref)
+        return {"diff": f"diff {item['n']}", "risks": ""}, _Repo
+
+    def write(ts, item, proposal, repo, batch):
+        batch["branch"] = batch["branch"] or f"agent/feature-{item['n']}"
+        batch["base"] = "development"
+        return {"ok": True}
+
+    monkeypatch.setattr(fd, "_propose", propose)
+    monkeypatch.setattr(fd, "_write", write)
+    monkeypatch.setattr(fd, "_open_pr", lambda ts, row, built, repo, batch:
+                        seen["prs"].append([i["n"] for i in built]) or
+                        {"opened": True, "url": PR, "branch": batch["branch"]})
+    monkeypatch.setattr(fd, "_file_fix_task", lambda built, *a:
+                        seen["fix_tasks"].append(len(built)) or "AF1")
+    monkeypatch.setattr(fd, "_link", lambda *a: None)
+    return seen
+
+
+def test_items_built_together_share_one_pull_request(monkeypatch, desk):
+    seen = _batching(monkeypatch, desk)
+    items = {"3": _build_item(n="3"), "4": _build_item(n="4")}
+    results = fd._build_all("1.1", {"task_id": "T1"}, items, ["3", "4"],
+                            sam_approved=True)
+    assert seen["refs"] == ["", "agent/feature-3"]
+    assert seen["prs"] == [["3", "4"]] and seen["fix_tasks"] == [2]
+    assert all(r["pr_url"] == PR for r in results)
+    assert {i["pr_branch"] for i in items.values()} == {"agent/feature-3"}
+    assert "*3, 4. Pull request open:*" in desk["posts"][0]
+    assert len(desk["posts"]) == 2  # the PR line, then the check mark
+
+
+def test_a_later_go_joins_the_open_pull_request(monkeypatch, desk):
+    seen = _batching(monkeypatch, desk)
+    items = {"3": {**_build_item(n="3"), "state": fd.PR_OPEN, "pr_url": PR,
+                   "pr_branch": "agent/feature-3", "fix_task": "AF1"},
+             "5": {**_build_item(n="5"), "state": fd.HELD}}
+    fd._build_all("1.1", {"task_id": "T1"}, items, ["5"], sam_approved=True)
+    assert seen["refs"] == ["agent/feature-3"]
+    assert seen["prs"] == [] and seen["fix_tasks"] == []
+    assert items["5"]["pr_url"] == PR and items["5"]["fix_task"] == "AF1"
+    assert "Added to the open pull request" in desk["posts"][0]
+    assert any(task == "AF1" for task, _ in desk["comments"])
+
+
+def test_a_merged_pull_request_is_said_once_for_all_its_items(
+        monkeypatch, desk):
+    items = {n: {**_build_item(n=n), "state": fd.PR_OPEN, "pr_url": PR,
+                 "fix_task": "AF1"} for n in ("3", "4")}
+    monkeypatch.setattr(fd, "_items_with", lambda value: [
+        ("1.1", {"ts": "1.1"}, items)])
+    monkeypatch.setattr(fd, "_read_post", lambda ts: {"requester_id": RON})
+    fd.pr_merged(PR, "core@abc")
+    fd.fix_live("AF1")
+    assert len(desk["posts"]) == 2
+    assert "*3, 4. Merged into development*" in desk["posts"][0]
+    assert "*3, 4. Live in production.*" in desk["posts"][1]
+
+
+def test_go_all_takes_what_the_architect_logged_not_what_sam_placed():
+    items = {"3": {"state": fd.HELD},
+             "5": {"state": fd.LOGGED},
+             "6": {"state": fd.LOGGED, "placed": "moved to Raw Intake"},
+             "7": {"state": fd.EXISTS}}
+    command = fd.parse_command("go all", items)
+    assert [n for n, _ in command["targets"]] == ["3", "5"]

@@ -200,19 +200,21 @@ flowchart TD
   Q -->|"Sam: log / build / route / leave / no"| PLACE
   Q -->|"Sam: analyse (or go, or analyse + direction)"| ACK["'Analysing this' in the thread"]:::built
   ACK --> FA["Feature architect (premium) reads the code<br/>and the 14 extension patterns; one verdict per request"]:::built
-  FA -->|agent_build: additive, no schema, core/database, 3 files| FX["Fix author + patch safety<br/>PR into development (cap 3/day)"]:::built
+  FA -->|agent_build: additive, no schema, core/database, 3 files| FX["Fix author + patch safety, item by item on one branch<br/>ONE PR per request into development (cap 3/day);<br/>a later go joins the PR while it is open (2026-10-27)"]:::built
   FX --> AF["Agent Fixes task, linked to the requester's task<br/>Sam merges; release watcher takes it"]:::built
   AF --> MD["Release watcher: merged into development<br/>-> thread tags the requester to test on dev"]:::built
   MD --> LV["Proven live in production<br/>-> thread says it shipped"]:::built
   AF -->|PR closed unmerged| RO["Item reopens for go N / log N,<br/>check mark removed"]:::built
-  FX -->|declined or refused| LOG
+  FX -->|declined or refused, no go from Sam| LOG
+  FX -->|declined or refused after Sam's go| SAM
+  FX -->|any stop| AW["Logged in Agent Workflows<br/>(link in the thread)"]:::built
   FA -->|decision: shapes, plans, privacy| SAM["Options + recommendation<br/>Sam asked in the thread"]:::built
   FA -->|log: bigger than the envelope| LOG["Stays on the requester's task in Sam's Priority Queue<br/>(no task: Sam places it)"]:::built
   FA -->|already exists / frontend only| FIN["Finding posted, nothing built"]:::built
   FA -->|needs_info| ASK["Requester asked one question<br/>(4 rounds, then Sam)"]:::built
-  SAM --> CMD["Sam: go N / go NB / no N / close<br/>or free-text direction, re-decided"]:::built
+  SAM --> CMD["Sam: go N / go NB / go all (as recommended) / no N / close,<br/>one per line is fine, or free-text direction, re-decided<br/>(go on an item already there: said and skipped)"]:::built
   CMD -->|his shape fits the envelope| FX
-  CMD -->|it does not| LOG
+  CMD -->|"it does not: a question back to Sam, item stays open"| SAM
   SAM --> PLACE["Sam places it (command or own words):<br/>build N = Sam Build Now, log N = Raw Intake,<br/>route N onlyg/sanjay, leave N = Priority Queue"]:::built
   LOG --> PLACE
   PLACE --> MOVE["Requester's task moved, never copied<br/>(build now: assigned Sam, high, no analysis)"]:::built
@@ -222,10 +224,10 @@ flowchart TD
 <!-- map:diagram id=worklog title="10. Log this on ClickUp: Sam and Ron's Agent Workflows list (built 2026-10-19)" -->
 ```mermaid
 flowchart TD
-  T["Sam or Ron in any thread the bot is in:<br/>'log this for us on ClickUp' or @Vome Agent log this"]:::built --> G["Checked before every channel's own commands<br/>(sprint `log N` does not match)"]:::built
+  T["Sam or Ron in any thread the bot is in:<br/>'log this for us on ClickUp', @Vome Agent log this,<br/>or 'agent error: what went wrong' (2026-10-27)"]:::built --> G["Checked before every channel's own commands<br/>(sprint `log N` does not match)"]:::built
   G --> W["Worker claims the message once<br/>(a mention arrives twice)"]:::built
   W --> L["Workflow logger reads the whole thread:<br/>title, bug / idea / improvement / question,<br/>area, summary, details, next step"]:::built
-  L --> C["ClickUp: Operations > Agent Workflows<br/>[Type] title, to do, Sam assigned, tagged, thread linked"]:::built
+  L --> C["ClickUp: Operations > Agent Workflows<br/>[Type] title, to do, Sam assigned, tagged, thread linked,<br/>the note verbatim + the whole thread as comments<br/>(agent error: always [Bug], tagged agent error)"]:::built
   W -->|thread logged before| CM["Comment on that task instead"]:::built
   C & CM --> R["Thread: check mark + link"]:::built
 ```
@@ -363,4 +365,5 @@ Events (on the worker): `customer_success.shadow_triage` (Zoho webhooks),
 | G61 | learning | Sam's Claude Code disagreements become eval cases | built | The triage answer key was agent-written (G15); his corrections were the best signal and were kept nowhere | Push; `railway run -s vome-os-worker py triage_cases.py add --ticket N --expect ...` (cases live in vomeos_eval_cases, not git) | Sam |
 | G63 | security | Nobody was told when a dependency we run had a known vulnerability | built | Oct 24: a news article, not an alert, surfaced the critical Pillow flaw; Bitbucket has no Dependabot. `dependency_watch.py` reads every live lockfile against OSV.dev + CISA KEV + EPSS + endoflife.date (NVD, with a key, only fills severities OSV left blank; Claude only notes flagged results in the thread, code decides the tiers; one Priority Queue task per engineer, backend to OnlyG and web/landing/mobile to Sanjay, with a subtask per upgrade named how urgent, from and to version, and how big (patch and minor bumps share one checklist), kept in sync and closed by the scan; alerts tag the owner in #eng-infra with Sam copied); first local run found CVE-2023-4863 (KEV) on Pillow 10.0.0 and Django 4.2 out of support everywhere | Push; set SLACK_CHANNEL_ENG_INFRA and DEPENDENCY_WATCH_RUNTIMES (optionally NVD_API_KEY) on vome-os-worker; the first 07:45 run posts one baseline digest | Sam |
 | G64 | security | Nobody read our own code for security holes | built | Oct 26: a pilot of Cloudflare's security-audit method found the mobile Google sign-in trusting the email in the request body (any account could be taken over, live since Mar 2025) and about thirty cross-organization and admin-role gaps, posted as 31 "[Security audit]" reports in #bug-reports. `security_audit.py` makes it recurring: Monday 06:00 `engineering.security_auditor` (premium, read-only code tools, production branch) audits the least recently audited of 12 areas (8 core, database, chats, integrations, web), is told everything already reported, and each new finding (max six, ledger by fingerprint) is posted to #bug-reports and handed to the bug report pipeline (analyst re-check, greenlight for Sam, or OnlyG/Sanjay) | Push; first Monday run takes the first area; `py security_audit.py --area core-auth --dry-run` to preview | Sam |
+| G65 | featuredesk | Several items approved at once: one command per line, `go all`, one PR per request, approved items that can't be built come back as questions; "agent error" logs a thread with the note and the full transcript | built | Sam, 2026-10-27: six `go` lines in one message were read as direction, the desk re-asked `go 3`, logged 5A and 6A, and would have opened one PR per item | Push; prove on the People table thread with `go all` | Sam |
 | G62 | release | No "fixed" email until every problem on the ticket is fixed | built | Clients told us we notified them too early: one of two related problems shipped and the email went (Sam, 2026-10-23). `resolution_scope.py` + `customer_success.resolution_scope_check` hold all three automatic paths (on prod, release watcher, shipped-untold) | Push; watch the first held cards in the day thread | Sam |

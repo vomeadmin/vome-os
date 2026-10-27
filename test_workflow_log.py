@@ -289,3 +289,54 @@ def test_top_level_message_threads_its_reply_under_itself(rec):
     wl.handle(_event("log this on clickup: an agent for demo notes",
                      thread_ts=""))
     assert rec.posts[-1][1] == "2.0"
+
+
+# ---------------------------------------------------------------------------
+# "Agent error" (Sam, 2026-10-27): flagged from his phone in the thread it
+# went wrong in, with his note and the whole thread on the task.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "agent error: it re-asked go 3 after I said go",
+    "Agent error",
+    "log this as an agent error",
+    "log it as agent failure, it never built the PR",
+])
+def test_agent_error_triggers(text):
+    assert wl.wants(_event(text))
+
+
+@pytest.mark.parametrize("text", [
+    "was that an agent error?",       # talking about it, not asking
+    "agent error",                    # someone else
+])
+def test_agent_error_needs_sam_or_ron_and_the_phrase_first(text):
+    user = OTHER if text == "agent error" else SAM
+    assert not wl.wants(_event(text, user=user))
+
+
+def test_an_agent_error_is_a_bug_with_the_note_and_the_thread(rec):
+    rec.card = {**CARD, "type": "improvement"}
+    note = "agent error: multi-line go was read as direction"
+    out = wl.handle(_event(note))
+    assert out["type"] == "bug"
+    create = [c for c in rec.calls if c[1] == f"/list/{wl.LIST}/task"][0][2]
+    assert create["name"].startswith("[Bug] ")
+    assert f"**Sam's note:** {note}" in create["markdown_description"]
+    tagged = [c[1] for c in rec.calls if "/tag/" in c[1]]
+    assert "/task/T1/tag/agent%20error" in tagged
+    thread = [c[2]["comment_text"] for c in rec.calls
+              if c[1] == "/task/T1/comment"]
+    assert thread == ["Slack thread when logged:\n\n"
+                      "Ron: exemption bug\nagent: Greenlight?"]
+
+
+def test_a_long_thread_is_split_and_keeps_the_newest(rec, monkeypatch):
+    long = "x" * (wl.THREAD_MAX + 5000) + "LAST"
+    monkeypatch.setattr(wl, "_read_thread", lambda *a: long)
+    wl.handle(_event("agent error"))
+    parts = [c[2]["comment_text"] for c in rec.calls
+             if c[1] == "/task/T1/comment"]
+    assert len(parts) == 3 and parts[0].startswith(
+        "Slack thread when logged (1/3)")
+    assert parts[-1].endswith("LAST")
