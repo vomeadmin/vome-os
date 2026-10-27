@@ -133,6 +133,15 @@ def rec(monkeypatch):
                         lambda text, thread_ts="", channel="":
                         r.posts.append((channel or "bug", thread_ts, text))
                         or "1.1")
+    # Engineer pings go through eng_priority; no store, so unthreaded.
+    import sprint_thread
+
+    monkeypatch.setattr(sprint_thread, "_post",
+                        lambda text, thread_ts="", channel="",
+                        broadcast=False:
+                        r.posts.append((channel, thread_ts, text)) or "1.2")
+    monkeypatch.setattr(bug_reports.eng_priority.store, "ensure_table",
+                        lambda t: False)
     monkeypatch.setattr(bug_reports, "_permalink", lambda ts: "https://s/p")
 
     def clickup(method, path, body=None):
@@ -163,33 +172,60 @@ def _comments(rec) -> str:
                      if c[1].endswith("/comment"))
 
 
-def test_engineer_adopts_the_reporters_task_and_posts_in_their_channel(rec):
+def test_engineer_adopts_the_reporters_task_quietly_below_urgent(rec):
+    """Sam, 2026-10-27: only urgent work pings; the rest is filed at its
+    priority and reaches the engineer in the morning list."""
     import sprint_thread
 
     out = bug_reports.act(TS, _row(), ENGINEER)
     assert out["verdict"] == "engineer"
-    # Ron's own task: OnlyG in, Sam out, still queued, no second task.
+    # Ron's own task: OnlyG in, Sam out, still queued, no second task, and a
+    # priority (the card predates the field, so normal).
     assert ("PUT", "/task/868mg8nce",
             {"assignees": {"add": [49257687],
-                           "rem": [bug_reports.SAM_CLICKUP]}}) in rec.calls
+                           "rem": [bug_reports.SAM_CLICKUP]},
+             "priority": 3}) in rec.calls
     assert not any(c[1].startswith("/list/") for c in rec.calls)
     assert ("POST", f"/task/868mg8nce/field/{bug_reports.FIELD_SOURCE}",
             {"value": bug_reports.SOURCE_SLACK}) in rec.calls
     # Ron set no Type, so it becomes Bug.
     assert ("POST", f"/task/868mg8nce/field/{bug_reports.FIELD_TYPE}",
             {"value": bug_reports.TYPE_BUG}) in rec.calls
-    # The analysis lives on ClickUp; Slack carries the short message.
+    # The analysis lives on ClickUp; nothing goes to the engineer's channel.
     assert "The old lookup returns None" in _comments(rec)
     assert "no workable fix" in _comments(rec)
-    eng = [p for p in rec.posts if p[0] == sprint_thread.ENG_BACKEND][0][2]
-    assert "app.clickup.com/t/868mg8nce" in eng
-    assert "The old lookup" not in eng
+    assert "priority normal" in _comments(rec)
+    assert not any(p[0] == sprint_thread.ENG_BACKEND for p in rec.posts)
     thread = rec.posts[-1][2]
     assert thread.startswith(
-        ":white_check_mark: Logged on ClickUp for OnlyG and sent in "
-        f"<#{sprint_thread.ENG_BACKEND}> for communication about it.")
+        ":white_check_mark: Logged on ClickUp for OnlyG, normal priority. "
+        "It will be in the morning list, no ping.")
     assert "The old lookup" not in thread
     assert rec.saved["status"] == bug_reports.ROUTED
+
+
+def test_an_urgent_report_pings_the_engineer_once(rec):
+    import sprint_thread
+
+    bug_reports.act(TS, _row(), {**ENGINEER, "priority": "urgent"})
+    put = [c for c in rec.calls if c[0] == "PUT"][0]
+    assert put[2]["priority"] == 1
+    eng = [p for p in rec.posts if p[0] == sprint_thread.ENG_BACKEND]
+    assert len(eng) == 1
+    assert eng[0][2].startswith(":rotating_light: <@U0APZ7JUHRD> New "
+                                "backend bug from #bug-reports")
+    assert "app.clickup.com/t/868mg8nce" in eng[0][2]
+    assert "The old lookup" not in eng[0][2]
+    assert rec.posts[-1][2].startswith(
+        ":white_check_mark: Logged on ClickUp for OnlyG as urgent and sent "
+        f"in <#{sprint_thread.ENG_BACKEND}>.")
+
+
+def test_a_priority_the_reporter_set_higher_is_kept(rec):
+    rec.task["priority"] = {"id": "1", "priority": "urgent"}
+    bug_reports.act(TS, _row(), ENGINEER)
+    put = [c for c in rec.calls if c[0] == "PUT"][0]
+    assert "priority" not in put[2]
 
 
 def test_routing_keeps_the_type_ron_chose(rec):
@@ -333,7 +369,8 @@ def test_auth_cookie_report_still_routes_to_an_engineer(rec):
     assert out["verdict"] == "engineer"
     assert _engineer_assigned(rec)
     assert "hosting, DNS" in _comments(rec)
-    assert any(p[0] == sprint_thread.ENG_BACKEND for p in rec.posts)
+    assert not any(p[0] == sprint_thread.ENG_BACKEND for p in rec.posts)
+    assert "Logged on ClickUp for OnlyG" in rec.posts[-1][2]
     assert "Greenlight" not in rec.posts[-1][2]
 
 
@@ -641,10 +678,14 @@ def test_a_fix_with_a_data_update_beside_it_builds_and_routes_the_rest(
                if c[1] == f"/list/{bug_reports.PRIORITY_QUEUE}/task"]
     assert len(created) == 1 and created[0][2]["assignees"] == [49257687]
     assert "one-off update" in created[0][2]["name"]
-    assert any(p[0] == sprint_thread.ENG_BACKEND for p in rec.posts)
+    # 2026-10-26: fifteen of these each pinged OnlyG. Now: no ping, and one
+    # step below the report (normal stays normal).
+    assert created[0][2]["priority"] == 3
+    assert not any(p[0] == sprint_thread.ENG_BACKEND for p in rec.posts)
     thread = rec.posts[-1][2]
     assert thread.startswith(":white_check_mark: Fixed by the agent.")
-    assert "Also logged on ClickUp for OnlyG" in thread
+    assert ("Also logged on ClickUp for OnlyG, normal priority, in the "
+            "morning list") in thread
 
 
 def test_a_hard_limit_is_a_refusal_not_a_failure(rec, monkeypatch):

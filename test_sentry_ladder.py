@@ -82,6 +82,14 @@ def world(monkeypatch):
     monkeypatch.setattr(ladder.sentry_slack, "_post",
                         lambda ch, text, thread_ts="":
                         w["posted"].append((ch, text)) or "9.9")
+    # Engineer pings go through eng_priority; no store, so unthreaded.
+    import eng_priority
+
+    monkeypatch.setattr(sprint_thread, "_post",
+                        lambda text, thread_ts="", channel="",
+                        broadcast=False:
+                        w["posted"].append((channel, text)) or "9.8")
+    monkeypatch.setattr(eng_priority.store, "ensure_table", lambda t: False)
     monkeypatch.setattr(ladder.sentry_agent_fixes, "create_task",
                         lambda *a, **k: w["tasks"].append((a, k))
                         or f"86t{len(w['tasks'])}")
@@ -159,13 +167,27 @@ def test_a_migration_goes_to_onlyg_in_priority_queue(world):
     _, kwargs = world["tasks"][0]
     assert kwargs["list_id"] == ladder.PRIORITY_QUEUE
     assert kwargs["assignees"] == [49257687]
+    # S2 is high priority: no ping, in the morning list (Sam, 2026-10-27).
+    assert world["posted"] == [] and out["pinged"] is False
+    assert world["said"][0].startswith(
+        ":white_check_mark: Sent to OnlyG (it needs a migration")
+    assert "high priority, in the morning list" in world["said"][0]
+
+
+def test_an_s1_pings_the_engineer(world):
+    out = ladder.place(_issue(severity="s1"),
+                       {**GOOD, "needs_migration": True})
+    assert out["pinged"] is True
     channel, text = world["posted"][0]
-    assert channel == "CBACKEND" and text.startswith("<@UONLYG>")
-    assert "Sent to OnlyG" in world["said"][0]
+    assert channel == "CBACKEND"
+    assert text.startswith(":rotating_light: <@UONLYG> New backend bug "
+                           "from Sentry")
+    assert "pinged" in world["said"][0]
 
 
 def test_a_frontend_issue_goes_to_sanjay(world):
-    out = ladder.place(_issue(host="github"), {**GOOD, "files": []})
+    out = ladder.place(_issue(host="github", severity="s1"),
+                       {**GOOD, "files": []})
     assert out["engineer"] == "sanjay"
     assert world["posted"][0][0] == "CFRONTEND"
 

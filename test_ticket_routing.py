@@ -12,6 +12,7 @@ it" never goes out after the engineer already shipped.
 
 import pytest
 
+import eng_priority
 import sprint_store
 import sprint_thread
 import ticket_routing as tr
@@ -138,7 +139,8 @@ def world(monkeypatch):
     def live(task_id):
         status = W.live.get(task_id) or next(
             t["status"] for t in W.linked if t["id"] == task_id)
-        return {"status": status, "shipped": status in tr.SHIPPED}
+        return {"status": status, "shipped": status in tr.SHIPPED,
+                "priority": W.priorities.get(task_id)}
 
     monkeypatch.setattr(sprint_thread, "_clickup_create",
                         lambda list_id, body: W.created.append(
@@ -146,6 +148,10 @@ def world(monkeypatch):
                                                  "url": "https://cu/86new"})
     monkeypatch.setattr(tr, "_comment",
                         lambda tid, text: W.comments.append((tid, text)))
+    monkeypatch.setattr(tr, "_set_priority",
+                        lambda tid, p: W.raised.append((tid, p)))
+    # No store: every urgent ping posts, unthreaded.
+    monkeypatch.setattr(eng_priority.store, "ensure_table", lambda t: False)
     monkeypatch.setattr(sprint_thread, "_post",
                         lambda text, thread_ts="", channel="",
                         broadcast=False: W.posts.append(
@@ -175,6 +181,7 @@ def world(monkeypatch):
     W.filed, W.zoho, W.notes, W.decided = [], [], [], []
     W.owners = []
     W.siblings, W.linked, W.live, W.search_fails = [], [], {}, False
+    W.priorities, W.raised = {}, []
     return W
 
 
@@ -184,7 +191,8 @@ def test_a_routine_bug_is_filed_quietly(world):
     assert out["routed"] is True and out["urgent"] == ""
     list_id, body = world.created[0]
     assert list_id == sprint_thread.PRIORITY_QUEUE
-    assert body["assignees"] == [49257687] and "priority" not in body
+    # Never blank (29 of OnlyG's tasks were, 2026-10-27): normal.
+    assert body["assignees"] == [49257687] and body["priority"] == 3
     assert "Filed automatically" in body["markdown_description"]
     assert world.filed[0][1]["owner"] == "onlyg"
     # Zoho stays New/Processing: the client is still owed Sam's reply.
@@ -234,14 +242,60 @@ def test_an_owner_that_is_not_the_other_team_is_left(zoho_ticket):
     assert zoho_ticket.patches == []
 
 
-def test_an_urgent_bug_reaches_the_engineer_and_sam(world):
+def test_a_very_high_account_is_high_for_the_engineer_and_urgent_for_sam(
+        world):
+    """Sam, 2026-10-27: 17 URGENT pings in eight days, most of them an
+    enterprise account alone. That is high priority, in the morning list."""
     out = tr.route(_item(), _card(), {}, {}, 7000)
-    assert "very-high" in out["urgent"]
-    assert world.created[0][1]["priority"] == 1
-    channel, text = world.posts[0]
-    assert channel == sprint_thread.ENG_BACKEND and "URGENT" in text
+    assert "very-high" in out["urgent"] and out["pinged"] is False
+    assert world.created[0][1]["priority"] == 2
+    assert world.posts == []
     assert world.alerts[0][0] == "urgent:86new"
     assert "Nothing was sent to the client" in world.alerts[0][1]
+
+
+def test_the_same_problem_on_two_accounts_pings_the_engineer(world):
+    world.siblings = [{"ticket_number": "9485",
+                       "account": "Summit Metro Parks (Pro)"}]
+    out = tr.route(_item(account="WaterFire (P)"), _card(), {},
+                   {"same_as": ["9485"]}, 500)
+    assert out["pinged"] is True
+    assert world.created[0][1]["priority"] == 1
+    channel, text = world.posts[0]
+    assert channel == sprint_thread.ENG_BACKEND
+    assert text.startswith(":rotating_light: <@U0APZ7JUHRD> URGENT backend")
+
+
+def test_joining_an_urgent_task_never_pings_again(world):
+    """868mka0f8 was pinged four times on 2026-10-20, once per ticket."""
+    world.siblings = [{"ticket_number": "9501", "account": "Sarasota (U)",
+                       "eng_task": {"id": "86old", "url": "https://cu/86old",
+                                    "owner": "onlyg"}}]
+    world.live, world.priorities = {"86old": "queued"}, {"86old": 1}
+    out = tr.route(_item(account="Summit (P)"), _card(), {},
+                   {"same_as": ["9501"]}, 0)
+    assert out["pinged"] is False and world.posts == []
+    assert world.raised == [] and world.comments[0][0] == "86old"
+
+
+def test_a_join_that_makes_the_task_urgent_raises_it_and_pings_once(world):
+    world.siblings = [{"ticket_number": "9501", "account": "Sarasota (U)",
+                       "eng_task": {"id": "86old", "url": "https://cu/86old",
+                                    "owner": "onlyg"}}]
+    world.live, world.priorities = {"86old": "queued"}, {"86old": 3}
+    out = tr.route(_item(account="Summit (P)"), _card(), {},
+                   {"same_as": ["9501"]}, 0)
+    assert world.raised == [("86old", 1)]
+    assert out["pinged"] is True and len(world.posts) == 1
+
+
+def test_a_join_raises_a_lower_priority_without_a_ping(world):
+    world.linked = [{"id": "86pq", "list": "Priority Queue",
+                     "status": "queued", "url": "https://cu/86pq"}]
+    world.priorities = {"86pq": 4}
+    out = tr.route(_item(), _card(), {}, {}, 7000)
+    assert world.raised == [("86pq", 2)]
+    assert out["pinged"] is False and world.posts == []
 
 
 def test_the_same_problem_joins_the_task_already_filed(world):

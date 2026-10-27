@@ -721,6 +721,20 @@ def test_the_alert_tags_the_owners_and_copies_sam(world):
     assert len(posts) == 2
 
 
+def test_only_critical_or_exploited_tags_anyone():
+    """2026-10-27: a single high Pillow advisory, already on OnlyG's task,
+    tagged him and Sam. Below critical the alert posts with no tags."""
+    high = dw.Row("CVE-1", CORE.slug, "Pillow", "10.4.0", "HIGH",
+                  fixed="13.0.0")
+    assert dw.alert_message([high], {}, [], {}).startswith(
+        ":rotating_light: *Dependency alert*")
+    for loud in (dw.Row("CVE-2", CORE.slug, "Pillow", "10.4.0", "CRITICAL"),
+                 dw.Row("CVE-3", CORE.slug, "Pillow", "10.4.0", "HIGH",
+                        kev=True)):
+        assert not dw.alert_message([loud], {}, [], {}).startswith(
+            ":rotating_light:")
+
+
 def test_one_owner_tags_only_that_owner(world):
     state, posts, clickup = world
     dw.run_daily_scan()

@@ -301,6 +301,26 @@ def _register_security_audit() -> None:
     )
 
 
+def _register_eng_digest() -> None:
+    """Each engineer's morning list from their Priority Queue (eng_digest).
+    Sam, 2026-10-27: only urgent work pings, so this is how everything else
+    reaches them. Weekdays, 07:05, clear of the Monday report at 07:00."""
+    from eng_digest import run_daily_digest
+
+    register_job(
+        "engineering.eng_digest",
+        run_daily_digest,
+        cron=(
+            f"{os.environ.get('ENG_DIGEST_MINUTE', '5')} "
+            f"{os.environ.get('ENG_DIGEST_HOUR', '7')} * * mon-fri"
+        ),
+        queue=QUEUE,
+        claim=CLAIM_DAILY,
+        time_limit=300,
+        description="Each engineer's morning list in their channel",
+    )
+
+
 def register_all() -> None:
     """Register everything engineering owns. Idempotent."""
     _register_sentry()
@@ -310,6 +330,7 @@ def register_all() -> None:
     _register_feature_desk()
     _register_dependency_watch()
     _register_security_audit()
+    _register_eng_digest()
 
 
 # Importing this module registers the work, which is what

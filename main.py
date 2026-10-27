@@ -310,6 +310,28 @@ _scheduler.add_job(
     coalesce=True,
     max_instances=1,
 )
+# Engineers' morning lists, weekdays 07:05. Mirrors engineering.eng_digest.
+# Only urgent work pings an engineer (eng_priority), so this is how the rest
+# of their Priority Queue reaches them; 07:05 stays clear of the Monday
+# report at 07:00.
+def _run_eng_digest():
+    from eng_digest import run_daily_digest
+
+    return run_daily_digest()
+
+
+_scheduler.add_job(
+    _run_eng_digest,
+    CronTrigger(
+        day_of_week="mon-fri",
+        hour=int(os.environ.get("ENG_DIGEST_HOUR", "7")),
+        minute=int(os.environ.get("ENG_DIGEST_MINUTE", "5")),
+        timezone="America/Montreal",
+    ),
+    misfire_grace_time=1800,
+    coalesce=True,
+    max_instances=1,
+)
 # Help centre gap pass, first Tuesday of the month at 09:00 ET.
 #
 # Monthly rather than weekly on purpose. The output is "write these five
