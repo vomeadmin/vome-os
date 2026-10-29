@@ -81,7 +81,11 @@ described only as "logged with the product team".
 - These tools never send anything to a customer on their own. A person \
 sends: send_ticket_reply runs only on Sam's explicit word, passed verbatim.
 
-Support sprint (Sam): sprint_queue lists every open ticket with the agents' \
+Support sprint (Sam): sprint_board starts a sprint: replies a client is \
+waiting on (clean ones go out with send_replies on "send all"), \
+shipped work nobody told the client about, the few drafts to read \
+first, and In Progress work to chase internally with ping_team (no \
+email); sprint_queue lists every open ticket with the agents' \
 first pass; walk_queue shows every New or Processing ticket and who has \
 it, with no agent run; ticket_states shows every In Progress ticket and \
 what its ClickUp work says (on it, fixed, shipped, stalled, fell through); \
@@ -482,6 +486,52 @@ def build() -> MCPServer:
     # the same guarded paths as the sprint thread. Writes are Sam only.
 
     import sprint_tools
+
+    @server.tool(annotations=READ)
+    async def sprint_board() -> dict:
+        """Start a sprint here. Who is waiting on whom: replies a client is
+        waiting on (send: clean drafts for "send all"), shipped work nobody
+        told the client about (tell_them_done), the few drafts to read
+        first (check, with why), decisions, In Progress work to chase with
+        no email (internal), and tickets to close quietly. Old In Progress
+        tickets where we wrote last, or the client has been quiet for
+        weeks, are internal, never a reply."""
+        return await _run("sprint_board", sprint_tools.sprint_board)
+
+    @server.tool(annotations=ToolAnnotations(
+        read_only_hint=False, destructive_hint=True, idempotent_hint=False,
+        open_world_hint=True))
+    async def send_replies(
+        tickets: Annotated[str, Field(
+            description="Ticket numbers to send, e.g. '9678 9723 9745'. "
+            "For Sam's 'send all': every ticket under send and "
+            "tell_them_done on the board, minus any he names")],
+        sam_said: Annotated[str, Field(
+            description="Sam's own words approving the sends, verbatim")],
+        checked: Annotated[str, Field(
+            description="Tickets from the board's check list that Sam "
+            "named himself to go as drafted. A flagged draft not listed "
+            "here is refused")] = "",
+    ) -> dict:
+        """Email several customers their drafts exactly as shown (Sam only,
+        on his explicit word). Each runs the same guarded send as
+        send_ticket_reply. For an edited reply use send_ticket_reply."""
+        return await _run("send_replies", sprint_tools.send_replies,
+                          tickets=tickets, sam_said=sam_said,
+                          checked=checked, caller=caller())
+
+    @server.tool(annotations=WRITE)
+    async def ping_team(
+        tickets: Annotated[str, Field(
+            description="Ticket numbers from the board's internal list")],
+        note: Annotated[str, Field(
+            description="Optional line from Sam for the engineer")] = "",
+    ) -> dict:
+        """Ask the engineer where a ticket stands (Sam only): a comment on
+        its ClickUp task that notifies the assignee. Never emails the
+        client and leaves Zoho alone."""
+        return await _run("ping_team", sprint_tools.ping_team,
+                          tickets=tickets, note=note, caller=caller())
 
     @server.tool(annotations=READ)
     async def sprint_queue(

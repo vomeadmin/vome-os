@@ -16,9 +16,9 @@ sentences for an acknowledgment, and fewer is better.
   earlier message"). Move forward. If a correction is
   owed, at most: "Apologies for that. Our team is going to review this once
   again and see what more we can find."
-- Ask the smallest question that unblocks the work ("did he reserve it himself
-  or was it done by an admin"). Never ask app versus website unless it
-  changes what we do.
+- Ask only what our team cannot look up (which users, profiles or records
+  are affected is ours to find), and the smallest question that unblocks
+  the work. Never ask app versus website.
 - No filler.
 
 ## The rules that are never bent

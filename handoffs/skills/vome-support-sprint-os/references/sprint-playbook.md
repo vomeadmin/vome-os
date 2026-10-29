@@ -50,15 +50,24 @@ Work starts when a ticket arrives, not when Sam runs a sprint. A bug the agent c
 
 ## Running a sprint (agent path)
 
-The tickets have already been triaged and, where it applies, routed or fixed. The sprint tells clients what is already happening. Do not re-triage a ticket to learn its status: `engineer` and `agent_fix` are read live, and each re-triage costs about 0.50 USD. Never pass `refresh` to `ticket_first_pass` unless Sam asks.
+The tickets have already been triaged and, where it applies, routed or fixed. The sprint tells clients what is already happening. Do not re-triage a ticket to learn its status: `engineer` and `agent_fix` are read live, and each re-triage costs about $0.50. Never pass `refresh` to `ticket_first_pass` unless Sam asks.
 
-1. **Follow-ups first** (`sprint_followups`): resolution drafts a guard held, PRs waiting on Sam's merge, fixes waiting on production, failed release checks, with who moves next.
-2. **Count the queue** (`sprint_queue`) in one line: ready to send, fix first, needs decision, close quietly, nothing owed, held, untriaged.
-3. **Batches of up to 25.** Important clients first (Enterprise, Ultimate, or Combined ARR over 1,500 CAD), then longest waiting. Group one account's tickets together, and tickets joined to the same engineer task together.
-4. **One card per ticket:** ticket number, account, IMPORTANT flag, time waiting; the live question and two or three lines of situation; who has it (`engineer` with its live status, or `agent_fix`); the agents' first pass (lane, verdict and finding, recommendation); the reply in full exactly as the customer will get it, with To and Cc, never summarised; the one decision needed.
-5. **Sam's short commands** ("send 1 to 6", "edit 4: ...", "log 9", "close 12"). Act on exactly what he named and report each result in one line.
-6. **Walk the queue** when Sam asks: `walk_queue`, section by section, urgent first, one line per ticket (who has it and why, what reply it still needs). Ask Sam to confirm or correct each section. A correction that applies beyond one ticket is a lesson (`teach_agents`, in his words). Then `route_queue` for what he confirmed. Tickets under `old_card` were triaged before lanes existed: offer to re-run only those with `ticket_first_pass` and `refresh` (about 0.40 USD each), on Sam's yes.
-7. **Before wrapping up,** `sprint_queue` again (no re-triage), since client replies often land minutes after the sends.
+Since Oct 29 a sprint starts from `sprint_board`, not `sprint_queue` (Sam: most of a 64-card sprint needed no email, and the agents are right 95 to 99 percent of the time). The board sorts by who is waiting on whom:
+
+- **send:** a client is waiting and the draft is clean. These go out together on Sam's "send all" (`send_replies`).
+- **tell_them_done:** the work shipped or is live and the client was never told. The draft is the resolution. Also on "send all".
+- **check:** the few drafts to read first, each with its flags (asks the client for something we could look up, says fixed when the fix is not live, an earlier reply promised something, the client waited 21+ days for a first reply, a held resolution, low confidence). Only Sam naming one sends it.
+- **decide:** feature requests, design questions, data or billing.
+- **internal:** In Progress tickets where we wrote last, or the client has been quiet for 21+ days, plus stalled, unassigned, closed-without-fix and task-less ones from the nightly reconcile. No client email. `ping_team` comments on the task and notifies its engineer.
+- **close_quietly:** thank-yous and out-of-office replies.
+
+1. **Board first** (`sprint_board`): counts in one line, then the pipeline (PRs waiting on Sam's merge, fixes waiting on production, failed release checks) one line each.
+2. **send and tell_them_done as compact cards:** the header exactly, the links line, one line of situation, the draft in full with To and Cc. No per-card analysis: these are clean. Then one line: "Send all N?"
+3. **check, one card each:** the flags, the draft, and a corrected version when a flag is about the wording.
+4. **decide, internal, close_quietly:** one line each with the decision or `next` step.
+5. **Sam's short commands:** "send all" (or "send all except 9602 9723"), "send 9602" for a checked one, "edit 9602: ...", "ping 9188 9426", "close 9678", "log 9659". Act on exactly what he named and report each result in one line.
+6. **Walk the queue** when Sam asks: `walk_queue`, section by section, urgent first, one line per ticket (who has it and why, what reply it still needs). Ask Sam to confirm or correct each section. A correction that applies beyond one ticket is a lesson (`teach_agents`, in his words). Then `route_queue` for what he confirmed. Tickets under `old_card` were triaged before lanes existed: offer to re-run only those with `ticket_first_pass` and `refresh` (about $0.40 each), on Sam's yes.
+7. **Before wrapping up,** `sprint_board` again (no re-triage), since client replies often land minutes after the sends.
 
 ## Decisions by what the card shows
 
@@ -72,7 +81,7 @@ The tickets have already been triaged and, where it applies, routed or fixed. Th
 | `works_as_designed` | How-to answer from the help centre and UI text, exact page and button names, article link. If the answer came from code with no article, say so and offer `run_faq` |
 | Raw error report, chunk-load error, page crash | Agent hotfix, `close_ticket_quietly`, no reply. If the agent cannot fix it, route to Sanjay silently |
 | Housekeeping ("thanks, it works", out-of-office, an error the code already handles) | `close_ticket_quietly`, no reply |
-| Feature request | Always Sam's to log: `log_ticket_request` (posts to #vome-feature-requests). Sam decides log, build (Sam Accepted, Build Now) or no. Never logged automatically. Nothing promised before that |
+| Feature request | Always Sam's to log: `log_ticket_request` (posts to #vome-feature-requests). Sam decides build now (`build=true`, Sam Accepted, assigned to him, high priority), for later (no `build`, Raw Intake) or no; if unclear, ask "Build now or log for later?". Never logged automatically. Nothing promised before that; the reply says "added to our team review" |
 | Data, billing, account operations (lookups under another email, merges, data fixes, contracts) | Flag for Sam, who handles it in Zoho. No action |
 | Notification delay | Draft a Slack DM to OnlyG to check the endpoint logs and the Celery queue, rather than a bug task |
 

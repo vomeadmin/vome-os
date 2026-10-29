@@ -19,9 +19,10 @@ route path, the same close-the-loop and the same learning.
 
 THE TOOLS (registered in mcp_connector/server.py)
 -------------------------------------------------
-Read:   sprint_queue, ticket_first_pass, fix_status, sprint_followups
-Sam:    propose_fix, send_ticket_reply, route_ticket, close_ticket_quietly,
-        log_ticket_request
+Read:   sprint_board (start here), sprint_queue, ticket_first_pass,
+        fix_status, sprint_followups
+Sam:    propose_fix, send_ticket_reply, send_replies, ping_team,
+        route_ticket, close_ticket_quietly, log_ticket_request
 
 Anything that writes is refused for anyone but Sam (config.can_triage).
 A reply goes out only through send_ticket_reply, which re-checks the draft
@@ -32,6 +33,7 @@ asks him to approve each call (destructive annotation).
 
 from __future__ import annotations
 
+import os
 import re
 
 import sprint_store
@@ -531,27 +533,9 @@ def sprint_followups() -> dict:
     # Sam may have answered or closed it in Zoho since it was drafted.
     sprint_batch.sync_handled_elsewhere(owed, set())
     owed = [i for i in owed if i.get("status") in sprint_store.CARRIES]
-    prs = store.query(
-        "SELECT tf.ticket_number, tf.pr_url, tf.attempted_at FROM"
-        " vomeos_ticket_fixes tf WHERE tf.outcome = 'pr_opened' AND NOT"
-        " EXISTS (SELECT 1 FROM vomeos_release_fixes rf"
-        " WHERE rf.task_id = tf.parent_task) ORDER BY tf.attempted_at")
-    fixes = store.query(
-        "SELECT task_id, name, fix_commit, state, last_checked_at FROM"
-        " vomeos_release_fixes WHERE state <> 'live' ORDER BY task_id")
-    waiting = [dict(f) for f in fixes if f.get("state") == "waiting"]
-    problems = [dict(f) for f in fixes if f.get("state") in ("failed",
-                                                             "unknown")]
-    for f in waiting:
-        f["next"] = _production_owner(str(f.get("fix_commit") or ""))
     return {
         "replies_owed_for_shipped_work": [view(i) for i in owed],
-        "agent_prs_waiting_on_sams_merge": [
-            {k: str(v) for k, v in r.items()} for r in prs],
-        "merged_waiting_on_production": [
-            {k: str(v) for k, v in f.items()} for f in waiting],
-        "release_checks_failed": [
-            {k: str(v) for k, v in f.items()} for f in problems],
+        **_pipeline(),
         "how_to_use_this": (
             "Show replies_owed in full and send on Sam's word. PRs: Sam "
             "merges into the dev branch. Production: Sam deploys web, OnlyG "
@@ -913,3 +897,458 @@ def route_queue(caller: str, tickets: str = "") -> dict:
             "note": ("Nothing was sent to any client and Zoho statuses did "
                      "not change. Each still needs Sam's acknowledgment from "
                      "the sprint.")}
+
+
+# ---------------------------------------------------------------------------
+# The board: who is waiting on whom
+# ---------------------------------------------------------------------------
+#
+# Sam, 2026-10-29, after a 64-card sprint: much of it needed no email. In
+# Progress tickets the reconciler re-triaged came back as "thanks for your
+# patience" drafts to clients who last wrote 37 to 105 days ago, while work
+# that shipped with nobody telling the client sat in ClickUp. The sprint is
+# the tickets a client is waiting on, sent with one word; good news nobody
+# delivered is its own list; and work our team should be chased on is
+# internal, never an email. The agents are right most of the time, so the
+# board names only the few drafts Sam should read before they go.
+
+STALE_DAYS = int(os.environ.get("SPRINT_STALE_DAYS", "21"))
+DONE_STATES = ("fix_live", "shipped")
+# Reconcile states where the next move is ours, not the client's.
+INTERNAL_STATES = ("engineer_stalled", "unassigned", "task_closed",
+                   "no_task")
+BOARD_LANES = ("send", "tell_them_done", "check", "decide", "internal",
+               "close_quietly")
+COUNTED = ("agent_fixing", "held", "waiting_on_client")
+MAX_SEND = 40
+
+# A draft that asks the admin to do something before we can move.
+_ASKS = re.compile(
+    r"\?|\b(could|can|would) you\b|\bplease (send|share|provide|confirm|"
+    r"let us know (which|who|what|whether|if))\b|\bscreenshot\b", re.I)
+# A draft that tells the client the problem is gone.
+_FIXED = re.compile(
+    r"\b(is|are|been|now) (fixed|resolved|live)\b|\bhas been updated\b|"
+    r"\bupdate (is|has been|was) (deployed|released|live)\b|"
+    r"\b(corrig|r[ée]solu|d[ée]ploy[ée])", re.I)
+
+NEXT_STEP = {
+    "engineer_stalled": "ping_team: nobody touched the task in 14+ days",
+    "engineer_active": "nothing: our team is on it (ping_team for news)",
+    "unassigned": "route_ticket: the task has nobody on it",
+    "task_closed": ("read the task: closed without on prod. Close the "
+                    "ticket quietly, or reopen the task"),
+    "no_task": "route_ticket, or close it quietly if nothing is left",
+    "fix_on_dev": "nothing: the agent fix waits on production",
+}
+
+
+def _numbers(text: str) -> list[str]:
+    seen: list[str] = []
+    for part in (text or "").replace(",", " ").split():
+        value = part.strip().lstrip("#")
+        if value and value not in seen:
+            seen.append(value)
+    return seen
+
+
+def _days_since(moment) -> int | None:
+    import sprint_batch
+
+    when = sprint_batch._parse_time(moment)
+    if when is None:
+        return None
+    return int((sprint_batch._now() - when).total_seconds() // 86400)
+
+
+def _reconcile_rows() -> dict[str, dict]:
+    """Ticket id -> its nightly reconcile record, {} when the table is
+    missing (the board then works from the sprint items alone)."""
+    import ticket_reconciler
+
+    try:
+        rows = store.query(f"SELECT * FROM {ticket_reconciler.TABLE}")
+    except Exception as exc:
+        print(f"[BOARD] reconcile table unreadable: {exc}")
+        return {}
+    return {str(r["ticket_id"]): dict(r) for r in rows}
+
+
+def _resolutions() -> dict[str, dict]:
+    """Ticket id -> the newest resolution still waiting on Sam."""
+    rows = store.query(
+        "SELECT ticket_id, outcome, detail, created_at FROM"
+        " vomeos_release_resolutions WHERE outcome IN"
+        " ('drafted', 'held', 'no_draft') ORDER BY created_at")
+    return {str(r["ticket_id"]): dict(r) for r in rows}
+
+
+def _assess(item: dict, rec: dict, resolutions: dict,
+            engineer: dict | None = None) -> tuple[bool, list[str]]:
+    """(shipped, flags) for one item. shipped: the work behind it is live
+    or on prod, so the reply owed is a resolution. flags: why Sam should
+    read the draft before it goes; a draft with none is sent on "send
+    all". The board and send_replies both judge by this, so what the board
+    calls clean is exactly what a bulk send lets through."""
+    import sprint_batch
+
+    card = item.get("card") or {}
+    resolution = resolutions.get(str(item.get("ticket_id"))) or {}
+    if engineer is None:
+        engineer = _engineer(item)
+    shipped = bool(resolution or rec.get("state") in DONE_STATES
+                   or (engineer or {}).get("shipped"))
+    body = (item.get("draft") or "").split("Sam | Vome team")[0]
+    flags = []
+    if shipped:
+        if resolution.get("outcome") == "held":
+            flags.append("the release watcher held this resolution: "
+                         + str(resolution.get("detail") or "")[:200])
+        if body.strip() and not _FIXED.search(body):
+            flags.append("the work shipped but this draft is not a "
+                         "resolution: ticket_first_pass(refresh=true) "
+                         "writes one")
+    else:
+        if _FIXED.search(body):
+            flags.append("says it is fixed or live: send only if every "
+                         "problem in the ticket shipped")
+        if card.get("blocking_claims"):
+            flags.append("an earlier reply told them: "
+                         + str(card["blocking_claims"])[:200])
+        days = _days_since(sprint_batch.waiting_since(item))
+        if days is not None and days > STALE_DAYS:
+            flags.append(f"the client has waited {days} days")
+    if _ASKS.search(body):
+        flags.append("asks the client for something: send only if our "
+                     "team cannot look it up")
+    if card.get("confidence") == "low":
+        flags.append("the first pass is low confidence")
+    return shipped, flags
+
+
+def _client_waiting(ticket_id: str) -> bool:
+    """The customer's newest message has no answer after it. Unreadable
+    Zoho counts as waiting, so a ticket is never dropped on a hiccup."""
+    import sprint_batch
+
+    try:
+        return not sprint_batch.answered_in_zoho(ticket_id)
+    except Exception:
+        return True
+
+
+def _card(v: dict, flags: list[str], kind: str) -> dict:
+    """What Sam reads for one reply: who, what, the draft in full."""
+    keep = ("item", "ticket", "header", "links", "live_question",
+            "situation", "recipients", "draft", "engineer", "agent_fix")
+    out = {k: v.get(k) for k in keep if v.get(k)}
+    out["kind"] = kind
+    if flags:
+        out["flags"] = flags
+    return out
+
+
+def _internal(v: dict, item: dict, rec: dict) -> dict:
+    import sprint_batch
+
+    engineer = v.get("engineer") or {}
+    state = rec.get("state") or (
+        "fix_on_dev" if item.get("fix_pr") else
+        "engineer_active" if engineer.get("task") else "no_task")
+    return {"ticket": v.get("ticket"), "header": v.get("header"),
+            "links": v.get("links"),
+            "client_last_wrote_days_ago": _days_since(
+                sprint_batch.waiting_since(item)),
+            "state": state,
+            "task_updated": rec.get("task_updated") or "",
+            "assigned": rec.get("task_assignees")
+            or engineer.get("owner") or "",
+            "last_pinged": str(rec.get("nudged_at") or "")[:10],
+            "next": NEXT_STEP.get(state, "")}
+
+
+def _place(item: dict, open_ids: set, rec: dict,
+           resolutions: dict) -> tuple[str, dict]:
+    """(lane, line) for one sprint item."""
+    import sprint_batch
+
+    section = sprint_batch.section(item)
+    if section == sprint_batch.IN_FLIGHT:
+        return "agent_fixing", {}
+    if section == sprint_batch.HELD:
+        return "held", {}
+    if section == sprint_batch.OWED_NOTHING:
+        return "waiting_on_client", {}
+    v = view(item)
+    if section == sprint_batch.QUIET:
+        return "close_quietly", {
+            "ticket": v["ticket"], "header": v["header"],
+            "why": v.get("live_question") or v.get("situation") or ""}
+    tid = str(item.get("ticket_id"))
+    shipped, flags = _assess(item, rec, resolutions, v.get("engineer"))
+    has_draft = (item.get("draft_status") == "ok"
+                 and (item.get("recipients") or {}).get("to"))
+    if shipped:
+        if section == sprint_batch.FIX:
+            flags = [sprint_batch._fix_reason(item) or "the draft is held"] \
+                + flags
+        elif not has_draft:
+            flags = flags + ["no resolution draft yet: "
+                             "ticket_first_pass(refresh=true) writes one"]
+        return ("check" if flags else "tell_them_done"), _card(
+            v, flags, "done")
+    # Answered before (Zoho moved past New or Processing) and either we
+    # wrote last or the client went quiet long ago: nothing to email.
+    if tid not in open_ids:
+        days = _days_since(sprint_batch.waiting_since(item))
+        if (not _client_waiting(tid)
+                or (days is not None and days > STALE_DAYS)):
+            return "internal", _internal(v, item, rec)
+    if section == sprint_batch.DECIDE:
+        line = _card(v, flags, "reply")
+        line["why_yours"] = (v.get("why_human")
+                             or v.get("recommended_action") or "")
+        line["code_check"] = v.get("code_check") or {}
+        return "decide", line
+    if section == sprint_batch.FIX:
+        flags = [sprint_batch._fix_reason(item) or "the draft is held"] \
+            + flags
+    return ("check" if flags else "send"), _card(v, flags, "reply")
+
+
+def _untold(rec: dict) -> bool:
+    """A shipped In Progress ticket we have not written to since its task
+    last changed."""
+    import sprint_batch
+
+    try:
+        return not sprint_batch.answered_in_zoho(
+            rec["ticket_id"],
+            sprint_batch._parse_time(rec.get("task_updated")))
+    except Exception:
+        return False
+
+
+def _pipeline() -> dict:
+    """PRs waiting on Sam's merge, fixes waiting on production, release
+    checks that failed."""
+    prs = store.query(
+        "SELECT tf.ticket_number, tf.pr_url, tf.attempted_at FROM"
+        " vomeos_ticket_fixes tf WHERE tf.outcome = 'pr_opened' AND NOT"
+        " EXISTS (SELECT 1 FROM vomeos_release_fixes rf"
+        " WHERE rf.task_id = tf.parent_task) ORDER BY tf.attempted_at")
+    fixes = store.query(
+        "SELECT task_id, name, fix_commit, state, last_checked_at FROM"
+        " vomeos_release_fixes WHERE state <> 'live' ORDER BY task_id")
+    waiting = [dict(f) for f in fixes if f.get("state") == "waiting"]
+    problems = [dict(f) for f in fixes if f.get("state") in ("failed",
+                                                             "unknown")]
+    for f in waiting:
+        f["next"] = _production_owner(str(f.get("fix_commit") or ""))
+    return {
+        "agent_prs_waiting_on_sams_merge": [
+            {k: str(v) for k, v in r.items()} for r in prs],
+        "merged_waiting_on_production": [
+            {k: str(v) for k, v in f.items()} for f in waiting],
+        "release_checks_failed": [
+            {k: str(v) for k, v in f.items()} for f in problems],
+    }
+
+
+def sprint_board() -> dict:
+    """The sprint as Sam works it: replies a client is waiting on (clean
+    ones go on "send all"), shipped work nobody told the client about, the
+    few drafts to read first, decisions, and work to chase internally with
+    no email. Reads only, except finishing items answered or closed by
+    hand in Zoho (as sprint_queue does)."""
+    import sprint_batch
+
+    if not sprint_store.ready():
+        _refuse("the sprint database is not reachable")
+    try:
+        tickets = sprint_batch._queue()
+    except Exception as exc:
+        _refuse(f"the Zoho queue could not be read ({exc}); that is not "
+                "the same as an empty queue")
+    open_ids = {str(t.get("id")) for t in tickets}
+    items = sprint_store.working_set()
+    sprint_batch.sync_handled_elsewhere(items, open_ids)
+    items = [i for i in items if i.get("status") in sprint_store.CARRIES]
+    reconcile = _reconcile_rows()
+    resolutions = _resolutions()
+    lanes: dict[str, list] = {name: [] for name in BOARD_LANES}
+    counted = {name: 0 for name in COUNTED}
+    seen = set()
+    for item in sorted(items, key=sprint_batch._priority):
+        tid = str(item.get("ticket_id"))
+        seen.add(tid)
+        lane, line = _place(item, open_ids, reconcile.get(tid) or {},
+                            resolutions)
+        if lane in counted:
+            counted[lane] += 1
+        else:
+            lanes[lane].append(line)
+    # In Progress tickets with no sprint item: shipped and never told, or
+    # stuck on our side. One line each, from the nightly reconcile.
+    for tid, rec in reconcile.items():
+        if tid in seen:
+            continue
+        line = {"ticket": f"#{rec.get('ticket_number')}",
+                "subject": rec.get("subject") or "",
+                "client_last_wrote": rec.get("last_customer_at") or "",
+                "task": (f"https://app.clickup.com/t/{rec['task_id']}"
+                         if rec.get("task_id") else ""),
+                "task_status": rec.get("task_status") or "",
+                "assigned": rec.get("task_assignees") or "",
+                "state": rec.get("state")}
+        if rec.get("state") in DONE_STATES and _untold(rec):
+            lanes["check"].append({
+                **line, "kind": "done",
+                "flags": ["shipped and the client was never told; no "
+                          "draft yet: ticket_first_pass(refresh=true) "
+                          "writes the resolution"]})
+        elif rec.get("state") in INTERNAL_STATES:
+            lanes["internal"].append({
+                **line, "last_pinged": str(rec.get("nudged_at") or "")[:10],
+                "next": NEXT_STEP.get(rec.get("state"), "")})
+    known = {str(r["ticket_id"]) for r in store.query(
+        f"SELECT ticket_id FROM {sprint_store.ITEMS} WHERE ticket_id ="
+        " ANY(:ids)", {"ids": list(open_ids)})}
+    untriaged = [t for t in tickets if str(t.get("id")) not in known]
+    return {
+        "counts": {**{k: len(v) for k, v in lanes.items()}, **counted,
+                   "untriaged": len(untriaged)},
+        **lanes,
+        "not_listed": counted,
+        "untriaged": [{"ticket": f"#{t.get('ticketNumber')}",
+                       "subject": t.get("subject") or ""}
+                      for t in untriaged],
+        "pipeline": _pipeline(),
+        "how_to_use_this": (
+            "Open with counts in one line and the pipeline in one line "
+            "each. send and tell_them_done are clean: show each as a "
+            "compact card (header exactly, links, one line on the "
+            "situation, then the draft in full with To and Cc) and send "
+            "them all on Sam's 'send all' with send_replies, minus any he "
+            "names. check is the few to read first: show each flag, the "
+            "draft, and a corrected version when the flag is about the "
+            "wording; they go only when Sam names them (send_replies "
+            "`checked`, or send_ticket_reply with his edit). decide needs "
+            "his call (feature, design question, data or billing). "
+            "internal never gets an email: one line each with `next`; on "
+            "Sam's word, ping_team comments on the task and notifies its "
+            "assignee. close_quietly: one line each, close_ticket_quietly "
+            "on his word. not_listed are counts only (the agent is "
+            "fixing, held until a date, waiting on the client). A flag "
+            "Sam overrules more than once is a lesson: ask him for the "
+            "rule and use teach_agents."),
+    }
+
+
+def send_replies(tickets: str, sam_said: str, caller: str,
+                 checked: str = "") -> dict:
+    """Send several drafts as they stand (Sam only): the board's "send
+    all". Each goes through the one guarded send path. A draft the board
+    flags is refused unless Sam named it in `checked`, so "send all" can
+    never sweep in one he was meant to read."""
+    _sam_only(caller, "send replies")
+    if not _SEND_WORD.search(sam_said or ""):
+        _refuse("pass Sam's own words in sam_said; they must ask to send "
+                "(send, approve, go ahead)")
+    wanted = _numbers(tickets)
+    if not wanted:
+        _refuse("name the tickets to send, e.g. '9678 9723'")
+    if len(wanted) > MAX_SEND:
+        _refuse(f"at most {MAX_SEND} at a time")
+    import sprint_thread
+
+    cleared = set(_numbers(checked))
+    reconcile = _reconcile_rows()
+    resolutions = _resolutions()
+    results = []
+    for number in wanted:
+        try:
+            ticket_id, item = find(number)
+        except Exception as exc:
+            results.append({"ticket": f"#{number}", "sent": False,
+                            "result": f"not sent: {exc}"})
+            continue
+        if not item:
+            results.append({"ticket": f"#{number}", "sent": False,
+                            "result": "not sent: no draft for this ticket"})
+            continue
+        _, flags = _assess(item, reconcile.get(ticket_id) or {},
+                           resolutions)
+        if flags and number not in cleared:
+            results.append({"ticket": f"#{number}", "sent": False,
+                            "result": "not sent, Sam has not cleared its "
+                                      "flags: " + "; ".join(flags)})
+            continue
+        try:
+            result = sprint_thread._send(item)
+        except Exception as exc:
+            result = f"not sent: {type(exc).__name__}: {exc}"
+        results.append({"ticket": f"#{number}",
+                        "sent": " sent to " in result, "result": result})
+    sent = sum(1 for r in results if r["sent"])
+    return {"sent": sent, "not_sent": len(results) - sent,
+            "results": results}
+
+
+def ping_team(tickets: str, caller: str, note: str = "") -> dict:
+    """Ask the engineer where a ticket stands (Sam only): a comment on its
+    ClickUp task, which notifies the assignee. Never emails the client."""
+    _sam_only(caller, "ping the team")
+    wanted = _numbers(tickets)
+    if not wanted:
+        _refuse("name the tickets to ping about, e.g. '9188 9426'")
+    import httpx
+
+    import ticket_reconciler
+
+    reconcile = _reconcile_rows()
+    by_number = {str(r.get("ticket_number")): r for r in reconcile.values()}
+    results = []
+    for number in wanted:
+        rec = by_number.get(number) or {}
+        task_id = rec.get("task_id") or ""
+        account = ""
+        if not task_id:
+            try:
+                _, item = find(number)
+            except Exception:
+                item = {}
+            task_id = ((item or {}).get("eng_task") or {}).get("id") or ""
+            account = ((item or {}).get("account") or "").split("(")[0]
+        if not task_id:
+            results.append({"ticket": f"#{number}", "pinged": False,
+                            "result": "no engineer task: route_ticket it, "
+                                      "or close it quietly"})
+            continue
+        last = rec.get("last_customer_at") or "unknown"
+        who = f" ({account.strip()})" if account.strip() else ""
+        text = (f"Zoho #{number}{who}: the client last wrote on {last} "
+                "and is still waiting "
+                "on us. Where does this stand? If it shipped, move it to on "
+                "prod and the client is told automatically. If you need "
+                "something from the client, set needs client info."
+                + (f"\n\nSam: {note.strip()}" if note.strip() else "")
+                + "\n\n_Sam, via the support sprint_")
+        try:
+            httpx.post(f"{ticket_reconciler.CLICKUP}/task/{task_id}/comment",
+                       headers=ticket_reconciler._headers(),
+                       json={"comment_text": text, "notify_all": True},
+                       timeout=20).raise_for_status()
+        except Exception as exc:
+            results.append({"ticket": f"#{number}", "pinged": False,
+                            "result": f"ClickUp refused the comment: {exc}"})
+            continue
+        if rec:
+            store.execute(
+                f"UPDATE {ticket_reconciler.TABLE} SET nudged_at = NOW()"
+                " WHERE ticket_id = :t", {"t": rec["ticket_id"]})
+        results.append({"ticket": f"#{number}", "pinged": True,
+                        "result": f"commented on https://app.clickup.com/t/"
+                                  f"{task_id}"})
+    return {"results": results,
+            "note": "Nothing was sent to any client."}

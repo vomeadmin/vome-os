@@ -599,3 +599,200 @@ def test_links_line_never_says_none_when_clickup_was_not_read(monkeypatch):
     assert "could not be searched" in view["links"]
     _clickup(monkeypatch)
     assert sprint_tools.view(_item())["links"].endswith("| no ClickUp task")
+
+
+# ---------------------------------------------------------------------------
+# The board (Sam, 2026-10-29): replies owed, good news untold, internal
+# ---------------------------------------------------------------------------
+
+OLD = "2026-08-01T10:00:00Z"
+ASKS = ("Hi Ana,\n\nCould you send us the name of one user it fails "
+        "for?\n\nSam | Vome team\nsupport.vomevolunteer.com")
+FIXED = ("Hi Ana,\n\nThe export has been updated and is now live.\n\n"
+         "Sam | Vome team\nsupport.vomevolunteer.com")
+
+
+@pytest.fixture
+def board(monkeypatch, zoho):
+    """The board over a list of items: tickets in `open` are New or
+    Processing, everything else In Progress. No reconcile, no
+    resolutions, no pipeline unless a test sets them."""
+    state = {"items": [], "open": set(), "reconcile": {}, "resolutions": {}}
+    _clickup(monkeypatch)
+    monkeypatch.setattr(sprint_store, "ready", lambda: True)
+    monkeypatch.setattr(sprint_store, "working_set",
+                        lambda: list(state["items"]))
+    monkeypatch.setattr(sprint_batch, "_queue", lambda pages=None: [
+        {"id": t, "ticketNumber": t[-4:]} for t in state["open"]])
+    monkeypatch.setattr(sprint_batch, "_pending_resolutions", lambda: {
+        t: NOW for t in state["resolutions"]})
+    monkeypatch.setattr(sprint_batch, "_now", lambda: NOW)
+    monkeypatch.setattr(store, "query", lambda *a, **k: [
+        {"ticket_id": i["ticket_id"]} for i in state["items"]])
+    monkeypatch.setattr(sprint_tools, "_reconcile_rows",
+                        lambda: state["reconcile"])
+    monkeypatch.setattr(sprint_tools, "_resolutions",
+                        lambda: state["resolutions"])
+    monkeypatch.setattr(sprint_tools, "_pipeline", lambda: {})
+    return state
+
+
+def _lanes(out):
+    return {lane: [line["ticket"] for line in out[lane]]
+            for lane in sprint_tools.BOARD_LANES}
+
+
+def test_board_sends_clean_drafts_and_checks_the_few(board):
+    board["items"] = [_item(1), _item(2, draft=ASKS),
+                      _item(3, draft=FIXED)]
+    board["open"] = {"56940001", "56940002", "56940003"}
+    out = sprint_tools.sprint_board()
+    lanes = _lanes(out)
+    assert lanes["send"] == ["#9601"]
+    assert sorted(lanes["check"]) == ["#9602", "#9603"]
+    flags = {line["ticket"]: line["flags"] for line in out["check"]}
+    assert "asks the client" in flags["#9602"][0]
+    assert "says it is fixed" in flags["#9603"][0]
+    assert out["send"][0]["draft"] == DRAFT
+
+
+def test_in_progress_where_we_wrote_last_is_internal_never_a_reply(
+        board, zoho):
+    """#9247 on Oct 29: our Oct 16 reply was the latest message, and the
+    sprint still offered her another holding reply."""
+    item = _item(4, card={"live_question": "q", "lane": "engineer",
+                          "reconciled": True},
+                 eng_task={"id": "86eng0004",
+                           "url": "https://app.clickup.com/t/86eng0004",
+                           "owner": "sanjay"})
+    board["items"] = [item]
+    zoho.status["56940004"] = "In Progress"
+    zoho.threads["56940004"] = ({"createdTime": "2026-10-10T10:00:00Z"},
+                                {"createdTime": "2026-10-16T10:00:00Z"})
+    out = sprint_tools.sprint_board()
+    assert _lanes(out)["internal"] == ["#9604"]
+    assert "draft" not in out["internal"][0]
+    assert out["counts"]["send"] == 0
+
+
+def test_a_client_quiet_for_weeks_is_internal_not_a_reply(board, zoho):
+    """#8247: the client last wrote Aug 17. A 'thanks for your patience'
+    73 days later is noise; the team gets pinged instead."""
+    item = _item(5, card={"live_question": "q", "lane": "engineer",
+                          "reconciled": True},
+                 recipients={"to": "b@d.org", "cc": [], "first_name": "B",
+                             "received_at": OLD})
+    board["items"] = [item]
+    zoho.status["56940005"] = "In Progress"
+    out = sprint_tools.sprint_board()
+    assert _lanes(out)["internal"] == ["#9605"]
+    assert out["internal"][0]["next"].startswith("route_ticket")
+
+
+def test_a_never_answered_new_ticket_stays_a_reply_however_old(board):
+    board["items"] = [_item(6, recipients={
+        "to": "c@d.org", "cc": [], "first_name": "C", "received_at": OLD})]
+    board["open"] = {"56940006"}
+    out = sprint_tools.sprint_board()
+    assert _lanes(out)["check"] == ["#9606"]
+    assert "waited" in out["check"][0]["flags"][0]
+
+
+def test_shipped_work_with_a_resolution_is_good_news_to_send(board, zoho):
+    board["items"] = [_item(7, draft=FIXED), _item(8, draft=FIXED)]
+    board["resolutions"] = {
+        "56940007": {"outcome": "drafted"},
+        "56940008": {"outcome": "held",
+                     "detail": "the copy link button is not fixed yet"}}
+    zoho.status.update({"56940007": "In Progress",
+                        "56940008": "In Progress"})
+    out = sprint_tools.sprint_board()
+    lanes = _lanes(out)
+    assert lanes["tell_them_done"] == ["#9607"]
+    assert lanes["check"] == ["#9608"]
+    assert "held" in out["check"][0]["flags"][0]
+
+
+def test_an_old_ack_on_shipped_work_is_not_sent_as_news(board):
+    board["items"] = [_item(9)]
+    board["reconcile"] = {"56940009": {"state": "shipped"}}
+    board["open"] = {"56940009"}
+    out = sprint_tools.sprint_board()
+    assert _lanes(out)["check"] == ["#9609"]
+    assert "not a resolution" in out["check"][0]["flags"][0]
+
+
+def test_reconcile_only_rows_surface_untold_and_stuck_work(board):
+    board["reconcile"] = {
+        "T1": {"ticket_id": "T1", "ticket_number": "9001",
+               "state": "shipped", "task_id": "86a",
+               "task_updated": "2026-10-20",
+               "last_customer_at": "2026-10-01"},
+        "T2": {"ticket_id": "T2", "ticket_number": "9002",
+               "state": "engineer_stalled", "task_id": "86b"},
+        "T3": {"ticket_id": "T3", "ticket_number": "9003",
+               "state": "engineer_active", "task_id": "86c"}}
+    out = sprint_tools.sprint_board()
+    lanes = _lanes(out)
+    assert lanes["check"] == ["#9001"]
+    assert lanes["internal"] == ["#9002"]
+    assert out["internal"][0]["next"].startswith("ping_team")
+
+
+@pytest.mark.parametrize("call", [
+    lambda: sprint_tools.send_replies("9601", "send all", "ron@vome.co"),
+    lambda: sprint_tools.ping_team("9601", "ron@vome.co"),
+])
+def test_only_sam_sends_in_bulk_or_pings(sam, call):
+    with pytest.raises(RequestError):
+        call()
+
+
+def test_send_all_never_sweeps_in_a_flagged_draft(sam, monkeypatch):
+    items = {"9601": _item(1), "9602": _item(2, draft=ASKS)}
+    monkeypatch.setattr(sprint_tools, "find",
+                        lambda t: (items[t]["ticket_id"], items[t]))
+    monkeypatch.setattr(sprint_tools, "_reconcile_rows", lambda: {})
+    monkeypatch.setattr(sprint_tools, "_resolutions", lambda: {})
+    monkeypatch.setattr(sprint_tools, "_engineer", lambda item: {})
+    monkeypatch.setattr(sprint_batch, "_now", lambda: NOW)
+    sent = []
+    monkeypatch.setattr(sprint_thread, "_send", lambda item: (
+        sent.append(item["number"]) or f"*{item['number']}.* sent to x."))
+    with pytest.raises(RequestError):
+        sprint_tools.send_replies("9601", "looks good", SAM)
+    out = sprint_tools.send_replies("9601 9602", "send all", SAM)
+    assert sent == [1] and out["sent"] == 1
+    assert "asks the client" in out["results"][1]["result"]
+    out = sprint_tools.send_replies("9602", "send 9602", SAM,
+                                    checked="9602")
+    assert sent == [1, 2] and out["sent"] == 1
+
+
+def test_ping_comments_on_the_task_and_never_emails(sam, monkeypatch):
+    import httpx
+    import ticket_reconciler
+
+    posted, executed = [], []
+
+    class Ok:
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(ticket_reconciler, "_headers", lambda: {})
+    monkeypatch.setattr(httpx, "post", lambda url, **k: (
+        posted.append((url, k["json"])) or Ok()))
+    monkeypatch.setattr(store, "execute",
+                        lambda *a, **k: executed.append(a))
+    monkeypatch.setattr(sprint_tools, "_reconcile_rows", lambda: {
+        "T2": {"ticket_id": "T2", "ticket_number": "9002",
+               "task_id": "86b", "last_customer_at": "2026-09-22"}})
+    monkeypatch.setattr(sprint_tools, "find", lambda t: ("X", {}))
+    out = sprint_tools.ping_team("9002 9003", SAM, note="any news?")
+    assert [r["pinged"] for r in out["results"]] == [True, False]
+    url, body = posted[0]
+    assert url.endswith("/task/86b/comment") and body["notify_all"]
+    assert "2026-09-22" in body["comment_text"]
+    assert "any news?" in body["comment_text"]
+    assert "—" not in body["comment_text"]
+    assert executed
