@@ -1043,10 +1043,15 @@ def _referenced_block(text: str, items: list[dict], focus) -> str:
     return "\n\n".join(blocks) or "(none)"
 
 
-def _check_draft(item: dict, text: str,
-                 sam_wrote: bool = False) -> tuple[str, str]:
+def _check_draft(item: dict, text: str, sam_wrote: bool = False,
+                 sam_verified: bool = False) -> tuple[str, str]:
     """Every outbound guard on a draft the partner wrote, or on Sam's own
-    edit when `sam_wrote`. (status, why)."""
+    edit when `sam_wrote`. (status, why).
+
+    `sam_verified`: Sam's own reply that resolves the ticket. An engineer's
+    fix has no Agent Fixes record, so Sam's word is the evidence, and the
+    send closes the routed task (_after_send). #8204, 2026-10-30: Sanjay's
+    fix was verified and the "it's fixed" reply had no way out."""
     from vomeos.guards import run_guards
 
     import shadow_triage
@@ -1059,6 +1064,11 @@ def _check_draft(item: dict, text: str,
     if release.get("live"):
         ctx.update({"verified_fix_task": release.get("task_id") or "",
                     "verified_fix_status": "on prod",
+                    "resolution_reply": True})
+    elif sam_wrote and sam_verified:
+        filed = item.get("eng_task") or {}
+        ctx.update({"verified_fix_task": filed.get("id") or "verified by Sam",
+                    "verified_fix_status": "closed",
                     "resolution_reply": True})
     results = run_guards(
         ("non_empty", "client_message", "no_unverified_claims",
@@ -1287,7 +1297,7 @@ def _redraft(item: dict, notes: str) -> str:
 
 
 def _send(item: dict, sam_wrote: bool = False,
-          automatic: bool = False) -> str:
+          automatic: bool = False, resolved: bool = False) -> str:
     """`sam_wrote`: the text is Sam's own (send_ticket_reply with `text`).
     It still passed every outbound guard in _check_draft; only the stale
     acknowledgment check is skipped, because Sam writing the reply is the
@@ -1296,17 +1306,19 @@ def _send(item: dict, sam_wrote: bool = False,
 
     `automatic`: no person approved this send (release watcher, shipped
     untold). It goes out signed "Vome team" instead of Sam's name (Sam,
-    2026-10-23)."""
+    2026-10-23).
+
+    `resolved`: Sam says this reply resolves the ticket (_after_send)."""
     import zoho_actions
 
     n = item.get("number")
-    owed = _reply_owed(item)
-    if item.get("status") not in sprint_store.CARRIES and not owed:
+    if _answered(item):
+        if item.get("status") == sprint_store.FIXING:
+            return (f"*{n}.* already acknowledged and the agent is fixing "
+                    "it, nothing sent. The resolution comes back here once "
+                    "the fix is live.")
         return f"*{n}.* already {item.get('status')}, nothing sent."
-    if item.get("status") == sprint_store.FIXING and item.get("sent_at"):
-        return (f"*{n}.* already acknowledged and the agent is fixing it, "
-                "nothing sent. The resolution comes back here once the fix "
-                "is live.")
+    owed = _reply_owed(item)
     draft = (item.get("draft") or "").strip()
     if not draft or item.get("draft_status") != "ok":
         return (f"*{n}.* has no ready draft ({item.get('draft_status')}). "
@@ -1335,7 +1347,7 @@ def _send(item: dict, sam_wrote: bool = False,
 
         draft = team_signed(draft)
     zoho_actions.send_reply(item["ticket_id"], to, cc, draft)
-    if _still_fixing(item):
+    if _still_fixing(item) and not resolved:
         # The acknowledgment went; the agent still owns the fix, so the item
         # stays in flight instead of finishing (#9582).
         sprint_store.keep_fixing(item["id"])
@@ -1350,8 +1362,52 @@ def _send(item: dict, sam_wrote: bool = False,
            else "on Sam's approval in the sprint")
     _post(f"Sent #{item.get('ticket_number')} to {to}{copied} {how}.",
           channel=AGENT_LOG)
-    after = _after_send(item)
+    after = _after_send(item, resolved=resolved)
     return f"*{n}.* sent to {to}{copied}." + (f" {after}" if after else "")
+
+
+def _answered(item: dict) -> bool:
+    """This item's reply already went out and the customer has not written
+    since (a new customer message reopens the item). Its draft must never
+    go again; only a follow-up Sam writes may (_send_follow_up)."""
+    if item.get("status") == sprint_store.FIXING:
+        return bool(item.get("sent_at"))
+    return item.get("status") not in sprint_store.CARRIES and \
+        not _reply_owed(item)
+
+
+def _send_follow_up(item: dict, body: str, resolved: bool = False) -> str:
+    """Sam's own follow-up on a ticket that was already answered, such as
+    the "it's fixed" after a holding note (#8204, 2026-10-30: refused as
+    "already sent" with the fix verified and the client waiting).
+
+    `body` is signed and passed every guard already (send_ticket_reply).
+    It is not an edit of the item's draft: the draft, sent_text and the
+    edit log stay as they were, so nothing teaches the drafter a
+    correction Sam never made. Zoho holds the follow-up itself."""
+    import zoho_actions
+
+    n = item.get("number")
+    latest = zoho_actions.latest_inbound(item["ticket_id"])
+    if str(latest.get("id") or "") != str(item.get("last_thread_id") or ""):
+        return (f"*{n}.* the customer has written again since the last "
+                "reply. It is being re-triaged; nothing was sent.")
+    rcpt = item.get("recipients") or {}
+    to, cc = rcpt.get("to") or "", list(rcpt.get("cc") or [])
+    if not to:
+        return (f"*{n}.* has no recipient (no sender on the latest customer "
+                "message), so nothing was sent. Reply from Zoho.")
+    zoho_actions.send_reply(item["ticket_id"], to, cc, body)
+    if not (_still_fixing(item) and not resolved):
+        sprint_store.decide(item["id"], sprint_store.SENT,
+                            "follow-up sent by Sam"
+                            + (", resolved" if resolved else ""))
+    copied = f" cc {', '.join(cc)}" if cc else ""
+    _post(f"Sent a follow-up on #{item.get('ticket_number')} to {to}"
+          f"{copied} on Sam's approval.", channel=AGENT_LOG)
+    after = _after_send(item, resolved=resolved)
+    return (f"*{n}.* follow-up sent to {to}{copied}."
+            + (f" {after}" if after else ""))
 
 
 def _reply_owed(item: dict) -> bool:
@@ -1426,8 +1482,11 @@ CLOSE_AFTER = {"user_education", "admin_action", "misdirected",
                "account_deletion"}
 
 
-def _after_send(item: dict) -> str:
+def _after_send(item: dict, resolved: bool = False) -> str:
     """Zoho status and Agent Fixes closure after a sent reply.
+
+    `resolved`: Sam says this reply resolves the ticket, so it closes like
+    a resolution, routed task included, whatever that task's status.
 
     A resolution (the linked fix is Live) or an answer closes the ticket,
     silently. A routed ticket or an agent fix in flight goes to In Progress.
@@ -1460,7 +1519,7 @@ def _after_send(item: dict) -> str:
     # sent now is the answer, as with a declined task. #9549 and #9575
     # (2026-10-23) went to In Progress "emailed when it ships" on tasks
     # that had closed days before.
-    done = declined or bool(task.get("shipped"))
+    done = declined or bool(task.get("shipped")) or resolved
     if filed.get("url") and not release.get("live") and not done:
         reason = re.sub(r"\W+", "_", str(filed.get("reason") or "auto"))
         sprint_store.decide(item["id"], sprint_store.ROUTED,
@@ -1474,7 +1533,7 @@ def _after_send(item: dict) -> str:
             moved = f":warning: Zoho status NOT set to In Progress ({exc})"
         return (f"{moved} with {filed.get('owner')} ({filed['url']}). The "
                 "client is emailed when it ships.")
-    if item.get("fix_pr") and not release.get("live"):
+    if item.get("fix_pr") and not release.get("live") and not resolved:
         try:
             zoho_actions.set_agent_fixing(item["ticket_id"])
             return ("Zoho set to In Progress (the agent's fix is in flight, "
@@ -1483,7 +1542,7 @@ def _after_send(item: dict) -> str:
             return f":warning: Zoho status NOT set to In Progress ({exc})."
     # A closed task only closes the ticket when the reply is a complete
     # answer (CLOSE_AFTER); otherwise the reply asked something and waits.
-    if release.get("live") or category in CLOSE_AFTER or declined:
+    if release.get("live") or category in CLOSE_AFTER or declined or resolved:
         status = "Closed"
     else:
         status = "Awaiting Client Response"

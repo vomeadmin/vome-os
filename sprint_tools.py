@@ -595,11 +595,17 @@ _SEND_WORD = re.compile(r"\b(send|approved?|go ahead|ship it)\b", re.I)
 
 
 def send_ticket_reply(ticket: str, sam_said: str, caller: str,
-                      text: str = "") -> dict:
+                      text: str = "", resolved: bool = False) -> dict:
     """Send the reply for a ticket: the agent's draft, or Sam's edited
     `text`. One send path with the sprint thread: every outbound guard,
     recipients from the latest message plus secondary contacts, refused if
-    the customer wrote again, then Zoho status and Agent Fixes follow."""
+    the customer wrote again, then Zoho status and Agent Fixes follow.
+
+    A ticket already answered (a holding note went, nothing new from the
+    customer) takes Sam's `text` as a follow-up; its old draft never goes
+    again. `resolved`: Sam says this reply resolves it, so Zoho closes
+    silently and the routed task closes (never `on prod`, which would
+    email the client again)."""
     _sam_only(caller, "send replies")
     if not _SEND_WORD.search(sam_said or ""):
         _refuse("pass Sam's own words in sam_said; they must ask to send "
@@ -609,10 +615,25 @@ def send_ticket_reply(ticket: str, sam_said: str, caller: str,
     ticket_id, item = find(ticket)
     if not item:
         _refuse("no draft for this ticket; call ticket_first_pass first")
+    if sprint_thread._answered(item):
+        if not text.strip():
+            _refuse("this ticket's reply already went out and the customer "
+                    "has not written since. Pass the follow-up in `text`; "
+                    "the old draft is never sent twice")
+        body = sprint_thread._signed(item, text)
+        status, why = sprint_thread._check_draft(
+            item, body, sam_wrote=True, sam_verified=resolved)
+        if status != "ok":
+            _refuse(f"the follow-up is held by a guard ({why}); nothing "
+                    "was sent")
+        result = sprint_thread._send_follow_up(item, body, resolved=resolved)
+        return {"result": result, "lesson": "",
+                "sent": " sent to " in result}
     learned = ""
     if text.strip():
         body = sprint_thread._signed(item, text)
-        status, why = sprint_thread._check_draft(item, body, sam_wrote=True)
+        status, why = sprint_thread._check_draft(
+            item, body, sam_wrote=True, sam_verified=resolved)
         before = item.get("draft") or ""
         sprint_store.set_draft(item["id"], body, status, why)
         learned = sprint_thread._learn(item, before, body, sam_said)
@@ -620,7 +641,8 @@ def send_ticket_reply(ticket: str, sam_said: str, caller: str,
             _refuse(f"the edited reply is held by a guard ({why}); nothing "
                     "was sent")
         item = sprint_store.get_item(item["id"])
-    result = sprint_thread._send(item, sam_wrote=bool(text.strip()))
+    result = sprint_thread._send(item, sam_wrote=bool(text.strip()),
+                                 resolved=resolved)
     return {"result": result, "lesson": learned.strip(),
             "sent": " sent to " in result}
 

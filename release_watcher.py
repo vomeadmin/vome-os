@@ -37,9 +37,11 @@ Every 15 minutes, for each Agent Fixes parent at `on dev` with Fix Commit set:
 
   * all commits deployed      -> Release Check = Live, one post in
                                  #support-sprints naming the clients to notify
-  * a build carrying a commit -> Release Check = Failed, one alert with the
-    failed, or merged 2h+ and    run link
-    still not deployed
+  * every build carrying a    -> Release Check = Failed, one alert with the
+    commit failed, or merged     run link
+    2h+ and still not deployed
+  * a commit once seen deployed stays deployed: a later failed build
+    deployed nothing.
   * otherwise                 -> nothing (Waiting)
 
 It never moves a task to `on prod`. That status fires the on-prod handler,
@@ -352,10 +354,13 @@ def check_pair(
     """Where one commit is: pending merge, building, deployed, failed, unknown.
 
     Builds are walked newest first. The first run that does not contain the
-    commit ends the walk, because every older run is older still. The first
-    COMPLETED run that does contain it decides: success is deployed, failure
-    is failed, unless a newer run carrying it is still going, which is a
-    retry and therefore building.
+    commit ends the walk, because every older run is older still. Any
+    successful run that contains it means deployed: a later build that
+    failed deployed nothing, so the code the green one shipped is still
+    what production runs (#9571, 2026-10-30: a fix proven live flipped to
+    Failed when an unrelated later master build failed). Failed only when
+    every completed run carrying it failed, and building while a run
+    carrying it is still going.
     """
     target = TARGETS[alias]
     graph = graphs.setdefault(alias, _Graph(target, github, bitbucket))
@@ -377,6 +382,7 @@ def check_pair(
         )
 
     in_progress = None
+    failed = None
     for run in runs:
         if not run["head"]:
             continue
@@ -397,20 +403,19 @@ def check_pair(
             )
             return _confirm_live(check, target, graph, stamp_cache)
         if run["failed"]:
-            if in_progress:
-                return PairCheck(
-                    alias, sha, BUILDING, "retry running after a failed build",
-                    run_id=in_progress["id"], run_url=in_progress["url"],
-                )
-            return PairCheck(
-                alias, sha, BUILD_FAILED, "production build failed",
-                run_id=run["id"], run_url=run["url"],
-            )
+            failed = failed or run
 
     if in_progress:
+        detail = ("retry running after a failed build" if failed
+                  else "production build running")
         return PairCheck(
-            alias, sha, BUILDING, "production build running",
+            alias, sha, BUILDING, detail,
             run_id=in_progress["id"], run_url=in_progress["url"],
+        )
+    if failed:
+        return PairCheck(
+            alias, sha, BUILD_FAILED, "production build failed",
+            run_id=failed["id"], run_url=failed["url"],
         )
     return PairCheck(alias, sha, BUILDING, "merged, no production build yet")
 
@@ -837,6 +842,14 @@ def evaluate_task(
             runs_cache=runs_cache, stamp_cache=stamp_cache,
         )
         row = ledger.record_pair(task["id"], check)
+        # Seen deployed once, it stays deployed: the build list holds only
+        # the newest runs, so the green one that shipped it falls off the
+        # page once enough later builds (some failed) land on master. A live
+        # stamp that does not carry it is the one sign that outranks this.
+        if (check.state in (BUILDING, BUILD_FAILED) and not check.live_sha
+                and row.get("deployed_at") is not None):
+            check.state = DEPLOYED
+            check.detail = f"deployed earlier; newest build: {check.detail}"
         merged_at = row.get("merged_at")
         if check.state == BUILDING and merged_at is not None:
             if merged_at.tzinfo is None:

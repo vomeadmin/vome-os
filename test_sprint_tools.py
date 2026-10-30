@@ -88,7 +88,8 @@ def test_a_send_needs_sams_own_words(sam, one):
 def test_send_uses_the_one_guarded_send_path(sam, one, monkeypatch):
     sent = []
     monkeypatch.setattr(sprint_thread, "_send",
-                        lambda item, sam_wrote=False: sent.append(item["id"])
+                        lambda item, sam_wrote=False, **k:
+                        sent.append(item["id"])
                         or "*4.* sent to ana@ms.org.")
     out = sprint_tools.send_ticket_reply("9604", "yes send it", SAM)
     assert sent == [104] and out["sent"] is True
@@ -98,7 +99,7 @@ def test_an_edited_reply_is_guarded_and_teaches(sam, one, monkeypatch):
     stored, learned = [], []
     checked = []
     monkeypatch.setattr(sprint_thread, "_check_draft",
-                        lambda item, body, sam_wrote=False:
+                        lambda item, body, sam_wrote=False, **k:
                         checked.append(sam_wrote) or ("ok", ""))
     monkeypatch.setattr(sprint_store, "set_draft",
                         lambda i, t, s, w="": stored.append(t))
@@ -108,7 +109,7 @@ def test_an_edited_reply_is_guarded_and_teaches(sam, one, monkeypatch):
                         lambda item, b, a, said: learned.append(a) or
                         "\n:brain: Learned L2")
     monkeypatch.setattr(sprint_thread, "_send",
-                        lambda item, sam_wrote=False:
+                        lambda item, sam_wrote=False, **k:
                         f"sent to x with {item['draft'][:8]}")
     out = sprint_tools.send_ticket_reply(
         "9604", "send this instead", SAM, text="Use the People tab.")
@@ -120,17 +121,160 @@ def test_an_edited_reply_is_guarded_and_teaches(sam, one, monkeypatch):
 
 def test_an_edit_a_guard_blocks_is_not_sent(sam, one, monkeypatch):
     monkeypatch.setattr(sprint_thread, "_check_draft",
-                        lambda item, body, sam_wrote=False:
+                        lambda item, body, sam_wrote=False, **k:
                         ("blocked", "no_confirmation"))
     monkeypatch.setattr(sprint_store, "set_draft", lambda *a, **k: None)
     monkeypatch.setattr(sprint_thread, "_learn", lambda *a: "")
     sent = []
     monkeypatch.setattr(sprint_thread, "_send",
-                        lambda i, sam_wrote=False: sent.append(i))
+                        lambda i, sam_wrote=False, **k: sent.append(i))
     with pytest.raises(RequestError, match="held by a guard"):
         sprint_tools.send_ticket_reply("9604", "send", SAM,
                                        text="We fixed it.")
     assert sent == []
+
+
+# #8204 (2026-10-30): the holding note went from the item, the fix was
+# verified, and the "it's fixed" reply was refused as "already sent".
+
+def test_a_follow_up_goes_out_on_an_answered_ticket(sam, one, monkeypatch):
+    one.update(status="sent", sent_at=NOW)
+    checked, followed = [], []
+    monkeypatch.setattr(sprint_thread, "_check_draft",
+                        lambda item, body, sam_wrote=False,
+                        sam_verified=False:
+                        checked.append((sam_wrote, sam_verified))
+                        or ("ok", ""))
+    monkeypatch.setattr(sprint_thread, "_send_follow_up",
+                        lambda item, body, resolved=False:
+                        followed.append((body, resolved))
+                        or "*4.* follow-up sent to ana@ms.org.")
+
+    def never(*a, **k):
+        raise AssertionError("a follow-up is not an edit of the draft")
+
+    monkeypatch.setattr(sprint_store, "set_draft", never)
+    monkeypatch.setattr(sprint_thread, "_learn", never)
+    monkeypatch.setattr(sprint_thread, "_send", never)
+    out = sprint_tools.send_ticket_reply(
+        "9604", "send it", SAM, text="The pop-up has been updated.",
+        resolved=True)
+    assert out["sent"] is True and out["lesson"] == ""
+    assert checked == [(True, True)]
+    assert followed[0][0].startswith("Hi Ana,") and followed[0][1] is True
+
+
+def test_an_answered_ticket_never_sends_its_draft_again(sam, one,
+                                                        monkeypatch):
+    one.update(status="sent", sent_at=NOW)
+    with pytest.raises(RequestError, match="follow-up in `text`"):
+        sprint_tools.send_ticket_reply("9604", "send it", SAM)
+
+
+def test_a_follow_up_a_guard_blocks_is_not_sent(sam, one, monkeypatch):
+    one.update(status="routed", sent_at=NOW)
+    monkeypatch.setattr(sprint_thread, "_check_draft",
+                        lambda *a, **k: ("blocked", "no_unverified_claims"))
+    sent = []
+    monkeypatch.setattr(sprint_thread, "_send_follow_up",
+                        lambda *a, **k: sent.append(a))
+    with pytest.raises(RequestError, match="held by a guard"):
+        sprint_tools.send_ticket_reply("9604", "send", SAM,
+                                       text="It has been fixed.")
+    assert sent == []
+
+
+def test_an_open_ticket_still_takes_the_normal_path(sam, one, monkeypatch):
+    assert not sprint_thread._answered(one)
+    assert sprint_thread._answered({**one, "status": "done"})
+    assert not sprint_thread._answered(
+        {**one, "status": "done", "decision": "log: 86abc"})
+    assert sprint_thread._answered({**one, "status": "fixing",
+                                    "sent_at": NOW})
+    assert not sprint_thread._answered({**one, "status": "fixing"})
+
+
+def test_follow_up_sends_without_touching_the_draft(one, monkeypatch):
+    import zoho_actions
+
+    one.update(status="sent", sent_at=NOW,
+               recipients={**one["recipients"], "cc": ["mc@ms.org"]})
+    mails, decided, after, recorded = [], [], [], []
+    monkeypatch.setattr(zoho_actions, "latest_inbound",
+                        lambda t: {"id": "TH1"})
+    monkeypatch.setattr(zoho_actions, "send_reply",
+                        lambda t, to, cc, body: mails.append((to, cc, body)))
+    monkeypatch.setattr(sprint_store, "decide",
+                        lambda i, s, d: decided.append((s, d)))
+    monkeypatch.setattr(sprint_store, "record_sent",
+                        lambda *a, **k: recorded.append(a))
+    monkeypatch.setattr(sprint_thread, "_post", lambda *a, **k: None)
+    monkeypatch.setattr(sprint_thread, "_after_send",
+                        lambda item, resolved=False:
+                        after.append(resolved) or "Zoho set to Closed.")
+    out = sprint_thread._send_follow_up(one, "Hi Ana,\n\nbody", resolved=True)
+    assert mails == [("ana@ms.org", ["mc@ms.org"], "Hi Ana,\n\nbody")]
+    assert decided == [("sent", "follow-up sent by Sam, resolved")]
+    assert after == [True] and " sent to " in out
+    # sent_text stays the first reply; Zoho holds the follow-up.
+    assert recorded == []
+
+
+def test_follow_up_refused_when_the_customer_wrote_again(one, monkeypatch):
+    import zoho_actions
+
+    one.update(status="sent", sent_at=NOW)
+    mails = []
+    monkeypatch.setattr(zoho_actions, "latest_inbound",
+                        lambda t: {"id": "TH2"})
+    monkeypatch.setattr(zoho_actions, "send_reply",
+                        lambda *a: mails.append(a))
+    out = sprint_thread._send_follow_up(one, "body")
+    assert mails == [] and "written again" in out
+
+
+def test_resolved_closes_zoho_and_the_routed_task(one, monkeypatch):
+    import shadow_triage
+    import ticket_routing
+    import zoho_actions
+
+    one.update(category="bug", eng_task={
+        "id": "868kur961", "url": "https://app.clickup.com/t/868kur961",
+        "owner": "sanjay"})
+    statuses, closed = [], []
+    monkeypatch.setattr(shadow_triage, "release_state",
+                        lambda n, t: {"live": False})
+    monkeypatch.setattr(ticket_routing, "task_state",
+                        lambda filed: {"status": "in progress",
+                                       "shipped": False})
+    monkeypatch.setattr(zoho_actions, "set_status",
+                        lambda t, s: statuses.append(s))
+    monkeypatch.setattr(zoho_actions, "set_in_progress",
+                        lambda *a: statuses.append("In Progress"))
+    monkeypatch.setattr(sprint_thread, "_clickup_status",
+                        lambda task_id, s: closed.append((task_id, s)))
+    monkeypatch.setattr(sprint_store, "decide", lambda *a: None)
+    sprint_thread._after_send(one, resolved=True)
+    assert statuses == ["Closed"] and closed == [("868kur961", "Closed")]
+    statuses.clear()
+    sprint_thread._after_send(one)
+    assert statuses == ["In Progress"]
+
+
+def test_sams_resolved_word_backs_a_fix_claim(one, monkeypatch):
+    import shadow_triage
+
+    monkeypatch.setattr(shadow_triage, "release_state",
+                        lambda n, t: {"live": False})
+    body = ("Hi Ana,\n\nThis has been fixed, please give it a try.\n\n"
+            "Sam | Vome team\nsupport.vomevolunteer.com")
+    status, why = sprint_thread._check_draft(one, body, sam_wrote=True)
+    assert status == "blocked" and "no_unverified_claims" in why
+    assert sprint_thread._check_draft(one, body, sam_wrote=True,
+                                      sam_verified=True) == ("ok", "")
+    # Only Sam's own words carry his verification.
+    assert sprint_thread._check_draft(one, body,
+                                      sam_verified=True)[0] == "blocked"
 
 
 # ---------------------------------------------------------------------------

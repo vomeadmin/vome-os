@@ -433,6 +433,44 @@ def test_an_older_success_still_counts_when_a_newer_build_runs(world):
     assert _state(summary, "p1")["state"] == rw.FIX_LIVE
 
 
+def test_a_later_failed_build_does_not_undo_a_green_one(world):
+    """#9571: live, then an unrelated master build failed and it read
+    Failed. The failed build deployed nothing; the green one still stands."""
+    world.bitbucket.runs = [bb_run(42, "c3c3c33", result="FAILED"),
+                            bb_run(41, "c2c2c22")]
+    world.tasks = [parent("p1", "core@c2c2c22", release_check=2)]
+    summary = rw.run_release_watcher(dry_run=False)
+    assert _state(summary, "p1")["state"] == rw.FIX_LIVE
+    assert world.writes == []
+
+
+def test_seen_deployed_stays_deployed_when_the_green_build_ages_out(world):
+    """Only the newest builds are listed: once failed builds push the green
+    one off the page, the ledger still knows it shipped."""
+    world.bitbucket.runs = [bb_run(41, "c2c2c22")]
+    world.tasks = [parent("p1", "core@c2c2c22")]
+    rw.run_release_watcher(dry_run=False)
+    world.bitbucket.runs = [bb_run(43, "c3c3c33", result="FAILED"),
+                            bb_run(42, "c3c3c33", result="FAILED")]
+    world.tasks = [parent("p1", "core@c2c2c22", release_check=2)]
+    summary = rw.run_release_watcher(dry_run=False)
+    fix = _state(summary, "p1")
+    assert fix["state"] == rw.FIX_LIVE
+    assert "deployed earlier" in fix["pairs"][0]["detail"]
+    assert world.writes == [("p1", "live")]
+
+
+def test_a_live_site_without_the_commit_outranks_the_ledger(world):
+    world.github.runs = [gh_run(7, "a2a2a22")]
+    world.stamp = "a2a2a22"
+    world.tasks = [parent("p1", "web@a2a2a22")]
+    rw.run_release_watcher(dry_run=False)
+    world.github.runs = [gh_run(8, "a3a3a33")]
+    world.stamp = "a1a1a11"
+    summary = rw.run_release_watcher(dry_run=False)
+    assert _state(summary, "p1")["pairs"][0]["state"] == rw.BUILDING
+
+
 def test_merged_two_hours_without_a_deploy_is_failed(world):
     world.github.runs = [gh_run(7, "a2a2a22")]
     world.tasks = [parent("p1", "web@a3a3a33")]

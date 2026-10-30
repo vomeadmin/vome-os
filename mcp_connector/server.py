@@ -636,16 +636,25 @@ def build() -> MCPServer:
             description="Sam's own words approving this send, verbatim")],
         text: Annotated[str, Field(
             description="Sam's edited reply. Empty sends the agent's draft "
-            "exactly as shown")] = "",
+            "exactly as shown. Required for a follow-up on a ticket "
+            "already answered")] = "",
+        resolved: Annotated[bool, Field(
+            description="True only when Sam says this reply resolves the "
+            "ticket (for example the fix is verified live). Zoho closes "
+            "with no closure email and the routed engineer task "
+            "closes")] = False,
     ) -> dict:
         """Email the customer (Sam only, on his explicit word). Every
         outbound guard runs again, recipients are the latest sender, their
         cc and the ticket's secondary contacts, and it refuses if the
         customer wrote since the draft. Zoho status and Agent Fixes follow.
-        An edit teaches the drafter."""
+        An edit teaches the drafter. On a ticket already answered (a
+        holding note went and the customer has not written since), Sam's
+        `text` goes as a follow-up and teaches nothing."""
         return await _run("send_ticket_reply",
                           sprint_tools.send_ticket_reply, ticket=ticket,
-                          sam_said=sam_said, text=text, caller=caller())
+                          sam_said=sam_said, text=text, resolved=resolved,
+                          caller=caller())
 
     @server.tool(annotations=WRITE)
     async def route_ticket(

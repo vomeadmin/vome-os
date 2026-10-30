@@ -42,6 +42,14 @@ AGENT = "customer_success.resolution_scope_check"
 FIX_LISTS = ("Priority Queue",)
 # How much of each shipped fix the agent reads.
 _FIX_CHARS = 1200
+# Where a fix task says what it changed. Agent fix briefs open with the
+# likely cause, which alone can run past _FIX_CHARS: on #9528 (2026-10-30)
+# the agent saw the cause, never the fix, and held a fixed ticket. "Fix PR"
+# and "Fix Commit" are links, not the change.
+# Times the agent is asked before an empty or unreadable verdict holds.
+_ASKS = 2
+_FIX_SECTION = re.compile(r"\*\*(?:potential fix|fix)\b(?! pr\b| commit\b)",
+                          re.I)
 
 
 def _linked_queue_tasks(ticket_number: str, ticket_id: str) -> list[dict]:
@@ -109,6 +117,15 @@ def open_work(ticket_number: str, ticket_id: str,
     return open_, shipped
 
 
+def _fix_first(brief: str) -> str:
+    """The brief with its fix section moved to the front, so the cut at
+    _FIX_CHARS drops cause, never the change."""
+    match = _FIX_SECTION.search(brief)
+    if not match:
+        return brief
+    return f"{brief[match.start():]} {brief[:match.start()]}"
+
+
 def _fix_text(task: dict) -> str:
     import clickup_search
 
@@ -117,7 +134,7 @@ def _fix_text(task: dict) -> str:
         brief = clickup_search._task_brief(task["id"])
     except Exception as exc:
         print(f"[SCOPE] could not read task {task.get('id')}: {exc}")
-    body = brief.strip()[:_FIX_CHARS]
+    body = _fix_first(brief.strip())[:_FIX_CHARS]
     return f"{task.get('name') or task.get('id')} (live)" + (
         f": {body}" if body else "")
 
@@ -158,16 +175,20 @@ def check(ticket_id: str, ticket_number: str, fixes: list[dict],
             thread = thread_text(ticket_id)
         from vomeos import run_agent
 
-        result = run_agent(
-            AGENT,
-            context={
-                "thread": thread or "(no messages could be read)",
-                "shipped_fixes": "\n".join(
-                    _fix_text(t) for t in list(fixes) + shipped),
-            },
-            subject_type="zoho_ticket",
-            subject_id=ticket_id,
-        )
+        context = {
+            "thread": thread or "(no messages could be read)",
+            "shipped_fixes": "\n".join(
+                _fix_text(t) for t in list(fixes) + shipped),
+        }
+        # Asked again before holding: no verdict is not a "no", and a held
+        # resolution is never asked again (#9571, 2026-10-30: one empty
+        # model reply held a live fix's email for good).
+        for _ in range(_ASKS):
+            result = run_agent(AGENT, context=context,
+                               subject_type="zoho_ticket",
+                               subject_id=ticket_id)
+            if result.ok:
+                break
     except Exception as exc:
         print(f"[SCOPE] {ticket_id}: scope check failed ({exc}), holding")
         return {"complete": False, "open": [],

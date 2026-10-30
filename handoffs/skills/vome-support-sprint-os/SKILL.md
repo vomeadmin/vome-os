@@ -56,7 +56,7 @@ Then load the Vome OS tools with `tool_search` ("VomeOS"; also try "sprint queue
 | Hotfixes and raw error reports | `propose_fix`, then `fix_status`. Never write a fix by hand |
 | Whether a fix is live before saying so | `fix_status` |
 | Closing with no reply (Rule 12) and housekeeping | `close_ticket_quietly` |
-| Sending any client reply | `send_ticket_reply`, Sam's words verbatim as `sam_said`. `text` empty sends the agent's draft exactly as shown; `text` set sends Sam's edit, signed, through the guards, and teaches the drafter |
+| Sending any client reply | `send_ticket_reply`, Sam's words verbatim as `sam_said`. `text` empty sends the agent's draft exactly as shown; `text` set sends Sam's edit, signed, through the guards, and teaches the drafter. On a ticket already answered, `text` is a follow-up (teaches nothing). `resolved=true` when Sam says it resolves the ticket: Zoho closes silently and the routed task closes |
 | Feature requests from tickets | `log_ticket_request`, only on Sam's word: `build=true` for build now, without it for later (see "Logging a feature request") |
 | What triage costs, how often the deep pass ran and corrected the card, the forecast | `triage_cost(days)` |
 | A general correction from Sam | `teach_agents`, in his words |

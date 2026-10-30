@@ -144,6 +144,34 @@ def test_no_verdict_holds(world, monkeypatch):
                                       thread="t")["complete"]
 
 
+def test_an_empty_verdict_is_asked_again(world, monkeypatch):
+    """#9571: one empty model reply held a live fix's email for good."""
+    import vomeos
+
+    replies = [_Result({}, ok=False), _Result(world.verdict)]
+    monkeypatch.setattr(vomeos, "run_agent",
+                        lambda *a, **k: replies.pop(0))
+    assert resolution_scope.check("T1", "9700", FIX, thread="t")["complete"]
+    assert replies == []
+
+
+def test_the_fix_section_survives_the_cut():
+    """#9528: the cause filled the 1200 characters, so the agent never saw
+    the fix and held a fixed ticket."""
+    brief = ("Description: Fix PR: https://github.com/x/pull/853 "
+             "**Likely cause:** " + "slow load. " * 150
+             + "**Potential fix:** initialise centralizedOwnerId.")
+    text = resolution_scope._fix_first(brief)
+    assert text.startswith("**Potential fix:**")
+    assert "Fix PR: https://github.com/x/pull/853" in text
+
+
+def test_fix_pr_is_not_the_fix_section():
+    brief = "**Fix PR:** https://x **Fix (side by side).** kiosk label"
+    assert resolution_scope._fix_first(brief).startswith("**Fix (side")
+    assert resolution_scope._fix_first("no sections") == "no sections"
+
+
 # ---------------------------------------------------------------------------
 # The three automatic paths hold instead of sending
 # ---------------------------------------------------------------------------
