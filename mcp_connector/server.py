@@ -739,6 +739,35 @@ def build() -> MCPServer:
                           ticket=ticket, caller=caller())
 
     @server.tool(annotations=READ)
+    async def celery_health(
+        minutes: Annotated[int, Field(ge=5, le=1440, description=(
+            "How far back to look"))] = 60,
+    ) -> dict:
+        """Celery and RabbitMQ right now (Sam only): every queue's waiting,
+        held and worker counts for core and django-db, the broker's memory,
+        disk and file headroom, and every CloudWatch alarm in ALARM."""
+        return await _run("celery_health", tools.celery_health,
+                          minutes=minutes, caller=caller())
+
+    @server.tool(annotations=READ)
+    async def celery_logs(
+        text: Annotated[str, Field(description=(
+            "Text to find, e.g. a task name, an exception or an id. Empty "
+            "finds error lines"))] = "",
+        app: Annotated[Literal["core", "db", "rabbitmq", "all"], Field(
+            description="core = django-core workers, db = django-db "
+            "workers")] = "all",
+        minutes: Annotated[int, Field(ge=5, le=10080, description=(
+            "How far back to search"))] = 60,
+        limit: Annotated[int, Field(ge=1, le=200)] = 50,
+    ) -> dict:
+        """Search the Celery worker, beat and Flower logs (Sam only), newest
+        first. Internal only: lines can hold task arguments."""
+        return await _run("celery_logs", tools.celery_logs, text=text,
+                          app=app, minutes=minutes, limit=limit,
+                          caller=caller())
+
+    @server.tool(annotations=READ)
     async def connector_status() -> dict:
         """Which sources this connector can reach right now, and who you
         are signed in as. Use when results look thin."""
