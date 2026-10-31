@@ -127,6 +127,13 @@ to the queue.
   goes out. `text` empty sends the agent's draft exactly as shown; `text`
   set sends Sam's edit, signed, through the guards, and teaches the drafter.
   Afterwards the Zoho status and the Agent Fixes tasks update themselves.
+  On a ticket already answered (a holding note went and the customer has
+  not written since), `text` goes as a follow-up and teaches nothing; the
+  old draft is never sent twice. `resolved=true` only when Sam says the
+  reply resolves it (for example an engineer's fix is verified live): Zoho
+  closes with no closure email, the routed task closes (never `on prod`),
+  and his word backs a fix claim. Never fall back to a manual Zoho send
+  for a follow-up.
 - `propose_fix(ticket)`: ask the agent to write the fix and open a PR (low
   risk only). Check with `fix_status` a few minutes later.
 - `route_queue(tickets)`: do what `walk_queue` lists under urgent and

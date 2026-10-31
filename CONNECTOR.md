@@ -24,7 +24,9 @@ Code: [mcp_connector/](mcp_connector/). Tests: `py -m pytest test_mcp_connector.
 | `run_faq` / `faq_job_status` | Hand a help centre article to the writer agent; get its EN and FR draft | `knowledge.kb_writer` |
 | `publish_faq_draft` / `save_faq_draft` | Publish a reviewed draft (or your own edit) in both languages, verified | Zoho Desk KB |
 | `get_kb_article` / `list_kb_categories` | Read a live article in both languages; categories that accept articles | Zoho Desk KB |
-| `connector_status` | Which sources are reachable, who you are signed in as | |
+| `celery_health` | Every Celery queue's waiting, held and worker counts (core and db), RabbitMQ memory, disk and file headroom, and every CloudWatch alarm in ALARM (Sam only) | CloudWatch `Vome/RabbitMQ`, via `vomeos/integrations/aws.py` |
+| `celery_logs` | Worker, beat and Flower log lines matching a text, or error lines (Sam only) | CloudWatch Logs Insights on the `celery-production` and `databaseapp-celery-production` groups |
+| `connector_status` | Which sources are reachable, who you are signed in as, and for Sam whether each AWS permission works | |
 
 Every result says which sources it searched and which it did NOT, so "not
 checked" never reads as "does not exist".

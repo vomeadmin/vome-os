@@ -833,11 +833,15 @@ def triage_feature_request(
 # ---------------------------------------------------------------------------
 
 def connector_status(caller: str) -> dict:
+    from vomeos.integrations import aws
     from vomeos.integrations.code_search import describe as code_describe
 
     from mcp_connector import store
 
     return {
+        # Live calls, so a key that was rotated away or a permission that
+        # was dropped shows here rather than as an empty answer elsewhere.
+        "aws": aws.describe(live=config.can_triage(caller)),
         "signed_in_as": caller,
         "can_triage_feature_requests": config.can_triage(caller),
         "help_centre": (
@@ -852,6 +856,68 @@ def connector_status(caller: str) -> dict:
         "code": code_describe(),
         "sign_ins_survive_restart": store.durable(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Celery and RabbitMQ (CloudWatch)
+# ---------------------------------------------------------------------------
+
+def _infra_caller(caller: str) -> None:
+    # Worker logs carry task arguments, which can hold names and emails.
+    if not config.can_triage(caller):
+        raise feature_requests.RequestError(
+            f"{caller or 'this account'} cannot read infrastructure data. "
+            "Only Sam can."
+        )
+
+
+def _aws_failed(result) -> None:
+    raise feature_requests.RequestError(
+        f"CloudWatch did not answer ({result.operation}): {result.error}"
+    )
+
+
+def celery_health(*, minutes: int, caller: str) -> dict:
+    from vomeos.integrations import aws
+
+    _infra_caller(caller)
+    cloudwatch = aws.CloudWatch()
+    queues = cloudwatch.rabbitmq(minutes=minutes)
+    if not queues.ok:
+        _aws_failed(queues)
+    firing = cloudwatch.alarms(state="ALARM")
+    if not firing.ok:
+        _aws_failed(firing)
+    return {
+        "alarms_firing": firing.data,
+        "rabbitmq": queues.data,
+        "how_to_read_this": (
+            "waiting = messages no worker has taken. held_by_workers on "
+            "core high_priority is normally ~180k scheduled shift reminders "
+            "(apply_async eta), not a backlog. workers 0 on a queue means "
+            "nothing will run there, except db 'celery', which has no "
+            "workers by design. broker ratios: memory and file_descriptors "
+            "alarm above 0.8, disk_free below 1.5. alarms_firing lists every "
+            "CloudWatch alarm in ALARM, not only RabbitMQ."
+        ),
+    }
+
+
+def celery_logs(
+    *, text: str, app: str, minutes: int, limit: int, caller: str,
+) -> dict:
+    from vomeos.integrations import aws
+
+    _infra_caller(caller)
+    result = aws.CloudWatchLogs().search(
+        text, app=app, minutes=minutes, limit=limit,
+    )
+    if not result.ok:
+        _aws_failed(result)
+    data = dict(result.data)
+    data["searched_for"] = text.strip() or "error lines"
+    data["app"] = app
+    return data
 
 
 # ---------------------------------------------------------------------------

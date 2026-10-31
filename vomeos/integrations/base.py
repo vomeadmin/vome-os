@@ -105,6 +105,7 @@ class Connector:
         json_body: dict | None = None,
         headers: dict | None = None,
         form: dict | None = None,
+        content: bytes | None = None,
     ) -> IntegrationResult:
         """Make the call. `headers` overrides `self.headers()` for one call.
 
@@ -116,6 +117,9 @@ class Connector:
         `form` sends an application/x-www-form-urlencoded body instead of
         JSON. Bitbucket's file-commit endpoint takes the path as a form FIELD
         NAME and the content as its value, which no JSON body can express.
+
+        `content` sends these exact bytes as the body. AWS signs a hash of
+        the body, so a request re-serialised after signing is rejected.
         """
         import time
 
@@ -133,8 +137,9 @@ class Connector:
                 url,
                 headers=headers or self.headers(),
                 params=params,
-                json=json_body if form is None else None,
+                json=json_body if form is None and content is None else None,
                 data=form,
+                content=content,
                 timeout=self.timeout,
             )
         except Exception as exc:

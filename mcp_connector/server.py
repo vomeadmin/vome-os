@@ -636,16 +636,25 @@ def build() -> MCPServer:
             description="Sam's own words approving this send, verbatim")],
         text: Annotated[str, Field(
             description="Sam's edited reply. Empty sends the agent's draft "
-            "exactly as shown")] = "",
+            "exactly as shown. Required for a follow-up on a ticket "
+            "already answered")] = "",
+        resolved: Annotated[bool, Field(
+            description="True only when Sam says this reply resolves the "
+            "ticket (for example the fix is verified live). Zoho closes "
+            "with no closure email and the routed engineer task "
+            "closes")] = False,
     ) -> dict:
         """Email the customer (Sam only, on his explicit word). Every
         outbound guard runs again, recipients are the latest sender, their
         cc and the ticket's secondary contacts, and it refuses if the
         customer wrote since the draft. Zoho status and Agent Fixes follow.
-        An edit teaches the drafter."""
+        An edit teaches the drafter. On a ticket already answered (a
+        holding note went and the customer has not written since), Sam's
+        `text` goes as a follow-up and teaches nothing."""
         return await _run("send_ticket_reply",
                           sprint_tools.send_ticket_reply, ticket=ticket,
-                          sam_said=sam_said, text=text, caller=caller())
+                          sam_said=sam_said, text=text, resolved=resolved,
+                          caller=caller())
 
     @server.tool(annotations=WRITE)
     async def route_ticket(
@@ -728,6 +737,35 @@ def build() -> MCPServer:
         return await _run("teach_agents", sprint_tools.teach_agents,
                           rule=rule, agent=agent, sam_said=sam_said,
                           ticket=ticket, caller=caller())
+
+    @server.tool(annotations=READ)
+    async def celery_health(
+        minutes: Annotated[int, Field(ge=5, le=1440, description=(
+            "How far back to look"))] = 60,
+    ) -> dict:
+        """Celery and RabbitMQ right now (Sam only): every queue's waiting,
+        held and worker counts for core and django-db, the broker's memory,
+        disk and file headroom, and every CloudWatch alarm in ALARM."""
+        return await _run("celery_health", tools.celery_health,
+                          minutes=minutes, caller=caller())
+
+    @server.tool(annotations=READ)
+    async def celery_logs(
+        text: Annotated[str, Field(description=(
+            "Text to find, e.g. a task name, an exception or an id. Empty "
+            "finds error lines"))] = "",
+        app: Annotated[Literal["core", "db", "rabbitmq", "all"], Field(
+            description="core = django-core workers, db = django-db "
+            "workers")] = "all",
+        minutes: Annotated[int, Field(ge=5, le=10080, description=(
+            "How far back to search"))] = 60,
+        limit: Annotated[int, Field(ge=1, le=200)] = 50,
+    ) -> dict:
+        """Search the Celery worker, beat and Flower logs (Sam only), newest
+        first. Internal only: lines can hold task arguments."""
+        return await _run("celery_logs", tools.celery_logs, text=text,
+                          app=app, minutes=minutes, limit=limit,
+                          caller=caller())
 
     @server.tool(annotations=READ)
     async def connector_status() -> dict:
