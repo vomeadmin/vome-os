@@ -42,6 +42,7 @@ import slack
 import video_concepts
 import video_lessons
 import video_marketing
+import video_social
 import video_threads
 
 # Local checkout, used only when Studio is not reachable over HTTP. No
@@ -612,6 +613,14 @@ def _reacting_to(row: dict, stage: str) -> str:
             lines.append('%d. %s (%s). Hook: "%s"' % (
                 i, c.get("title", ""), c.get("format", ""), c.get("hook", "")))
         return "\n".join(lines)
+    if stage == "captions":
+        caps = video_social.load_captions(row)
+        return "Social captions for %s:\n%s" % (
+            row.get("feature_name") or "a video",
+            "\n".join("- %s: %s%s" % (
+                video_social.label(k),
+                ("title \"%s\", " % c["title"]) if c.get("title") else "",
+                c.get("text", "")[:400]) for k, c in caps.items()))
     sb = _read_storyboard(row) or {}
     spoken = [ln.get("vo", "") for sc in sb.get("scenes", [])
               for ln in sc.get("lines", [])]
@@ -1125,7 +1134,14 @@ def build_video(thread_ts: str) -> None:
                else video_threads.STATE_AWAITING_REVIEW),
         last_runtime=report.get("runtime"),
         render_folder=report.get("folder", ""),
+        # Each platform's post needs its file's link long after this.
+        outputs_json=json.dumps([
+            {k: o.get(k) for k in ("aspect", "url", "bytes")}
+            for o in report.get("outputs") or [] if isinstance(o, dict)]),
     )
+    if report.get("ok"):
+        # Sammy, 2026-10-30: a built video goes straight on to its captions.
+        write_captions(thread_ts)
 
 
 def _build_over_http(conn, storyboard: dict) -> dict:
@@ -1215,4 +1231,177 @@ def _delivery_post(report: dict) -> str:
                                             o.get("bytes", 0) / 1e6))
     for w in report.get("warnings", []):
         lines.append(":warning: %s" % w)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Social: captions, then the posting calendar
+# ---------------------------------------------------------------------------
+
+def run_captions(row: dict, note: str = "") -> dict:
+    """The social copywriter, checked. {"ok", "captions", "notes"} or
+    {"ok": False, "error"}.
+
+    A refused set gets one retry with the reason, the same as concepts: the
+    reason is specific ("the TikTok caption has 7 hashtags, needs 3 to 5")
+    and a second attempt nearly always fixes it.
+    """
+    storyboard = _read_storyboard(row)
+    if storyboard is None:
+        return {"ok": False, "error": "there is no script for this thread "
+                                      "to caption"}
+    previous = video_social.load_captions(row) if note else {}
+    context = {
+        "storyboard": json.dumps(storyboard, indent=2, ensure_ascii=False),
+        "positioning": json.dumps(video_concepts.load_positioning(row) or {},
+                                  indent=2, ensure_ascii=False),
+        "platforms": video_social.platforms_brief(),
+        "website": video_social.WEBSITE,
+        "previous_captions": (json.dumps(previous, indent=2,
+                                         ensure_ascii=False)
+                              if previous else ""),
+        "note": note or "",
+    }
+    thread_ts = row.get("thread_ts", "")
+    reason = ""
+    for _ in range(2):
+        if reason:
+            context["note"] = ((note + "\n\n") if note else "") + (
+                "Your last captions were refused: %s. Fix that and keep "
+                "the rest." % reason)
+        data, err = _run("content.social_copywriter", context, thread_ts)
+        if err:
+            return {"ok": False, "error": err}
+        captions, reason = video_social.check_captions(data)
+        if captions:
+            return {"ok": True, "captions": captions,
+                    "notes": str(data.get("notes") or "").strip()}
+    return {"ok": False, "error": "the captions were refused twice: %s"
+                                  % reason}
+
+
+def write_captions(thread_ts: str, note: str = "") -> None:
+    """Write (or, with a note, revise) the captions and post them."""
+    row = video_threads.get(thread_ts) or {}
+    video_threads.update(thread_ts, state=video_threads.STATE_CAPTIONING)
+    try:
+        result = run_captions(row, note=note)
+        if not result.get("ok"):
+            _post(thread_ts,
+                  "I could not write the captions.\n```%s```\nReply "
+                  "*write the captions* to try again."
+                  % str(result.get("error", "unknown"))[:900])
+            video_threads.update(
+                thread_ts,
+                state=(video_threads.STATE_AWAITING_CAPTIONS
+                       if row.get("captions_json")
+                       else video_threads.STATE_DELIVERED))
+            return
+        video_threads.update(thread_ts,
+                             captions_json=json.dumps(result["captions"]),
+                             state=video_threads.STATE_AWAITING_CAPTIONS)
+        _post(thread_ts, video_social.captions_post(
+            result["captions"], feature_name=row.get("feature_name", ""),
+            notes=result.get("notes", ""), revised=bool(note)))
+    finally:
+        # A note on one video's captions can carry taste for every video's.
+        if note:
+            capture_lessons(thread_ts, note, "captions", row=row)
+
+
+def schedule_video(thread_ts: str, user: str = "") -> None:
+    """"schedule it": put the video's posts in the calendar. Outward facing.
+
+    Only from a whole-message "schedule it" matched in the handler. Every
+    platform's post goes on the next free video day. With Buffer connected
+    each is booked there at once; until then they are planned here, and
+    `scripts/buffer_check.py book` books them later. If Buffer refuses every
+    one, nothing is kept and the thread can try again.
+    """
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    row = video_threads.get(thread_ts) or {}
+    captions = video_social.load_captions(row)
+    outputs = video_social.outputs_for(row)
+    missing = sorted({p["aspect"] for p in video_social.active()}
+                     - set(outputs))
+    if not captions or missing:
+        _post(thread_ts,
+              "I cannot schedule this one yet: %s. Nothing was booked."
+              % ("there are no captions" if not captions else
+                 "I have no published link for the %s video"
+                 % ", ".join(m.replace("x", ":") for m in missing)))
+        video_threads.update(thread_ts,
+                             state=(video_threads.STATE_AWAITING_CAPTIONS
+                                    if captions
+                                    else video_threads.STATE_DELIVERED))
+        return
+
+    cal = video_social.calendar()
+    today = dt.datetime.now(ZoneInfo(cal["zone"])).date()
+    day = video_social.next_slot(video_social.taken_days(), today, cal)
+    posts = video_social.plan(row, captions, outputs, day,
+                              scheduled_by=user, cal=cal)
+
+    conn = _buffer()
+    if conn is not None:
+        video_social.book_all(posts, conn)
+    if conn is not None and all(
+            p["status"] == video_social.STATUS_FAILED for p in posts):
+        video_threads.update(thread_ts,
+                             state=video_threads.STATE_AWAITING_CAPTIONS)
+        _post(thread_ts, _schedule_post(posts, today, booked=True))
+        return
+    video_social.add(posts)
+    video_threads.update(thread_ts, state=video_threads.STATE_SCHEDULED)
+    _post(thread_ts, _schedule_post(posts, today, booked=conn is not None))
+
+
+def _buffer():
+    """The Buffer connector, if it can book posts."""
+    try:
+        from vomeos.integrations.buffer_social import BufferSocial
+    except ImportError:
+        return None
+    conn = BufferSocial()
+    return conn if conn.ready_to_post() else None
+
+
+def _day(d) -> str:
+    """"Tuesday November 3", without a platform-specific strftime flag."""
+    return "%s %s %d" % (d.strftime("%A"), d.strftime("%B"), d.day)
+
+
+def _schedule_post(posts: list[dict], today, booked: bool) -> str:
+    """What was put in the calendar, for the thread."""
+    day = _day(posts[0]["slot_date"])
+    failed = [p for p in posts if p["status"] == video_social.STATUS_FAILED]
+    if booked and not failed:
+        head = ("Scheduled in Buffer for *%s*. The social team can move or "
+                "edit any of these in Buffer's calendar." % day)
+    elif booked and len(failed) == len(posts):
+        head = ("Buffer refused all of them, so nothing is booked. Fix what "
+                "it says below, then reply *schedule it* again.")
+    elif booked:
+        head = ("Scheduled for *%s*, but Buffer refused %d of %d. The rest "
+                "are booked." % (day, len(failed), len(posts)))
+    else:
+        head = ("Planned for *%s*. Buffer is not connected yet, so nothing "
+                "is booked there. These hold the day in our calendar and get "
+                "booked once it is connected." % day)
+    lines = [head, ""]
+    marks = {video_social.STATUS_SCHEDULED: ":white_check_mark:",
+             video_social.STATUS_FAILED: ":x:"}
+    for p in posts:
+        mark = marks.get(p["status"], ":calendar:")
+        line = "%s %s, %s" % (mark, video_social.label(p["platform"]),
+                              p["post_at"].strftime("%H:%M %Z"))
+        if p.get("error"):
+            line += "  _%s_" % str(p["error"])[:200]
+        lines.append(line)
+    count, last = video_social.runway(today)
+    if count:
+        lines += ["", "_%d video%s in the calendar, through %s._"
+                  % (count, "" if count == 1 else "s", _day(last))]
     return "\n".join(lines)

@@ -5,7 +5,7 @@ running, changing or debugging the workflow. The map version is diagram 11
 in `WORKFLOWS.md`; the render side is documented in the vome-studio repo
 (`HANDOFF.md`, `INTEGRATION.md`, `DESIGN.md`).
 
-**As of:** 2026-10-20
+**As of:** 2026-10-30
 
 ---
 
@@ -15,7 +15,10 @@ Someone posts a feature idea in **#video-studio** (`C0C9P2JMEEN`). A team of
 agents researches the feature, works out how Vome should position it,
 offers three concepts, writes the script for the one a person picks, and
 only when a person says so builds a branded video in four formats and posts
-a link to watch it on a phone.
+a link to watch it on a phone. Then the social copywriter writes a caption
+for each platform (LinkedIn, Facebook and Instagram to start; TikTok and
+YouTube Shorts are ready to switch on), and on **schedule it** the posts
+go into the posting calendar in Buffer.
 
 Nothing costs real money (voice and rendering) until someone sends
 **go build the video**. Everything before that is agent time: about $1.90
@@ -71,6 +74,10 @@ question.
 | `scrap this` (or "kill this one", "discard this video") | Closes the thread. Files stay; it stops counting as an earlier video |
 | `I don't like it` (nothing specific) | You get the three options above instead of a guessed revision |
 | `forget that` | Drops the lesson the bot just announced |
+| A note on the captions ("make LinkedIn less salesy") | The captions are revised |
+| `recut` followed by a note, while captions wait (`recut, make the hook a question`) | A note on the video: the script is revised, approved and rebuilt, then captioned again |
+| `schedule it` (also `queue it`, "ok, schedule it please"), **as the whole message**, while captions wait | Puts each platform's post on the next free video day. The only reply that posts anything publicly |
+| `write the captions`, on a video built before captions existed (or after a failed caption run) | Drafts the captions |
 
 Rules that protect you:
 
@@ -87,7 +94,81 @@ Rules that protect you:
   reminder in the channel never starts a video.
 
 When it is built, the thread gets **Watch on your phone** with the 9:16 link
-first, then a link for every format.
+first, then a link for every format, and a minute later the captions.
+
+---
+
+## Captions and the posting calendar (added 2026-10-30)
+
+Sammy's goal: at least two videos a week, from a stock of ten to twelve
+built ahead. The social team owns the days and times.
+
+**Captions.** The video already has burned-in subtitles, so a caption never
+repeats the voiceover. It gives a stranger a reason to watch. One per
+platform, each with its own file:
+
+| Platform | File | Our limit | Hashtags | Links |
+|---|---|---|---|---|
+| LinkedIn | 4:5 | 1,300 characters | 0 to 3 | yes |
+| Facebook | 4:5 | 600 | 0 to 3 | yes |
+| Instagram | 9:16 (Reels) | 1,000 | 3 to 5 (Instagram's cap since Dec 2025) | no, "Link in bio" |
+| TikTok | 9:16 | 300, one paragraph (TikTok drops line breaks) | 3 to 5 | no |
+| YouTube Shorts | 9:16 | title of 100, description of 1,000 | 1 to 3 | yes |
+
+The numbers live in `video_social.PLATFORMS`; the agent is given the same
+table (`platforms_brief()`), so the two cannot disagree. Code refuses a set
+with a dash, without "volunteer", over a limit, with hashtags out of range,
+with a link where links are dead, or naming a competitor, and the
+copywriter gets one retry with the reason.
+
+**Approval.** `schedule it` as the whole message, like a greenlight. "Approve"
+or "ship it" while captions wait gets the three options instead, because it
+could mean the video as easily as the posts.
+
+**The calendar.** Each video takes one day; every platform posts that day at
+its own time. Default: Tuesday and Thursday, America/Montreal, LinkedIn 9:00,
+Facebook 12:00, Instagram 12:30, YouTube 15:00, TikTok 18:00. Never the same
+day as the "schedule it". Override it whole with `SOCIAL_CALENDAR` (same
+JSON shape as `DEFAULT_CALENDAR`), no deploy. Once booked, posts are moved
+and edited in Buffer, not here.
+
+**Buffer.** Booked through Buffer's GraphQL API
+(`vomeos/integrations/buffer_social.py`). Sammy chose Buffer over Zoho Social
+on 2026-10-30: Zoho's API is off until its support enables it per portal and
+does not document video, while Buffer's is self serve on every plan and takes
+a video by public link. Posts go out automatically at their time, Instagram as
+a Reel shared to the feed and Facebook as a feed post (its file is 4:5). Until Buffer is connected, posts are **planned**:
+they hold their day in `social_posts` and the thread says nothing is booked.
+
+**Which platforms.** LinkedIn, Facebook and Instagram, where volunteer
+managers are, on Buffer's free plan (three channels, 10 queued posts per
+channel, which is five weeks at two videos a week). `SOCIAL_PLATFORMS`
+(comma separated keys) adds TikTok or YouTube with no code change; the
+copywriter is only asked for, and the code only checks and books, the
+platforms listed.
+
+To connect it:
+
+1. Connect the channels in Buffer (done for LinkedIn, Facebook and Instagram
+   on 2026-10-30).
+2. Create a key at publish.buffer.com/settings/api (organization owner
+   only) and set `BUFFER_API_KEY`.
+3. `py scripts/buffer_check.py check` (read only) prints the organization,
+   every channel, which channel each platform will post to, and the schema
+   values the posts rely on. Each platform takes the one connected channel of
+   its service; with two (a LinkedIn profile and page, say) set
+   `BUFFER_CHANNELS` to `{"linkedin": "<channel id>"}`.
+4. `py scripts/buffer_check.py draft` creates one **draft** per platform with
+   the pilot render, so Buffer itself says whether it takes the video. Drafts
+   never publish; delete them in Buffer after. Run it on Sam's word.
+5. `py scripts/buffer_check.py book` books every planned post whose time has
+   not passed. Outward facing: run it on Sam's word.
+
+If Buffer refuses every post of a video, nothing is kept and the thread goes
+back to waiting, so *schedule it* can be sent again once the cause is fixed.
+
+Videos built before 2026-10-30 have no stored links; `R2_PUBLIC_BASE` on
+the web service lets their links be rebuilt from Studio's file naming.
 
 ---
 
@@ -105,6 +186,7 @@ inputs, limits) and an answer key (`evals/cases.jsonl`).
 | 4 | `creative_director` | Fable 5.1 (`executive`) | high | Positioning, playbook, website, Studio's formats, earlier videos, lessons | Three concepts |
 | 5 | `content_producer` (copywriter) | Opus 5.5 (`premium`) | high | Concept, positioning, Studio's contract for the format, playbook, website, labels, lessons | The storyboard (script) |
 | 6 | `brand_editor` | Opus 5.5 (`premium`) | high | Storyboard, concept, contract, playbook, labels, lessons | Revised storyboard + list of changes |
+| 7 | `social_copywriter` | Opus 5.5 (`premium`) | high | Approved storyboard, positioning, platform rules, playbook, lessons | A caption per platform (and a YouTube title) |
 | any reply | `lesson_keeper` | Opus 5.5 (`premium`) | high | Your message, what you were reacting to, current lessons | Lessons to keep, or none |
 
 Tiers resolve in `vomeos/config.py` and can be overridden per environment
@@ -214,7 +296,9 @@ From production's run records (`vomeos_agent_runs`), a real round on
 | **Idea to reviewed script** | | **$1.89, about 4 minutes** |
 
 Direction re-runs the scout, strategist and director (about $1.25). A script
-note re-runs the copywriter (about $0.35). A lesson check is about $0.04.
+note re-runs the copywriter (about $0.35). A lesson check is about $0.04. Captions are one
+Opus 5.5 call (estimated $0.15 to $0.30, not yet measured), again per
+caption note.
 ElevenLabs voice and rendering are billed separately, on build only.
 
 Decided 2026-10-20 (G46): **the strategist and the creative director stay on
@@ -233,12 +317,15 @@ there are no free draft builds.
 |---|---|
 | One row per Slack thread: state, the brief (the first message plus any detail added while the bot asked for a link), who started it (`started_by`), whether it runs without an article (`brief_only`), positioning, concepts, pick, storyboard | `video_threads` (Postgres, web service) |
 | Lessons | `video_lessons` |
+| Each video's captions and published links | `video_threads.captions_json`, `outputs_json` |
+| Every social post: platform, file, caption, day and time, planned, scheduled or failed, Buffer's post id, who said schedule it | `social_posts` |
 | Every agent run: agent, model, tokens, time, thread | `vomeos_agent_runs`, `subject_id` = the Slack thread_ts |
 | Finished videos, each render's manifest and storyboard | Cloudflare R2 bucket `vome-studio-renders`, `<feature>/<date>/` |
 
 Thread states: `idea`, `awaiting_context` (no link yet, nothing spent),
 `concepting`, `awaiting_concept`, `drafting`, `awaiting_review`,
-`building`, `delivered`, `scrapped`.
+`building`, `delivered`, `captioning`, `awaiting_captions`, `scheduled`,
+`scrapped`.
 
 ---
 
@@ -252,11 +339,15 @@ Thread states: `idea`, `awaiting_context` (no link yet, nothing spent),
 | `video_threads.py` | The thread table |
 | `video_lessons.py` | The lessons table |
 | `video_marketing.py` | Playbook, website copy, labels |
+| `video_social.py` | Platforms, caption checks, the calendar, the `social_posts` table, the Buffer post body and channel matching |
+| `vomeos/integrations/buffer_social.py` | The GraphQL client for Buffer |
+| `scripts/buffer_check.py` | Check the Buffer connection, create test drafts, book planned posts |
 | `vomeos/integrations/vome_studio.py` | The HTTP client for Studio |
-| `agents/content/*` | The six agents |
-| `skills/keeping-the-vome-video-voice.md`, `skills/writing-a-vome-storyboard.md` | Shared rules |
+| `agents/content/*` | The seven agents |
+| `skills/keeping-the-vome-video-voice.md`, `skills/writing-a-vome-storyboard.md`, `skills/writing-vome-social-captions.md` | Shared rules |
 
 Tests: `test_video_studio_handler.py`, `test_video_studio_jobs.py`,
+`test_video_social.py`,
 `test_video_studio_marketing.py`, `test_video_concepts.py`,
 `test_vomeos_models.py`. Run `py -m pytest -q`. No test may reach ClickUp,
 Zoho, Slack, Studio, a model or the production database.
@@ -326,3 +417,4 @@ Railway logs reset on every deploy, so the database is the reliable record.
 | 2026-10-18 | Playbook and website copy as context; Fable 5.1 and Opus 5.5; phone links; deployed |
 | 2026-10-20 | Slackbot, apps and reminders ignored after a 3:55 AM reminder started a video; threads record who started them |
 | 2026-10-20 | No link, no spend: a thread without a help centre link asks for one, or for detail, or for "continue"; the keyword search for an article is gone. Fable stays for strategy (G46); every build uses Maya (G51) |
+| 2026-10-30 | Captions and the posting calendar: the social copywriter, "schedule it", the `social_posts` table, booking in Buffer (planned until connected); LinkedIn, Facebook and Instagram to start |

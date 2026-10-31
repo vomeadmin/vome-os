@@ -10,7 +10,9 @@ replies with direction and gets three new ones. The copywriter
 the brand editor reads it once. The script goes back into the thread for
 review. It is refined there over as many rounds as it takes, costing
 nothing. On an explicit greenlight, Vome Studio builds it and the result is
-posted into the same thread.
+posted into the same thread. The social copywriter then writes a caption per
+platform for review, and an explicit "schedule it" puts the posts in the
+calendar (video_social.py).
 
 A concept pick is matched the same way as a greenlight: by pattern, in
 `video_concepts.match_concept_pick`, never inferred. "I like 2 but make it
@@ -151,6 +153,37 @@ CONTINUE = re.compile(
     r"(?:only )?the context(?: (?:here|provided))?))?"
     r"(?:,?\s+please)?[.!]*$")
 
+# Put the captioned video's posts in the calendar. The whole message, after
+# the same politeness trim as a greenlight, because it is the step that puts
+# words on five public feeds.
+SCHEDULE = (
+    "schedule it", "schedule them", "schedule this", "schedule", "schedule "
+    "the posts", "schedule the video", "queue it", "queue them",
+    "add it to the calendar", "add it to the queue",
+)
+
+# Ask for captions on a delivered video that has none, or try again after a
+# failed run. The whole message.
+CAPTIONS = re.compile(
+    r"^(?:<[^>]+>\s*)?(?:ok,?\s+|okay,?\s+|please\s+|let'?s\s+)?"
+    r"(?:(?:write|do|make|draft)\s+(?:the\s+)?captions|captions|"
+    r"caption it|caption this)(?:,?\s+please)?[.!]*$")
+
+# While captions wait, a note on the VIDEO starts with "recut"; everything
+# else is a note on the captions. What follows the word is the note.
+RECUT = re.compile(r"^(?:<[^>]+>\s*)?re-?cut\b[\s,.:;!-]*(?P<note>.*)$",
+                   re.S | re.I)
+
+
+def is_schedule(text: str) -> bool:
+    """True only when the whole message asks to schedule."""
+    body = re.sub(r"<[^>]+>", " ", text or "")
+    body = re.sub(r"\s+", " ", body).strip().lower()
+    body = _LEAD.sub("", body)
+    body = _TAIL.sub("", body)
+    return body.strip(" ,.!") in SCHEDULE
+
+
 SLACKBOT_USER = "USLACKBOT"
 
 # A reminder's text, after any leading mentions: "Reminder: ...", "reminder
@@ -180,7 +213,8 @@ def classify(text: str, thread_state: str | None) -> str:
     new | context | context_link | continue | need_context | pick
     | direction | busy | pick_first | note | greenlight | forget
     | script_pending | scrap | restart | unclear | scrapped | building
-    | ignore
+    | captions | caption_note | recut | captions_options | captions_first
+    | busy_captions | schedule | scheduled | ignore
 
     `thread_state` is what we already know about this thread, and it matters:
     the same words mean different things at different points. "Go build it"
@@ -205,6 +239,16 @@ def classify(text: str, thread_state: str | None) -> str:
     if thread_state == video_threads.STATE_SCRAPPED:
         return "restart" if RESTART.match(body) else "scrapped"
 
+    # The posts are booked. Changes happen in Buffer, where the social
+    # team works; nothing here can pull a booked post back.
+    if thread_state == video_threads.STATE_SCHEDULED:
+        return "scheduled"
+
+    # The copywriter is mid-run, and its result would overwrite whatever a
+    # message here started.
+    if thread_state == video_threads.STATE_CAPTIONING:
+        return "busy_captions"
+
     # A build is spending credits and cannot be pulled back; anything that
     # would change the script waits for it.
     if thread_state == video_threads.STATE_BUILDING and (
@@ -217,6 +261,27 @@ def classify(text: str, thread_state: str | None) -> str:
             None, video_threads.STATE_IDEA, video_threads.STATE_CONCEPTING,
             video_threads.STATE_AWAITING_CONTEXT):
         return "restart"
+
+    # Captions are up for review. "schedule it" is the only way to the
+    # calendar; a greenlight word is not, because "approve" here could as
+    # easily mean the video as the posts.
+    if thread_state == video_threads.STATE_AWAITING_CAPTIONS:
+        if is_schedule(text):
+            return "schedule"
+        if RECUT.match(text.strip()):
+            return "recut"
+        if CAPTIONS.match(body):
+            return "captions"
+        if is_greenlight(text) or VAGUE_DISLIKE.match(body):
+            return "captions_options"
+        return "caption_note"
+
+    if thread_state == video_threads.STATE_DELIVERED:
+        if CAPTIONS.match(body):
+            return "captions"
+        if is_schedule(text):
+            return "captions_first"
+
     if VAGUE_DISLIKE.match(body) and thread_state in (
             video_threads.STATE_AWAITING_REVIEW,
             video_threads.STATE_DELIVERED,
@@ -504,6 +569,77 @@ def handle_video_studio_message(event: dict) -> None:
         ).start()
         return
 
+    if intent == "captions":
+        video_threads.update(thread_ts, state=video_threads.STATE_CAPTIONING)
+        _ack(thread_ts, "Writing the captions now, one per platform. Back "
+             "shortly for you to review.")
+        threading.Thread(
+            target=_write_captions, args=(thread_ts, ""), daemon=True
+        ).start()
+        return
+
+    if intent == "caption_note":
+        if mentions_approval(text) or "schedule" in text.lower():
+            _ack(thread_ts,
+                 "I read this as notes on the captions, so nothing is "
+                 "scheduled. Updating them now. When they are right, reply "
+                 "with just: schedule it")
+        video_threads.update(thread_ts, state=video_threads.STATE_CAPTIONING)
+        threading.Thread(
+            target=_write_captions, args=(thread_ts, text), daemon=True
+        ).start()
+        return
+
+    if intent == "recut":
+        note = (RECUT.match(text.strip()).group("note") or "").strip()
+        if not note:
+            _ack(thread_ts, "What should change in the video? Reply "
+                 "*recut* followed by the change, like _recut, make the "
+                 "hook a question_.")
+            return
+        video_threads.update(thread_ts, state=video_threads.STATE_DRAFTING)
+        _ack(thread_ts,
+             "Taking that as a change to the video. Updating the script now. "
+             "Once you approve it, the video is rebuilt and captioned again.")
+        threading.Thread(
+            target=_revise_script, args=(thread_ts, note), daemon=True
+        ).start()
+        return
+
+    if intent == "captions_options":
+        _ack(thread_ts,
+             "Three ways to go from here:\n"
+             "• Reply *schedule it* to put these posts in the calendar.\n"
+             "• Tell me what to change in the captions.\n"
+             "• Start with *recut* to change the video itself.")
+        return
+
+    if intent == "captions_first":
+        _ack(thread_ts, "There are no captions for this video yet. Reply "
+             "*write the captions* and I will draft them for review first.")
+        return
+
+    if intent == "busy_captions":
+        _ack(thread_ts, "Still writing the captions. Once they are posted, "
+             "reply with notes, or *schedule it*.")
+        return
+
+    if intent == "scheduled":
+        _ack(thread_ts,
+             "This video's posts are already in the calendar. Move or edit "
+             "them in Buffer. For a new cut of the video, start a new "
+             "thread.")
+        return
+
+    if intent == "schedule":
+        # Held here, before the thread starts, so a second "schedule it"
+        # sent while the first books is told it is done, not booked twice.
+        video_threads.update(thread_ts, state=video_threads.STATE_SCHEDULED)
+        threading.Thread(
+            target=_schedule_video, args=(thread_ts, user), daemon=True
+        ).start()
+        return
+
     if intent == "greenlight":
         if (row or {}).get("state") == video_threads.STATE_BUILDING:
             _ack(thread_ts, "Already building this one, hold tight.")
@@ -581,3 +717,34 @@ def _revise_script(thread_ts: str, note: str) -> None:
 def _build_video(thread_ts: str) -> None:
     from video_studio_jobs import build_video
     build_video(thread_ts)
+
+
+# The two social steps hold the thread in a state that refuses other replies
+# (captioning, scheduled). A crash must not leave it there for good.
+
+def _write_captions(thread_ts: str, note: str) -> None:
+    from video_studio_jobs import write_captions
+    try:
+        write_captions(thread_ts, note)
+    except Exception as exc:
+        print("[VIDEO] captions crashed on %s: %s" % (thread_ts, exc))
+        row = video_threads.get(thread_ts) or {}
+        video_threads.update(
+            thread_ts, state=(video_threads.STATE_AWAITING_CAPTIONS
+                              if row.get("captions_json")
+                              else video_threads.STATE_DELIVERED))
+        _ack(thread_ts, "Something went wrong writing the captions, and "
+             "nothing changed. Reply *write the captions* to try again.")
+
+
+def _schedule_video(thread_ts: str, user: str) -> None:
+    from video_studio_jobs import schedule_video
+    try:
+        schedule_video(thread_ts, user)
+    except Exception as exc:
+        print("[VIDEO] scheduling crashed on %s: %s" % (thread_ts, exc))
+        video_threads.update(thread_ts,
+                             state=video_threads.STATE_AWAITING_CAPTIONS)
+        _ack(thread_ts, "Something went wrong putting this in the calendar. "
+             "Check Buffer before trying again, then reply *schedule "
+             "it*.")

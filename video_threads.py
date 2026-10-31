@@ -45,6 +45,15 @@ STATE_DELIVERED = "delivered"
 # storyboard id stays reserved, but it no longer counts as an earlier
 # video, and nothing more happens in the thread.
 STATE_SCRAPPED = "scrapped"
+# After delivery: the social copywriter is writing a caption per platform,
+# then they wait for a person's notes or "schedule it". Notes loop back to
+# captioning. A failed caption run leaves the thread delivered.
+STATE_CAPTIONING = "captioning"
+STATE_AWAITING_CAPTIONS = "awaiting_captions"
+# "schedule it": the posts are in the calendar (social_posts), booked in
+# Buffer or planned until it is connected. Nothing more happens here;
+# the social team moves posts in Zoho.
+STATE_SCHEDULED = "scheduled"
 
 _CREATE = """
 CREATE TABLE IF NOT EXISTS video_threads (
@@ -94,6 +103,13 @@ _ADD_COLUMNS = (
     # the only account of the feature, and no article is looked up.
     "ALTER TABLE video_threads ADD COLUMN IF NOT EXISTS "
     "brief_only BOOLEAN NOT NULL DEFAULT FALSE",
+    # The build report's outputs (aspect, url, bytes), so each platform's
+    # post can be given the right file long after the delivery post.
+    "ALTER TABLE video_threads ADD COLUMN IF NOT EXISTS "
+    "outputs_json TEXT NOT NULL DEFAULT ''",
+    # The social copywriter's captions, by platform, as last posted.
+    "ALTER TABLE video_threads ADD COLUMN IF NOT EXISTS "
+    "captions_json TEXT NOT NULL DEFAULT ''",
 )
 
 
@@ -148,7 +164,8 @@ def update(thread_ts: str, **fields) -> None:
     allowed = {"storyboard", "storyboard_json", "feature_name", "faq_url",
                "state", "rounds", "last_runtime", "render_folder",
                "positioning_json", "concepts_json", "chosen_concept",
-               "brief", "started_by", "brief_only"}
+               "brief", "started_by", "brief_only", "outputs_json",
+               "captions_json"}
     sets = {k: v for k, v in fields.items() if k in allowed}
     if not sets or not DATABASE_URL:
         return

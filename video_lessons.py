@@ -30,7 +30,7 @@ STATUS_RETIRED = "retired"
 
 # The roles a lesson can be addressed to. "all" reaches every one of them.
 ROLES = ("content_strategist", "creative_director", "content_producer",
-         "brand_editor")
+         "brand_editor", "social_copywriter")
 
 _CREATE = """
 CREATE TABLE IF NOT EXISTS video_lessons (

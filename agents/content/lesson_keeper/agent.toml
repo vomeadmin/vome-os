@@ -25,7 +25,8 @@ requires_context = [
     # The person's own words, exactly as written in the thread.
     "message",
     # Where in the loop it was said: "concepts" (direction on three
-    # concepts) or "script" (a note on a script or a delivered video).
+    # concepts), "script" (a note on a script or a delivered video) or
+    # "captions" (a note on the social post captions).
     "stage",
     # What they were reacting to: the feature, the concepts or the script.
     "reacting_to",

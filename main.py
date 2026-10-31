@@ -187,6 +187,11 @@ try:
     video_lessons.init()
 except Exception as _exc:
     print(f"WARNING: video_lessons.init() failed: {_exc}")
+try:
+    import video_social
+    video_social.init()
+except Exception as _exc:
+    print(f"WARNING: video_social.init() failed: {_exc}")
 
 # ---------------------------------------------------------------------------
 # Vome OS as a claude.ai connector (MCP + OAuth). Off until MCP_PUBLIC_URL and

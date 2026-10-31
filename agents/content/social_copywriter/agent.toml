@@ -1,0 +1,66 @@
+[identity]
+name = "social_copywriter"
+division = "content"
+title = "Social Copywriter"
+reports_to = "sam"
+hired = "2026-10-30"
+
+[model]
+# Premium tier (Opus 5.5), the same reasoning as content_producer: these are
+# the first words a stranger reads about Vome, on up to five public feeds, and
+# the hard part is judgement (which line earns the "see more" tap, what to leave
+# out). It runs once per delivered video plus once per caption note, so the
+# cost is a few calls a week. Opus 5.5 defaults to medium effort, so high is
+# set explicitly.
+tier = "premium"
+effort = "high"
+# Up to five captions of a few hundred characters, plus reasoning.
+max_tokens = 16000
+
+[job]
+charter = "charter.md"
+skills = ["keeping-the-vome-video-voice", "writing-vome-social-captions"]
+requires_context = [
+    # The approved storyboard, as JSON: what the video says and shows.
+    "storyboard",
+    # The strategist's positioning brief, as JSON (empty for a video made
+    # before positioning existed). The single claim the captions carry.
+    "positioning",
+    # Each platform's rules, from video_social.PLATFORMS, so the agent
+    # writes to the same limits the code checks.
+    "platforms",
+    # Where links go, on the platforms where links work.
+    "website",
+    # The captions a person last read, as JSON. Empty on a first pass.
+    "previous_captions",
+    # What the person said about them. Empty on a first pass.
+    "note",
+    # What the people reviewing videos have taught the team.
+    "house_lessons",
+    # Vome's Product Marketing Playbook: the two ICPs and the words they use.
+    "marketing_playbook",
+]
+output = "json"
+
+[guards]
+# Shape only. video_social.check_captions refuses a caption with a dash,
+# without "volunteer", over its limit, with the wrong number of hashtags, a
+# dead link or a competitor's name, and the job retries once with the reason.
+output = ["json_shape", "non_empty"]
+# False: every caption is posted to the thread and a person replies
+# "schedule it" before anything reaches a public feed.
+client_facing = false
+
+[limits]
+timeout_seconds = 300
+max_retries = 2
+
+[approval]
+requires_ceo_approval = false
+escalate_to = "#video-studio"
+
+[evals]
+path = "evals/cases.jsonl"
+# Held at 0.8 like the other writers. Voice is taste; what must hold every
+# time is in check_captions, and the cases pin it.
+min_agreement = 0.8

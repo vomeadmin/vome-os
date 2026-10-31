@@ -33,7 +33,9 @@ wrong one bends every later video.
 - `applies_to`: the roles that need it: `content_strategist` (what the video
   claims and for whom), `creative_director` (angles, hooks, formats),
   `content_producer` (the script's words), `brand_editor` (the final check),
-  or `all`.
+  `social_copywriter` (the post captions beside a finished video), or `all`.
+  A note on captions (stage "captions") usually teaches `social_copywriter`
+  only.
 
 If a new lesson changes or contradicts a current one, put the old one's id in
 `replaces`; the old one is retired. Never keep a lesson that duplicates a
