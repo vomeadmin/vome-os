@@ -1280,6 +1280,53 @@ def run_captions(row: dict, note: str = "") -> dict:
                                   % reason}
 
 
+def pickup_video(thread_ts: str, slug: str) -> None:
+    """Adopt a video built outside a thread, then caption it.
+
+    Videos made in Claude Code have no thread, so nothing could caption or
+    schedule them (recruitment workflows, 2026-10-31). Studio hands back the
+    storyboard and the newest files published to R2, and from there the
+    thread is the same as one whose build just finished.
+    """
+    conn = _studio()
+    if conn is None:
+        video_threads.update(thread_ts, state=video_threads.STATE_IDEA)
+        _post(thread_ts, _no_transport_error()["error"])
+        return
+    res = conn.video(slug)
+    data = res.data if res.ok and isinstance(res.data, dict) else {}
+    sb = data.get("storyboard") or {}
+    render = data.get("render") or {}
+    if not sb.get("scenes"):
+        video_threads.update(thread_ts, state=video_threads.STATE_IDEA)
+        _post(thread_ts, "I could not find a video called *%s* in Studio%s. "
+              "Use the name its files carry, like _caption "
+              "recruitment-workflows_." % (
+                  slug, " (%s)" % res.error[:300] if res.error else ""))
+        return
+    outputs = [o for o in render.get("outputs") or []
+               if isinstance(o, dict) and o.get("url") and o.get("aspect")]
+    if not outputs:
+        video_threads.update(thread_ts, state=video_threads.STATE_IDEA)
+        _post(thread_ts, "*%s* has a script but no published files, so "
+              "there is nothing to post yet. Build it first." % slug)
+        return
+    name = sb.get("feature_name") or slug
+    video_threads.update(
+        thread_ts, storyboard=slug, feature_name=name,
+        storyboard_json=json.dumps(sb, ensure_ascii=False),
+        faq_url=sb.get("source_faq_url") or "",
+        render_folder=render.get("folder", ""),
+        outputs_json=json.dumps([{k: o.get(k) for k in
+                                  ("aspect", "url", "bytes")}
+                                 for o in outputs]),
+        state=video_threads.STATE_DELIVERED)
+    _post(thread_ts, "\n".join(
+        ["Picked up *%s*, built %s:" % (name, render.get("date", ""))]
+        + ["• %s  <%s|watch>" % (o["aspect"], o["url"]) for o in outputs]))
+    write_captions(thread_ts)
+
+
 def write_captions(thread_ts: str, note: str = "") -> None:
     """Write (or, with a note, revise) the captions and post them."""
     row = video_threads.get(thread_ts) or {}

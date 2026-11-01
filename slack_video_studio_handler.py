@@ -169,6 +169,12 @@ CAPTIONS = re.compile(
     r"(?:(?:write|do|make|draft)\s+(?:the\s+)?captions|captions|"
     r"caption it|caption this)(?:,?\s+please)?[.!]*$")
 
+# A new message naming a video Studio already built (in Claude Code, say):
+# "caption recruitment-workflows". It opens a thread for that video, ready
+# for captions, instead of starting a new one. The name is the storyboard's.
+PICKUP = re.compile(r"^(?:<[^>]+>\s*)?(?:caption|captions for|post|pick up)"
+                    r"\s+(?P<slug>[a-z0-9][a-z0-9_-]*-[a-z0-9_-]+)[.!]*$")
+
 # While captions wait, a note on the VIDEO starts with "recut"; everything
 # else is a note on the captions. What follows the word is the note.
 RECUT = re.compile(r"^(?:<[^>]+>\s*)?re-?cut\b[\s,.:;!-]*(?P<note>.*)$",
@@ -214,7 +220,7 @@ def classify(text: str, thread_state: str | None) -> str:
     | direction | busy | pick_first | note | greenlight | forget
     | script_pending | scrap | restart | unclear | scrapped | building
     | captions | caption_note | recut | captions_options | captions_first
-    | busy_captions | schedule | scheduled | ignore
+    | busy_captions | schedule | scheduled | pickup | ignore
 
     `thread_state` is what we already know about this thread, and it matters:
     the same words mean different things at different points. "Go build it"
@@ -235,6 +241,10 @@ def classify(text: str, thread_state: str | None) -> str:
     # forget that the hook..." is still a note, not an undo.
     if FORGET.match(body):
         return "forget"
+
+    if thread_state in (None, video_threads.STATE_IDEA) and PICKUP.match(
+            body):
+        return "pickup"
 
     if thread_state == video_threads.STATE_SCRAPPED:
         return "restart" if RESTART.match(body) else "scrapped"
@@ -386,6 +396,21 @@ def handle_video_studio_message(event: dict) -> None:
                  % "\n".join("• %s" % r for r in dropped))
         else:
             _ack(thread_ts, "There is no lesson from this thread to drop.")
+        return
+
+    if intent == "pickup":
+        slug = PICKUP.match((text or "").strip().lower()).group("slug")
+        video_threads.start(thread_ts, channel, feature_name=slug)
+        # Captioning holds the thread, so a reply meanwhile cannot start
+        # concepts for a video that already exists.
+        video_threads.update(thread_ts, state=video_threads.STATE_CAPTIONING,
+                             started_by=(row or {}).get("started_by") or user)
+        _ack(thread_ts, "Picking up *%s*. Finding its files in Studio, then "
+             "writing the captions for you to review. Nothing posts until "
+             "you reply *schedule it*." % slug)
+        threading.Thread(
+            target=_pickup_video, args=(thread_ts, slug), daemon=True
+        ).start()
         return
 
     if intent == "new":
@@ -735,6 +760,21 @@ def _write_captions(thread_ts: str, note: str) -> None:
                               else video_threads.STATE_DELIVERED))
         _ack(thread_ts, "Something went wrong writing the captions, and "
              "nothing changed. Reply *write the captions* to try again.")
+
+
+def _pickup_video(thread_ts: str, slug: str) -> None:
+    from video_studio_jobs import pickup_video
+    try:
+        pickup_video(thread_ts, slug)
+    except Exception as exc:
+        print("[VIDEO] pickup crashed on %s: %s" % (thread_ts, exc))
+        row = video_threads.get(thread_ts) or {}
+        video_threads.update(
+            thread_ts, state=(video_threads.STATE_DELIVERED
+                              if row.get("storyboard_json")
+                              else video_threads.STATE_IDEA))
+        _ack(thread_ts, "Something went wrong picking up *%s*. Try again "
+             "with the same message." % slug)
 
 
 def _schedule_video(thread_ts: str, user: str) -> None:

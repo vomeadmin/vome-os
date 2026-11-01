@@ -591,3 +591,65 @@ def test_a_crashed_caption_run_frees_the_thread(handler, monkeypatch):
     monkeypatch.setattr(handler, "_ack", lambda t, m: None)
     handler._write_captions("1.2", "")
     assert states == ["delivered"]
+
+
+# ------------------------------------------------------------------ pickup
+
+@pytest.mark.parametrize("text, state", [
+    ("caption recruitment-workflows", None),
+    ("Caption recruitment-workflows.", None),
+    ("<@U1> post email-formats-reveal", None),
+    ("caption recruitment-workflows", "idea"),
+])
+def test_naming_a_built_video_picks_it_up(handler, text, state):
+    assert handler.classify(text, state) == "pickup"
+
+
+@pytest.mark.parametrize("text, state", [
+    ("caption recruitment-workflows", "awaiting_captions"),
+    ("a video about kiosks", None),
+    ("caption kiosks", None),
+])
+def test_anything_else_is_not_a_pickup(handler, text, state):
+    assert handler.classify(text, state) != "pickup"
+
+
+def _pickup(jobs, monkeypatch, result):
+    posted, saved, captioned = [], {}, []
+    studio = SimpleNamespace(video=lambda slug: result)
+    monkeypatch.setattr(jobs, "_studio", lambda: studio)
+    monkeypatch.setattr(jobs.video_threads, "update",
+                        lambda t, **f: saved.update(f))
+    monkeypatch.setattr(jobs, "_post", lambda t, m: posted.append(m))
+    monkeypatch.setattr(jobs, "write_captions",
+                        lambda t, note="": captioned.append(t))
+    jobs.pickup_video("1.2", "kiosk")
+    return posted, saved, captioned
+
+
+def test_a_picked_up_video_is_saved_and_captioned(jobs, monkeypatch):
+    render = {"folder": "renders/kiosk/2026-10-31", "date": "2026-10-31",
+              "outputs": [{"aspect": "4x5", "url": "https://r2/k.mp4",
+                           "bytes": 9}]}
+    posted, saved, captioned = _pickup(jobs, monkeypatch, SimpleNamespace(
+        ok=True, error="", data={"storyboard": STORYBOARD, "render": render}))
+    assert saved["state"] == "delivered" and saved["storyboard"] == "kiosk"
+    assert json.loads(saved["storyboard_json"]) == STORYBOARD
+    assert saved["render_folder"] == "renders/kiosk/2026-10-31"
+    assert json.loads(saved["outputs_json"])[0]["url"] == "https://r2/k.mp4"
+    assert "Picked up *Kiosk*" in posted[0] and captioned == ["1.2"]
+
+
+def test_an_unknown_video_frees_the_thread(jobs, monkeypatch):
+    posted, saved, captioned = _pickup(jobs, monkeypatch, SimpleNamespace(
+        ok=False, error="404 no storyboard", data=None))
+    assert saved["state"] == "idea" and captioned == []
+    assert "could not find" in posted[0]
+
+
+def test_a_video_with_no_published_files_is_not_captioned(
+        jobs, monkeypatch):
+    posted, saved, captioned = _pickup(jobs, monkeypatch, SimpleNamespace(
+        ok=True, error="", data={"storyboard": STORYBOARD, "render": None}))
+    assert saved["state"] == "idea" and captioned == []
+    assert "no published files" in posted[0]

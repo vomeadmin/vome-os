@@ -155,3 +155,11 @@ class VomeStudio(Connector):
         the same payload as `build` once it is done.
         """
         return self._call("get_build", "GET", "/v1/builds/%s" % build_id)
+
+    def video(self, slug: str) -> IntegrationResult:
+        """A video already built: `{"storyboard", "render"}`, where render is
+        `{"folder", "date", "outputs": [{"aspect", "url", "bytes"}]}` for its
+        newest published files, or null when nothing is published. For a
+        video built outside a Slack thread. Free.
+        """
+        return self._call("video", "GET", "/v1/videos/%s" % slug)
