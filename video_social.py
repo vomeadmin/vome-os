@@ -267,6 +267,12 @@ def captions_post(captions: dict, feature_name: str = "", notes: str = "",
 # The rendered files
 # ---------------------------------------------------------------------------
 
+# Studio's public bucket address, for videos built before their links were
+# kept. Public by design (every post links a file under it), so a default
+# rather than one more setting to forget on a service.
+R2_PUBLIC_BASE = "https://pub-44ab2eeed6ca4f6d9a157f85e96d0b6d.r2.dev"
+
+
 def outputs_for(row: dict) -> dict:
     """{aspect: {"url", "bytes"}} for the thread's published render.
 
@@ -285,7 +291,7 @@ def outputs_for(row: dict) -> dict:
     if found:
         return found
     folder = ((row or {}).get("render_folder") or "").strip("/")
-    base = os.environ.get("R2_PUBLIC_BASE", "").rstrip("/")
+    base = (os.environ.get("R2_PUBLIC_BASE") or R2_PUBLIC_BASE).rstrip("/")
     parts = folder.split("/")
     if not base or len(parts) < 3:
         return {}

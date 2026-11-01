@@ -77,7 +77,7 @@ question.
 | A note on the captions ("make LinkedIn less salesy") | The captions are revised |
 | `recut` followed by a note, while captions wait (`recut, make the hook a question`) | A note on the video: the script is revised, approved and rebuilt, then captioned again |
 | `schedule it` (also `queue it`, "ok, schedule it please"), **as the whole message**, while captions wait | Puts each platform's post on the next free video day. The only reply that posts anything publicly |
-| `write the captions`, on a video built before captions existed (or after a failed caption run) | Drafts the captions |
+| `write the captions` (also build, create, generate or "lets build the captions"), on a video built before captions existed, after a failed caption run, or after a note on the script of a video already built | Drafts the captions for the built video |
 | `caption <name>` as a **new message** (`caption recruitment-workflows`), for a video built outside Slack | Opens a thread for that video with its script and newest files from Studio (`GET /v1/videos/<name>`), then drafts the captions. The name is the storyboard's, the one its files carry |
 
 Rules that protect you:

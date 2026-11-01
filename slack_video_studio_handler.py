@@ -163,11 +163,14 @@ SCHEDULE = (
 )
 
 # Ask for captions on a delivered video that has none, or try again after a
-# failed run. The whole message.
+# failed run. The whole message. "Lets build the captions" (2026-11-01) was
+# missed by a narrower list and taken as a note on the script.
 CAPTIONS = re.compile(
-    r"^(?:<[^>]+>\s*)?(?:ok,?\s+|okay,?\s+|please\s+|let'?s\s+)?"
-    r"(?:(?:write|do|make|draft)\s+(?:the\s+)?captions|captions|"
-    r"caption it|caption this)(?:,?\s+please)?[.!]*$")
+    r"^(?:<[^>]+>\s*)?(?:ok,?\s+|okay,?\s+|please\s+|let'?s\s+"
+    r"|can you\s+|go ahead and\s+)?"
+    r"(?:(?:write|do|make|draft|build|create|generate|start|prepare)\s+"
+    r"(?:the\s+|some\s+)?(?:social\s+)?captions|(?:social\s+)?captions"
+    r"|caption it|caption this)(?:,?\s+please)?[.!?]*$")
 
 # A new message naming a video Studio already built (in Claude Code, say):
 # "caption recruitment-workflows". It opens a thread for that video, ready
@@ -213,7 +216,8 @@ def is_automated(event: dict) -> bool:
 FAQ_URL = re.compile(r"https?://[^\s|<>]*(?:kb|support|faq)[^\s|<>]*", re.I)
 
 
-def classify(text: str, thread_state: str | None) -> str:
+def classify(text: str, thread_state: str | None,
+             built: bool = False) -> str:
     """What this message is asking for.
 
     new | context | context_link | continue | need_context | pick
@@ -221,6 +225,9 @@ def classify(text: str, thread_state: str | None) -> str:
     | script_pending | scrap | restart | unclear | scrapped | building
     | captions | caption_note | recut | captions_options | captions_first
     | busy_captions | schedule | scheduled | pickup | ignore
+
+    `built` says the thread has a finished video, which a later note on the
+    script does not undo: asking for captions there captions that video.
 
     `thread_state` is what we already know about this thread, and it matters:
     the same words mean different things at different points. "Go build it"
@@ -286,9 +293,12 @@ def classify(text: str, thread_state: str | None) -> str:
             return "captions_options"
         return "caption_note"
 
-    if thread_state == video_threads.STATE_DELIVERED:
+    if thread_state == video_threads.STATE_DELIVERED or (
+            built and thread_state in (video_threads.STATE_AWAITING_REVIEW,
+                                       video_threads.STATE_DRAFTING)):
         if CAPTIONS.match(body):
             return "captions"
+    if thread_state == video_threads.STATE_DELIVERED:
         if is_schedule(text):
             return "captions_first"
 
@@ -374,7 +384,8 @@ def handle_video_studio_message(event: dict) -> None:
     user = event.get("user", "")
 
     row = video_threads.get(thread_ts)
-    intent = classify(text, (row or {}).get("state"))
+    intent = classify(text, (row or {}).get("state"),
+                      built=bool((row or {}).get("render_folder")))
     print("[VIDEO] %s from %s: %s" % (intent, user, text[:90]))
 
     if intent == "ignore":

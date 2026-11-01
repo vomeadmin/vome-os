@@ -222,9 +222,31 @@ def test_older_videos_get_links_from_their_folder(monkeypatch):
         "email-formats-reveal_9x16_2026-10-17.mp4")
 
 
-def test_no_base_means_no_guessed_links(monkeypatch):
+def test_without_a_setting_links_use_studios_public_bucket(monkeypatch):
     monkeypatch.delenv("R2_PUBLIC_BASE", raising=False)
-    assert vs.outputs_for({"render_folder": "renders/x/2026-10-17"}) == {}
+    out = vs.outputs_for({"render_folder": "renders/x/2026-10-17"})
+    assert out["4x5"]["url"] == (vs.R2_PUBLIC_BASE
+                                 + "/x/2026-10-17/x_4x5_2026-10-17.mp4")
+
+
+def test_a_folder_that_is_not_studios_gets_no_links():
+    assert vs.outputs_for({"render_folder": "nowhere"}) == {}
+
+
+@pytest.mark.parametrize("text", [
+    "Lets build the captions", "let's create the captions",
+    "can you write the social captions?", "generate captions please",
+    "captions",
+])
+def test_asking_for_captions_in_many_words(handler, text):
+    assert handler.classify(text, "delivered") == "captions"
+
+
+def test_captions_after_a_script_note_caption_the_built_video(handler):
+    text = "Lets build the captions"
+    assert handler.classify(text, "awaiting_review", built=True) == "captions"
+    # A thread with no video yet has nothing to caption.
+    assert handler.classify(text, "awaiting_review") != "captions"
 
 
 # ----------------------------------------------------------------- booking
