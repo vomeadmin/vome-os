@@ -184,7 +184,7 @@ def test_next_slot_skips_days_another_video_holds():
 def test_post_times_are_local_to_the_calendar():
     times = vs.post_times(dt.date(2026, 11, 3), vs.DEFAULT_CALENDAR)
     assert times["linkedin"].tzinfo == ZoneInfo("America/Montreal")
-    assert times["linkedin"].hour == 9
+    assert times["linkedin"].hour == 10
     assert set(times) == set(vs.PLATFORM_KEYS)
 
 
@@ -653,3 +653,90 @@ def test_a_video_with_no_published_files_is_not_captioned(
         ok=True, error="", data={"storyboard": STORYBOARD, "render": None}))
     assert saved["state"] == "idea" and captioned == []
     assert "no published files" in posted[0]
+
+
+# --------------------------------------------------------------- published
+
+NOW = dt.datetime(2026, 11, 3, 20, 30, tzinfo=dt.timezone.utc)
+
+
+def _booked(key, external_id):
+    return {"id": hash(key) % 1000, "thread_ts": "1.2", "platform": key,
+            "external_id": external_id, "status": vs.STATUS_SCHEDULED}
+
+
+class _Live:
+    def __init__(self, answers):
+        self.answers = answers
+
+    def post(self, post_id):
+        data = self.answers.get(post_id)
+        return SimpleNamespace(ok=data is not None, data=data, error="x")
+
+
+def _published(monkeypatch, posts, answers, settles=True):
+    settled = []
+    monkeypatch.setattr(vs, "due_booked", lambda now: posts)
+    monkeypatch.setattr(vs, "settle", lambda i, s, link="", error="": (
+        settled.append((i, s, link, error)) or settles))
+    return vs.check_published(_Live(answers), NOW), settled
+
+
+def test_a_sent_post_is_posted_with_its_link(monkeypatch):
+    changed, settled = _published(monkeypatch, [_booked("linkedin", "b1")], {
+        "b1": {"status": "sent", "externalLink": "https://lnkd.in/p"}})
+    assert settled[0][1:3] == (vs.STATUS_POSTED, "https://lnkd.in/p")
+    assert changed["1.2"][0]["link"] == "https://lnkd.in/p"
+
+
+def test_an_error_in_buffer_fails_the_post_with_its_reason(monkeypatch):
+    changed, settled = _published(monkeypatch, [_booked("instagram", "b2")], {
+        "b2": {"status": "error", "error": {"message": "Video too long"}}})
+    assert settled[0][1] == vs.STATUS_FAILED
+    assert changed["1.2"][0]["error"] == "Video too long"
+
+
+@pytest.mark.parametrize("answer", [
+    {"status": "scheduled"}, {"status": "sending"}, None])
+def test_a_post_not_out_yet_is_asked_about_again(monkeypatch, answer):
+    changed, settled = _published(monkeypatch, [_booked("facebook", "b3")],
+                                  {"b3": answer})
+    assert changed == {} and settled == []
+
+
+def test_a_post_another_run_settled_is_not_announced_twice(monkeypatch):
+    changed, _ = _published(monkeypatch, [_booked("linkedin", "b1")], {
+        "b1": {"status": "sent", "externalLink": "https://lnkd.in/p"}},
+        settles=False)
+    assert changed == {}
+
+
+def test_the_thread_hears_each_platform_once():
+    text = vs.published_post([
+        dict(_booked("linkedin", "b1"), status=vs.STATUS_POSTED,
+             link="https://lnkd.in/p"),
+        dict(_booked("instagram", "b2"), status=vs.STATUS_FAILED,
+             error="Video too long")])
+    assert "Posted on LinkedIn <https://lnkd.in/p|view it>" in text
+    assert "Instagram did not post: Video too long" in text
+
+
+def test_announce_posts_in_each_thread(jobs, monkeypatch):
+    posted = []
+    monkeypatch.setattr(jobs, "_buffer", lambda: object())
+    monkeypatch.setattr(jobs, "_post", lambda t, m: posted.append((t, m)))
+    monkeypatch.setattr(jobs.video_social, "check_published", lambda c: {
+        "1.2": [dict(_booked("linkedin", "b1"), status=vs.STATUS_POSTED,
+                     link="")]})
+    assert jobs.announce_published()["posts"] == 1
+    assert posted == [("1.2", ":white_check_mark: Posted on LinkedIn")]
+
+
+def test_announce_without_buffer_does_nothing(jobs, monkeypatch):
+    monkeypatch.setattr(jobs, "_buffer", lambda: None)
+    assert "skipped" in jobs.announce_published()
+
+
+def test_linkedin_posts_at_ten_eastern(monkeypatch):
+    monkeypatch.delenv("SOCIAL_CALENDAR", raising=False)
+    assert vs.calendar()["times"]["linkedin"] == "10:00"

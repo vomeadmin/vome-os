@@ -1405,6 +1405,22 @@ def schedule_video(thread_ts: str, user: str = "") -> None:
     _post(thread_ts, _schedule_post(posts, today, booked=conn is not None))
 
 
+def announce_published() -> dict:
+    """Tell each video's thread when its posts go live, or fail to.
+
+    The worker runs this every 15 minutes. Buffer publishes on its own, so
+    without it nobody in the thread would know a post went out.
+    """
+    conn = _buffer()
+    if conn is None:
+        return {"ok": True, "skipped": "Buffer is not connected"}
+    changed = video_social.check_published(conn)
+    for thread_ts, posts in changed.items():
+        _post(thread_ts, video_social.published_post(posts))
+    return {"ok": True, "threads": len(changed),
+            "posts": sum(len(p) for p in changed.values())}
+
+
 def _buffer():
     """The Buffer connector, if it can book posts."""
     try:

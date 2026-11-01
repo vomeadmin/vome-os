@@ -109,7 +109,7 @@ URL = re.compile(r"https?://|www\.|\b[\w-]+\.(?:com|ca|org|net)\b", re.I)
 DEFAULT_CALENDAR = {
     "zone": "America/Montreal",
     "days": ["tue", "thu"],
-    "times": {"linkedin": "09:00", "facebook": "12:00",
+    "times": {"linkedin": "10:00", "facebook": "12:00",
               "instagram": "12:30", "youtube": "15:00", "tiktok": "18:00"},
 }
 _DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -117,6 +117,11 @@ _DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 STATUS_PLANNED = "planned"      # in our calendar, not yet in Buffer
 STATUS_SCHEDULED = "scheduled"  # booked in Buffer
 STATUS_FAILED = "failed"        # Buffer refused it; the error says why
+STATUS_POSTED = "posted"        # live; `link` is the post on the network
+
+# How long after its time a booked post is still asked about. One deleted in
+# Buffer would otherwise be asked about forever.
+PUBLISH_WINDOW = dt.timedelta(days=3)
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +321,7 @@ def next_slot(taken: set, today: dt.date, cal: dict | None = None) -> dt.date:
     """The first calendar day after today that no video holds yet.
 
     Never today: a post booked for this afternoon gives the social team no
-    time to see it in Zoho before it goes out.
+    time to see it in Buffer before it goes out.
     """
     cal = cal or calendar()
     wanted = {_DAYS.index(d) for d in cal["days"]}
@@ -360,6 +365,7 @@ CREATE TABLE IF NOT EXISTS social_posts (
   status         VARCHAR NOT NULL DEFAULT 'planned',
   external_id    VARCHAR NOT NULL DEFAULT '',
   error          TEXT    NOT NULL DEFAULT '',
+  link           TEXT    NOT NULL DEFAULT '',
   scheduled_by   VARCHAR NOT NULL DEFAULT '',
   created_at     TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_at     TIMESTAMP NOT NULL DEFAULT NOW()
@@ -373,6 +379,9 @@ def init() -> None:
         return
     with _get_engine().begin() as conn:
         conn.execute(text(_CREATE))
+        # Added after the table first shipped.
+        conn.execute(text("ALTER TABLE social_posts ADD COLUMN IF NOT EXISTS "
+                          "link TEXT NOT NULL DEFAULT ''"))
 
 
 def for_thread(thread_ts: str) -> list[dict]:
@@ -429,6 +438,78 @@ def set_status(post_id: int, status: str, external_id: str = "",
             {"s": status, "x": external_id or "", "e": (error or "")[:2000],
              "i": int(post_id)},
         )
+
+
+def due_booked(now: dt.datetime) -> list[dict]:
+    """Booked posts whose time came within PUBLISH_WINDOW, by thread."""
+    if not DATABASE_URL:
+        return []
+    with _get_engine().begin() as conn:
+        rows = conn.execute(
+            text("SELECT * FROM social_posts WHERE status = :s "
+                 "AND external_id <> '' AND post_at <= :now "
+                 "AND post_at > :since ORDER BY thread_ts, post_at, id"),
+            {"s": STATUS_SCHEDULED, "now": now,
+             "since": now - PUBLISH_WINDOW},
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def settle(post_id: int, status: str, link: str = "",
+           error: str = "") -> bool:
+    """Move a booked post to posted or failed. True only for the call that
+    moved it, so two overlapping runs never announce the same post."""
+    if not DATABASE_URL:
+        return False
+    with _get_engine().begin() as conn:
+        res = conn.execute(
+            text("UPDATE social_posts SET status = :s, link = :l, "
+                 "error = :e, updated_at = NOW() "
+                 "WHERE id = :i AND status = :booked"),
+            {"s": status, "l": link or "", "e": (error or "")[:2000],
+             "i": int(post_id), "booked": STATUS_SCHEDULED},
+        )
+    return res.rowcount == 1
+
+
+def check_published(conn, now: dt.datetime | None = None) -> dict:
+    """Ask Buffer about each booked post that has come due.
+
+    {thread_ts: [post, ...]} for the posts that went live or failed since
+    the last run. A post still sending, or one Buffer cannot answer for
+    right now, is asked about again next time.
+    """
+    now = now or dt.datetime.now(dt.timezone.utc)
+    changed: dict = {}
+    for post in due_booked(now):
+        res = conn.post(post["external_id"])
+        data = res.data if res.ok and isinstance(res.data, dict) else {}
+        if data.get("status") == "sent":
+            status, link, error = STATUS_POSTED, data.get("externalLink"), ""
+        elif data.get("status") == "error":
+            status, link = STATUS_FAILED, ""
+            error = ((data.get("error") or {}).get("message")
+                     or "Buffer could not publish it")
+        else:
+            continue
+        if settle(post["id"], status, link or "", error):
+            changed.setdefault(post["thread_ts"], []).append(
+                dict(post, status=status, link=link or "", error=error))
+    return changed
+
+
+def published_post(posts: list[dict]) -> str:
+    """The thread's note when its posts go out, one line per platform."""
+    lines = []
+    for p in posts:
+        label = _platform(p["platform"]).get("label") or p["platform"]
+        if p["status"] == STATUS_POSTED:
+            lines.append(":white_check_mark: Posted on %s%s" % (
+                label, " <%s|view it>" % p["link"] if p.get("link") else ""))
+        else:
+            lines.append(":warning: %s did not post: %s. Check it in Buffer."
+                         % (label, p.get("error") or "no reason given"))
+    return "\n".join(lines)
 
 
 def planned() -> list[dict]:

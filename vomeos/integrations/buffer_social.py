@@ -66,6 +66,11 @@ mutation CreatePost($input: CreatePostInput!) {
   }
 }"""
 
+_POST = """
+query Post($input: PostInput!) {
+  post(input: $input) { id status externalLink sentAt error { message } }
+}"""
+
 _DESCRIBE = """
 query Describe($name: String!) {
   __type(name: $name) {
@@ -167,6 +172,15 @@ class BufferSocial(Connector):
         res = self._graphql("create_post", _CREATE_POST, {"input": post})
         if res.ok:
             res.data = res.data.get("createPost") or {}
+        return res
+
+    def post(self, post_id: str) -> IntegrationResult:
+        """One post as Buffer has it now: {"id", "status", "externalLink",
+        "sentAt", "error": {"message"}}. Status is draft, needs_approval,
+        scheduled, sending, sent or error. Read only."""
+        res = self._graphql("post", _POST, {"input": {"id": post_id}})
+        if res.ok:
+            res.data = res.data.get("post") or {}
         return res
 
     def describe(self, type_name: str) -> IntegrationResult:

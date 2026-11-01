@@ -127,11 +127,20 @@ or "ship it" while captions wait gets the three options instead, because it
 could mean the video as easily as the posts.
 
 **The calendar.** Each video takes one day; every platform posts that day at
-its own time. Default: Tuesday and Thursday, America/Montreal, LinkedIn 9:00,
-Facebook 12:00, Instagram 12:30, YouTube 15:00, TikTok 18:00. Never the same
+its own time. Default: Tuesday and Thursday, America/Montreal, LinkedIn 10:00,
+Facebook 12:00, Instagram 12:30, YouTube 15:00, TikTok 18:00. Sammy left the
+timing to the system (2026-11-01): midweek for a B2B and nonprofit audience,
+and LinkedIn at 10:00 Eastern so both coasts see it in working hours. Revisit
+with Buffer's analytics after six to eight weeks of posts. Never the same
 day as the "schedule it". Override it whole with `SOCIAL_CALENDAR` (same
 JSON shape as `DEFAULT_CALENDAR`), no deploy. Once booked, posts are moved
 and edited in Buffer, not here.
+
+**When it goes out.** Every 15 minutes the worker
+(`content.social_published`) asks Buffer about each booked post whose time
+has come, and the video's thread hears once per platform: posted, with a
+link to the live post, or why it failed. A post is announced once, and one
+more than three days past its time is no longer asked about.
 
 **Buffer.** Booked through Buffer's GraphQL API
 (`vomeos/integrations/buffer_social.py`). Sammy chose Buffer over Zoho Social

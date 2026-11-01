@@ -399,6 +399,29 @@ def register_all() -> None:
     )
 
 
+def _announce_published():
+    """Imported lazily: the video studio is not needed at boot."""
+    from video_studio_jobs import announce_published
+
+    return announce_published()
+
+
+def register_social() -> None:
+    """Every 15 minutes, each video's Slack thread hears when its posts go
+    live in Buffer, with the link, or why one failed. A post is announced
+    once: the row moves to posted or failed in the same step."""
+    register_job(
+        "content.social_published",
+        _announce_published,
+        cron="*/15 * * * *",
+        queue=QUEUE,
+        claim=CLAIM_NONE,
+        time_limit=300,
+        description="Video posts: tell the thread when Buffer publishes",
+    )
+
+
 # Importing this module registers the jobs, which is what
 # VOMEOS_JOB_MODULES=support_jobs relies on.
 register_all()
+register_social()
