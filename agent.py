@@ -187,10 +187,21 @@ def _unwrap_mcp_result(result: dict | list | None) -> dict | list | None:
         for block in result.get("content", []):
             if block.get("type") == "text":
                 try:
-                    return json.loads(block["text"])
+                    return _strip_http_envelope(json.loads(block["text"]))
                 except (json.JSONDecodeError, TypeError):
                     pass
     return result
+
+
+def _strip_http_envelope(data):
+    """The Desk MCP server now wraps every reply as {"data", "headers",
+    "status": "success"} (seen 2026-11-02). Left wrapped, every triage
+    took "success" for the ticket status and skipped, and the ticket's
+    subject, contact and thread all came back empty."""
+    if (isinstance(data, dict) and set(data) == {"data", "headers", "status"}
+            and isinstance(data["headers"], dict)):
+        return data["data"]
+    return data
 
 
 def fetch_ticket_from_zoho(ticket_id: str) -> dict | None:
