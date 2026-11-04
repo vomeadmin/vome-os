@@ -507,6 +507,116 @@ def test_no_names_no_extra_context(code):
     assert ticket_fix.extra_context(code, "src/Grid.js", 10, card) == ""
 
 
+# #9813: the banner had two call sites, 601 (the window) and 694 (not).
+CARD_9813 = {"lane": "agent_fix", "code_check": {
+    "fix": "Only render GetInvolvedBanner when the site has public forms.",
+    "finding": "OrgSiteView renders GetInvolvedBanner with no forms."}}
+
+
+def _site_file(extra_uses=0):
+    lines = [f"// filler {i}" for i in range(1, 801)]
+    lines[1] = "import GetInvolvedBanner from './GetInvolvedBanner';"
+    lines[600] = "        <GetInvolvedBanner onClick={handleBecomeVol} />"
+    lines[693] = "        <GetInvolvedBanner onClick={handleBecomeVol} />"
+    for i in range(extra_uses):
+        lines[720 + i * 10] = "        <GetInvolvedBanner />"
+    return "\n".join(lines) + "\n"
+
+
+def test_every_other_call_site_in_the_file_is_included(code, monkeypatch):
+    files = {"src/OrgSiteView.js": _site_file()}
+    monkeypatch.setattr(ticket_fix, "_read_text",
+                        lambda repo, path: files.get(path, ""))
+    text = ticket_fix.extra_context(code, "src/OrgSiteView.js", 601,
+                                    CARD_9813)
+    assert "another use of GetInvolvedBanner" in text
+    assert "694 |         <GetInvolvedBanner" in text
+    assert "601 |" not in text  # the window shows that one already
+
+
+def test_a_name_used_everywhere_is_not_chased(code, monkeypatch):
+    files = {"src/OrgSiteView.js": _site_file(extra_uses=6)}
+    monkeypatch.setattr(ticket_fix, "_read_text",
+                        lambda repo, path: files.get(path, ""))
+    text = ticket_fix.extra_context(code, "src/OrgSiteView.js", 601,
+                                    CARD_9813)
+    assert "another use of GetInvolvedBanner" not in text
+
+
+REASON_9813 = (
+    "The fix changes two places and I was only shown one. The source covers "
+    "lines 536-656, plus lines 1-27. The public branch banner at lines "
+    "688-690 is not in the source. Needed: src/OrgSiteView.js lines about "
+    "680-700 (the public branch wrapper div).")
+
+
+def test_the_lines_a_decline_asks_for_are_read():
+    assert ticket_fix.asked_for(REASON_9813) == [
+        ("src/OrgSiteView.js", 680, 700)]
+    assert ticket_fix.asked_for("needs core:app/v4/api.py:1328") == [
+        ("app/v4/api.py", 1328, 1328)]
+    assert ticket_fix.asked_for("works as designed") == []
+
+
+def _propose_9813(monkeypatch, answers):
+    import sentry_code
+    import sentry_fix
+
+    files = {"src/OrgSiteView.js": _site_file()}
+    seen = []
+
+    def propose(analysis, context, **k):
+        seen.append(context["source"])
+        return answers[len(seen) - 1]
+
+    monkeypatch.setattr(ticket_fix, "enabled", lambda: True)
+    monkeypatch.setattr(ticket_fix, "should_attempt",
+                        lambda card, sam_approved=False: (True, ""))
+    monkeypatch.setattr(ticket_fix, "_read_text",
+                        lambda repo, path: files.get(path, ""))
+    monkeypatch.setattr(ticket_fix, "_file_tasks", lambda *a: ("P1", "C1"))
+    monkeypatch.setattr(ticket_fix, "extra_context", lambda *a: "")
+    monkeypatch.setattr(sentry_code, "gather", lambda *a, **k: {"files": ""})
+    monkeypatch.setattr(sentry_fix, "propose", propose)
+    monkeypatch.setattr(sentry_fix, "open_pull_request",
+                        lambda *a: {"opened": True, "url": PR})
+    monkeypatch.setattr(zoho_actions, "mark_agent_fix", lambda *a: "")
+    recorded = []
+    monkeypatch.setattr(ticket_fix, "_record",
+                        lambda *a, **k: recorded.append(a[2:4]))
+    card = dict(CARD_9813, live_question="Banner on site pages")
+    card["code_check"] = dict(CARD_9813["code_check"],
+                              where="web:src/OrgSiteView.js:601")
+    out = ticket_fix._propose("T1", "9813", "Sarasota", card, "zoho-url",
+                              sam_approved=True)
+    return out, seen, recorded
+
+
+def test_a_decline_for_missing_lines_is_retried_with_them(monkeypatch):
+    out, seen, _ = _propose_9813(monkeypatch, [
+        {"diff": "", "reason": REASON_9813, "needs_context": True},
+        {"diff": "d"}])
+    assert out["outcome"] == "pr_opened"
+    assert len(seen) == 2
+    assert "you asked for these lines" in seen[1]
+    assert "694 |         <GetInvolvedBanner" in seen[1]
+
+
+def test_only_one_retry_and_the_ledger_says_so(monkeypatch):
+    out, seen, recorded = _propose_9813(monkeypatch, [
+        {"diff": "", "reason": REASON_9813},
+        {"diff": "", "reason": "still unsure"}])
+    assert out["outcome"] == "declined" and len(seen) == 2
+    assert recorded == [("declined", "after a retry with the source it "
+                                     "asked for: still unsure")]
+
+
+def test_a_decline_naming_no_lines_is_not_retried(monkeypatch):
+    out, seen, _ = _propose_9813(monkeypatch, [
+        {"diff": "", "reason": "works as designed"}])
+    assert out["outcome"] == "declined" and len(seen) == 1
+
+
 # ---------------------------------------------------------------------------
 # A declined attempt is visible on the queue card
 # ---------------------------------------------------------------------------
