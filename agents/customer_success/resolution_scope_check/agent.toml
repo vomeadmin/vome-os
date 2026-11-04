@@ -10,7 +10,10 @@ hired = "2026-10-23"
 # fixed" email goes out, and it has to separate the problems a client raised
 # from the side remarks around them, which wants real reasoning.
 tier = "standard"
-max_tokens = 500
+# The model thinks before it answers, and the thinking counts against this.
+# At 500 a long thread used it all on thinking and returned no verdict,
+# which held every on-prod email for review (4 of 6 on 2026-11-04).
+max_tokens = 4000
 
 [job]
 charter = "charter.md"
