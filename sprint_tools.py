@@ -444,6 +444,9 @@ def _production_owner(commits: str) -> str:
         owners.append("OnlyG merges core to production")
     if "web@" in commits:
         owners.append("Sam deploys web to production")
+    if "app@" in commits:
+        owners.append("Sanjay releases the app to the stores, then merges "
+                      "it to master")
     return " and ".join(owners) or "the repo owner promotes it to production"
 
 
