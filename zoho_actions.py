@@ -123,11 +123,15 @@ def first_name(author: str, email: str = "", given: str = "") -> str:
 
     `given` is the first name Zoho keeps on the author, and wins when set:
     the display name cannot say where a two-word first name ends ("Ia Faye
-    Sison" was greeted as "Ia", #9596).
+    Sison" was greeted as "Ia", #9596). A "Last, First" Outlook name can land
+    whole in that field, so a comma sends it through the display-name rules
+    ("Hi Phan, Dalena", #9521).
     """
-    given = (given or "").strip()
+    given = (given or "").strip().strip('"')
     if given and "@" not in given:
-        return given
+        if "," not in given:
+            return given
+        author = author or given
     author = (author or "").strip().strip('"')
     if "," in author:
         after = author.split(",", 1)[1].strip()

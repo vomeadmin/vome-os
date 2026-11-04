@@ -20,6 +20,14 @@ def test_without_it_the_display_name_still_works():
     assert za.first_name("", "jane.doe@x.org") == "Jane"
 
 
+# #9521 (2026-11-04): Zoho kept the Outlook name "Phan, Dalena" as the first
+# name with no last name, and the reply went out as "Hi Phan, Dalena".
+def test_a_last_comma_first_name_zoho_keeps_is_split():
+    assert za.first_name("Phan, Dalena", "phanda@mlhs.org",
+                         "Phan, Dalena") == "Dalena"
+    assert za.first_name("", "phanda@mlhs.org", "Phan, Dalena") == "Dalena"
+
+
 def test_an_address_in_the_first_name_is_ignored():
     assert za.first_name("Stephanie Sielaty", "", "s@x.org") == "Stephanie"
 
