@@ -921,9 +921,12 @@ AUTO_REPLY_WINDOW = timedelta(seconds=60)
 
 
 def _out_of_office(thread: dict) -> bool:
-    from agent import _looks_like_auto_reply
+    """An out-of-office, or an emoji reaction sent as an email (#9470):
+    neither is a message we owe an answer to."""
+    from agent import _looks_like_auto_reply, _looks_like_reaction
 
-    return _looks_like_auto_reply(thread.get("summary") or "")
+    summary = thread.get("summary") or ""
+    return _looks_like_auto_reply(summary) or _looks_like_reaction(summary)
 
 
 def answered_in_zoho(ticket_id: str, since: datetime | None = None) -> bool:

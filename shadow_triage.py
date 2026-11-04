@@ -435,7 +435,8 @@ def handle(message: dict) -> dict:
     asked = bool(message.get("refresh"))
     try:
         if message.get("reason") == "reply" and _auto_reply(ticket_id):
-            return {"status": "skipped", "reason": "auto-reply"}
+            return {"status": "skipped",
+                    "reason": "auto-reply or courtesy reply"}
         return _handle(ticket_id, message.get("reason") or "",
                        refresh=asked, ignore_cap=asked)
     except Exception as exc:
@@ -444,19 +445,18 @@ def handle(message: dict) -> dict:
 
 
 def _auto_reply(ticket_id: str) -> bool:
-    """The newest customer message is an out-of-office or autoresponder.
+    """The customer's newest emails are only out-of-offices, thank-yous or
+    reactions.
 
-    agent.process_ticket_update already ignores those, but the webhook
+    agent.process_ticket_update already handles those, but the webhook
     queues this handler beside it. On #9526 (2026-10-20) Allie's
     out-of-office, a few seconds after Sam's answer closed the ticket, was
-    triaged as a fresh message and routed to OnlyG again.
+    triaged as a fresh message and routed to OnlyG again. On #9470
+    (2026-10-27) a thank-you and an Outlook reaction did the same.
     """
-    from agent import (_extract_reply_text, _is_client_reply,
-                       _looks_like_auto_reply, fetch_ticket_conversations)
+    from agent import is_courtesy_burst
 
-    is_reply, latest = _is_client_reply(
-        fetch_ticket_conversations(ticket_id), ticket_id)
-    return is_reply and _looks_like_auto_reply(_extract_reply_text(latest))
+    return is_courtesy_burst(ticket_id)
 
 
 def _handle(ticket_id: str, reason: str, force: bool = False,
