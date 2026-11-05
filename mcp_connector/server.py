@@ -94,7 +94,9 @@ ticket_first_pass runs the triage agent on one; \
 fix_status and sprint_followups show agent fixes and what is owed after a \
 release; propose_fix, send_ticket_reply, route_queue, route_ticket, \
 close_ticket_quietly and log_ticket_request act, Sam only. Show every reply \
-in full before sending.
+in full before sending. A card's data_check means one account's records \
+decide it: show its setup and query as one block for Sam's prod shell, and \
+pass what he pastes back to data_check_result verbatim.
 """
 
 READ = ToolAnnotations(read_only_hint=True, open_world_hint=True)
@@ -655,6 +657,21 @@ def build() -> MCPServer:
                           sprint_tools.send_ticket_reply, ticket=ticket,
                           sam_said=sam_said, text=text, resolved=resolved,
                           caller=caller())
+
+    @server.tool(annotations=WRITE)
+    async def data_check_result(
+        ticket: Annotated[str, Field(description="Ticket number")],
+        output: Annotated[str, Field(
+            description="Exactly what the prod Django shell printed for "
+            "the ticket's data check, pasted verbatim")],
+    ) -> dict:
+        """Sam ran a ticket's data check (Sam only): keep the output on
+        the sprint item and triage the ticket again with it as evidence,
+        deep pass included. Internal: nothing reaches the client. Call
+        ticket_first_pass a few minutes later for the new card."""
+        return await _run("data_check_result",
+                          sprint_tools.data_check_result, ticket=ticket,
+                          output=output, caller=caller())
 
     @server.tool(annotations=WRITE)
     async def route_ticket(

@@ -132,17 +132,29 @@ def _verdict(card: dict) -> str:
     return str(((card or {}).get("code_check") or {}).get("verdict") or "")
 
 
-def reason_for(card: dict, arr: float = 0.0, failed: bool = False) -> str:
+def reason_for(card: dict, arr: float = 0.0, failed: bool = False,
+               new_data: bool = False) -> str:
     """Why this card needs the deep pass, or '' when it does not."""
     if not enabled():
         return ""
     if failed:
         return "first pass failed"
+    # Sam ran a data check and pasted the results: the records are the
+    # strongest evidence the ticket will get, so the senior look reads them
+    # whatever the first pass made of them (data_check.py).
+    if new_data:
+        return "data check results"
     card = card or {}
     category = str(card.get("category") or "")
     lane = str(card.get("lane") or "")
     if lane in NOTHING_TO_CHECK or category in SKIP_CATEGORIES:
         return ""
+    # The investigator writes the query Sam runs: the first pass only has
+    # to notice that the records decide it (#9760).
+    import data_check
+
+    if data_check.level(card) in data_check.PENDING:
+        return f"data check {data_check.level(card)}"
     # #9586's first card (2026-10-23 live run) came back with no lane and
     # no code check: routing cannot act on that, whatever the confidence.
     if not lane:
@@ -273,19 +285,21 @@ def recently_checked(previous: dict | None, card: dict,
 def deepen(context: dict, card: dict, images, *, ticket_id: str,
            ticket_number: str, arr: float, first_result,
            source: str = "shadow", previous: dict | None = None,
-           previous_at=None) -> dict:
+           previous_at=None, new_data: bool = False) -> dict:
     """The whole step for a caller: decide, investigate, record. Returns
     the card to use from here on. `previous` is the ticket's stored card
-    (and `previous_at` when it was written), if it has one."""
+    (and `previous_at` when it was written), if it has one. `new_data`:
+    Sam just pasted data check results, so nothing earlier is reused."""
     failed = first_result is not None and not getattr(first_result, "ok",
                                                       True)
-    reason = reason_for(card, arr, failed=failed)
+    reason = reason_for(card, arr, failed=failed, new_data=new_data)
     info = None
     final = card
-    if reason and not failed and recently_checked(previous, card,
-                                                  previous_at):
+    if reason and not failed and not new_data and recently_checked(
+            previous, card, previous_at):
         # Keep the settled investigation; the first pass already agrees.
-        keep = ("code_check", "existing_work", "escalation_reason")
+        keep = ("code_check", "existing_work", "escalation_reason",
+                "data_check")
         final = {**card, **{k: previous[k] for k in keep if previous.get(k)},
                  "deep": {**previous["deep"],
                           "reason": f"reused ({reason})"}}

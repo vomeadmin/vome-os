@@ -82,6 +82,16 @@ HOLDING_NOTES = (
     "short sentences."
 )
 
+# The card needs one account's records checked before anyone knows the
+# cause (data_check.py). The reply may only say we are looking.
+DATA_CHECK_NOTES = (
+    "We have not yet looked at this account's records, and they decide "
+    "the answer. Write a short holding reply: thank them, say we are "
+    "checking the specific records they mentioned and will follow up. Do "
+    "not explain a cause, do not say it is a bug or a setting, and do not "
+    "promise a fix, a date or a release. Two or three short sentences."
+)
+
 
 def enabled() -> bool:
     value = os.environ.get("SHADOW_TRIAGE_ENABLED", "")
@@ -436,11 +446,28 @@ def handle(message: dict) -> dict:
     try:
         if message.get("reason") == "reply" and _auto_reply(ticket_id):
             return {"status": "skipped", "reason": "auto-reply"}
-        return _handle(ticket_id, message.get("reason") or "",
-                       refresh=asked, ignore_cap=asked)
+        # `force`: Sam pasted data check results (data_check.retriage). He
+        # is looking at this ticket now, whatever its Zoho status.
+        out = _handle(ticket_id, message.get("reason") or "",
+                      refresh=asked, ignore_cap=asked,
+                      force=bool(message.get("force")),
+                      reply_thread=str(message.get("reply_thread") or ""))
     except Exception as exc:
         print(f"[SHADOW] {ticket_id} failed: {type(exc).__name__}: {exc}")
-        return {"status": "error", "error": str(exc)}
+        out = {"status": "error", "error": str(exc)}
+    if message.get("reply_thread") and out.get("status") != "ok":
+        # Sam is waiting on the card his data check asked for.
+        try:
+            import sprint_thread
+
+            sprint_thread._post(
+                "I kept your data check, but could not triage the ticket "
+                f"again ({out.get('reason') or out.get('error') or 'unknown'})"
+                ". Say `data N: ...` again, or ask me about it.",
+                thread_ts=str(message["reply_thread"]))
+        except Exception as exc:
+            print(f"[SHADOW] {ticket_id} data notice not posted: {exc}")
+    return out
 
 
 def _auto_reply(ticket_id: str) -> bool:
@@ -461,8 +488,13 @@ def _auto_reply(ticket_id: str) -> bool:
 
 def _handle(ticket_id: str, reason: str, force: bool = False,
             release: dict | None = None, ignore_cap: bool = False,
-            refresh: bool = False, auto_route: bool = True) -> dict:
+            refresh: bool = False, auto_route: bool = True,
+            reply_thread: str = "") -> dict:
     """`release` is the release state when the caller already knows it.
+
+    `reply_thread` is the sprint thread where Sam pasted data check results
+    (`data N: ...`): the new card is posted back there, whatever the
+    per-ticket card switch says, because he is waiting on it.
 
     `auto_route=False` (the nightly reconciler) leaves the card for Sam
     instead of filing an engineer task: a months-old ticket whose task was
@@ -523,6 +555,14 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
         arr = 0.0
     context.pop("_ticket_id", None)
 
+    # What Sam pasted from a data check. Every triage of this ticket reads
+    # it from now on, not only the one his paste queued (data_check.py).
+    import data_check
+
+    pasted = data_check.context_text(existing)
+    if pasted:
+        context["data_results"] = pasted
+
     # A caller that hands us the release is drafting the resolution for a
     # fix already proven live (release_resolutions, shipped_untold). There
     # is nothing left to fix on that run: #9501's Oct 20 resolution card sent
@@ -560,7 +600,8 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
             context, card, images, ticket_id=ticket_id,
             ticket_number=ticket_number, arr=arr, first_result=result,
             previous=(existing or {}).get("card"),
-            previous_at=(existing or {}).get("updated_at"))
+            previous_at=(existing or {}).get("updated_at"),
+            new_data=reason == "data" and bool(pasted))
 
     from error_reports import is_error_report
 
@@ -602,6 +643,11 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
             notes = HOLDING_NOTES
             card = {**card, "holding_reply": True}
             resolution_card = card
+        elif data_check.level(card) == data_check.REQUIRED:
+            # The records decide the answer and nobody has read them yet:
+            # whatever the card guesses is not something to tell the
+            # client (#9760). The batch keeps it under DATA CHECK FIRST.
+            notes = DATA_CHECK_NOTES
         draft = draft_reply(
             ticket_number, resolution_card, context, rcpt, release,
             language=_language(context.get("thread", "")),
@@ -671,6 +717,14 @@ def _handle(ticket_id: str, reason: str, force: bool = False,
     import sprint_thread
 
     sprint_thread.post_card(item, release=release)
+    if reply_thread:
+        try:
+            sprint_thread._post(
+                "Read your data check. The card now:\n"
+                + sprint_thread.render_card(item, release=release),
+                thread_ts=reply_thread)
+        except Exception as exc:
+            print(f"[SHADOW] #{ticket_number} data card not posted: {exc}")
 
     print(f"[SHADOW] #{ticket_number} -> item {item.get('number')} "
           f"{category} draft={draft['status']} "

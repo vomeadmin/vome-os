@@ -578,6 +578,11 @@ def bucket(entry: dict, record: dict) -> tuple[str, str]:
         return "close", "we asked the client and they have not answered"
     if lane == "sam_ops" or category in ("email_update", "account_deletion"):
         return "sam_ops", "data, billing or account work"
+    import data_check
+
+    if (data_check.level(card) == data_check.REQUIRED
+            or card.get("escalation_reason") == "data_lookup"):
+        return "sam_ops", "data check first: the records decide it"
     if (lane == "feature" or category == "feature_request"
             or verdict == "design_question"
             or card.get("escalation_reason") == "product_decision"):

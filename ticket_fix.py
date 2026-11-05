@@ -162,6 +162,13 @@ def should_attempt(card: dict, sam_approved: bool = False
         return False, "no code check on the card"
     verdict = code.get("verdict")
     if not sam_approved:
+        # The records decide whether this bug is what happened (#9760: a
+        # real bug, a PR, and the client's uploads had never saved). A
+        # `confirm` check still fixes: the code is wrong either way.
+        import data_check
+
+        if data_check.level(card) == data_check.REQUIRED:
+            return False, "data check first: the records decide the cause"
         if verdict == "design_question":
             return False, "design question: needs Sam's decision"
         if verdict != "bug":

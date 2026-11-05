@@ -118,6 +118,9 @@ store.register_table(
         f"CREATE INDEX IF NOT EXISTS {ITEMS}_day_idx ON {ITEMS} (day, number)",
         f"CREATE INDEX IF NOT EXISTS {ITEMS}_status_idx "
         f"ON {ITEMS} (status, updated_at DESC)",
+        # What Sam pasted back from a data check (data_check.py), kept
+        # across every re-triage: a refresh rewrites the card, not this.
+        f"ALTER TABLE {ITEMS} ADD COLUMN IF NOT EXISTS data_results JSONB",
     ),
 )
 
@@ -175,6 +178,13 @@ def _decode(row: dict) -> dict:
                 row[key] = {}
         elif value is None:
             row[key] = {}
+    results = row.get("data_results")
+    if isinstance(results, str):
+        try:
+            results = json.loads(results)
+        except ValueError:
+            results = []
+    row["data_results"] = results if isinstance(results, list) else []
     return row
 
 
@@ -412,6 +422,18 @@ def set_eng_task(item_id: int, task: dict) -> None:
         f"UPDATE {ITEMS} SET eng_task = CAST(:t AS JSONB), updated_at = :now"
         " WHERE id = :i",
         {"t": json.dumps(task), "i": item_id, "now": _now()},
+    )
+
+
+def add_data_result(item_id: int, entry: dict, keep: int = 5) -> None:
+    """Append one pasted data check result, keeping the newest `keep`."""
+    item = get_item(item_id)
+    results = (item.get("data_results") or []) + [entry]
+    store.execute(
+        f"UPDATE {ITEMS} SET data_results = CAST(:r AS JSONB),"
+        " updated_at = :now WHERE id = :i",
+        {"r": json.dumps(results[-keep:], ensure_ascii=False),
+         "now": _now(), "i": item_id},
     )
 
 

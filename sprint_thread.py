@@ -253,6 +253,9 @@ def render_card(item: dict, release: dict | None = None) -> str:
         lines.append(f":bust_in_silhouette: *Needs you:* {card['why_human']}")
     if card.get("recommended_action"):
         lines.append(f"*Recommended:* {card['recommended_action']}")
+    import data_check
+
+    lines += data_check.slack_lines(item)
 
     draft = (item.get("draft") or "").strip()
     status = item.get("draft_status") or "none"
@@ -464,6 +467,16 @@ def parse(text: str) -> list[dict]:
             commands.append({"verb": match.group(1).lower(),
                              "numbers": [int(match.group(2))], "arg": rest})
             break
+        # `data 12: <output>` or `data 12` with the output on the next
+        # lines: what the prod shell printed for a data check. Takes the
+        # rest of the message, like edit.
+        match = re.match(r"^data\s+(\d+)\s*(?::\s*(.*))?$", line,
+                         re.IGNORECASE | re.DOTALL)
+        if match and (match.group(2) is not None or index < len(lines)):
+            rest = "\n".join([match.group(2) or ""] + lines[index:]).strip()
+            commands.append({"verb": "data",
+                             "numbers": [int(match.group(1))], "arg": rest})
+            break
         match = re.match(r"^(log|build)\s+(\d+)\s+(?:to\s+)?(new|\w{6,12})"
                          r"\s*$", line, re.IGNORECASE)
         if match:
@@ -543,7 +556,7 @@ def parse_strict(text: str) -> list[dict] | None:
     commands = parse(text)
     if not commands:
         return None
-    if commands[-1]["verb"] in ("edit", "redraft"):
+    if commands[-1]["verb"] in ("edit", "redraft", "data"):
         return commands
     return commands if len(commands) == len(lines) else None
 
@@ -584,6 +597,9 @@ def handle_command(message: dict) -> dict:
         reply, focus, outcome = lesson_reply, None, {
             "status": "ok", "results": [], "path": "lessons"}
     elif commands is not None:
+        for command in commands:
+            # `data N` posts the new card back where Sam pasted.
+            command["thread"] = thread
         results = _run_commands(commands, day)
         reply = "\n".join(results) or "Nothing to do."
         focus = (commands[0]["numbers"] or [None])[0]
@@ -1224,7 +1240,28 @@ def _execute(command: dict, item: dict) -> str:
         return _fix(item)
     if verb == "close":
         return _close_quietly(item)
+    if verb == "data":
+        return _data(item, command.get("arg") or "",
+                     command.get("thread") or "")
     return f"*{n}.* unknown command."
+
+
+def _data(item: dict, text: str, thread: str = "") -> str:
+    """Sam's paste from a data check: keep it on the item and triage the
+    ticket again with it (data_check.py)."""
+    import data_check
+
+    n = item.get("number")
+    out = data_check.take(item, text, by="sam", reply_thread=thread)
+    if not out["ok"]:
+        return (f"*{n}.* nothing to read. Paste what the shell printed: "
+                f"`data {n}: <output>`.")
+    if not out["queued"]:
+        return (f"*{n}.* kept your data check ({out['lines']} lines), but "
+                "could not queue the re-triage. Ask me to try again.")
+    return (f"*{n}.* got it ({out['lines']} lines). Triaging it again with "
+            "the results and the deep pass; the new card lands here in a "
+            "few minutes.")
 
 
 def _signed(item: dict, text: str) -> str:

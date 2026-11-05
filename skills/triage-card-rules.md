@@ -47,4 +47,7 @@ categories of their own.
 - `lane` and `escalation_reason`: the values in choosing-the-lane
 - `code_check.verdict`: bug | works_as_designed | design_question |
   unclear | not_checked
+- `data_check.needed`: none | confirm | required (checking-the-data);
+  `data_check.questions` is a list of strings, every other data_check
+  field a string
 - every other field: a string ("" when empty)

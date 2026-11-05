@@ -78,9 +78,13 @@ QUIET = "quiet"
 # The agent owns it: a fix PR is open and the client has been acknowledged.
 # One line per sprint until it is live or the PR is closed.
 IN_FLIGHT = "in_flight"
+# The records decide the answer: Sam runs the read query and pastes the
+# output back with `data N: ...` (data_check.py, #9760).
+DATA = "data"
 
 ESCALATION_LABELS = {
-    "data_lookup": "needs a record we cannot read",
+    # Cards from before 2026-11-05; a record lookup is a data check now.
+    "data_lookup": "needs a record looked up (run it as a data check)",
     "mobile_unreadable": "lives in the mobile app",
     "schema_or_migration": "needs a model or migration change",
     "auth_or_billing": "touches login, permissions or payments",
@@ -180,6 +184,21 @@ def is_holding(item: dict) -> bool:
     return bool((item.get("card") or {}).get("holding_reply"))
 
 
+def is_data_required(item: dict) -> bool:
+    import data_check
+
+    return data_check.level(item.get("card")) == data_check.REQUIRED
+
+
+def owes_data_check(item: dict, now: datetime | None = None) -> bool:
+    """A `confirm` check nobody has run, on an item still in play. Shown
+    whatever its section: the "fixed" email waits for it."""
+    import data_check
+
+    return (data_check.level(item.get("card")) == data_check.CONFIRM
+            and section(item, now) not in ("", HELD))
+
+
 def held_is_due(item: dict, now: datetime | None = None) -> bool:
     """A held item comes back when its wake time passes. A hold from
     before wake times existed comes back the next day."""
@@ -207,6 +226,11 @@ def section(item: dict, now: datetime | None = None) -> str:
         if (item.get("draft") or "").strip():
             return FIX
         return IN_FLIGHT
+    # Nothing honest can be said or fixed until Sam reads the records
+    # (data_check.py). A `confirm` check keeps its own section and shows
+    # its query in the detail.
+    if is_data_required(item):
+        return DATA
     # Already answered and handed back (the agent's fix PR was closed):
     # re-offering the old draft would send the same reply twice.
     if status == sprint_store.OPEN and item.get("sent_at"):
@@ -256,7 +280,7 @@ def select(items: list[dict], exclude: set | None = None,
     """The items this batch shows, by section, plus what it leaves out."""
     exclude = exclude or set()
     actionable = [i for i in items
-                  if section(i, now) in (READY, FIX, DECIDE)
+                  if section(i, now) in (READY, FIX, DECIDE, DATA)
                   and i.get("id") not in exclude]
     actionable.sort(key=_priority)
     chosen = actionable[:limit]
@@ -267,6 +291,11 @@ def select(items: list[dict], exclude: set | None = None,
         READY: [i for i in chosen if section(i, now) == READY],
         FIX: [i for i in chosen if section(i, now) == FIX],
         DECIDE: [i for i in chosen if section(i, now) == DECIDE],
+        DATA: [i for i in chosen if section(i, now) == DATA],
+        # `confirm` checks still owed, wherever the item sits.
+        "confirm": sorted((i for i in items if owes_data_check(i, now)
+                           and i.get("id") not in exclude),
+                          key=_priority),
         "more": len(actionable) - len(chosen),
         "held": held,
         OWED_NOTHING: owed,
@@ -332,6 +361,12 @@ def _index_line(item: dict, resolutions: set, now: datetime) -> str:
         card = item.get("card") or {}
         line += ("\n      " + _short(card.get("live_question")
                                      or item.get("summary"), 160))
+    elif section(item, now) == DATA:
+        import data_check
+
+        check = data_check.of(item.get("card"))
+        line += "\n      look up: " + _short(
+            (check["questions"] or [check.get("why") or ""])[0], 150)
     return line
 
 
@@ -386,7 +421,13 @@ def detail(item: dict, resolutions: set, now: datetime) -> str:
                      f"{_after_merge(item['fix_pr'])}): {item['fix_pr']}. "
                      "Send the acknowledgment now; the resolution comes "
                      "back here once the fix is live.")
+    import data_check
+
+    data_lines = data_check.slack_lines(item)
+    if kind == DATA:
+        return "\n".join(lines + _data_detail(item, card, data_lines, n))
     if kind in (READY, FIX):
+        lines += data_lines
         lines.append(_recipients(item))
         if kind == FIX:
             lines.append(f":no_entry: Held: {_fix_reason(item)}")
@@ -419,6 +460,7 @@ def detail(item: dict, resolutions: set, now: datetime) -> str:
                      f"{ESCALATION_LABELS.get(reason, reason)}")
     if card.get("recommended_action"):
         lines.append(f"*Recommended:* {card['recommended_action']}")
+    lines += data_lines
     if is_design_question(item):
         if (code or {}).get("fix"):
             lines.append(f"*If you change it:* {code['fix']}")
@@ -444,6 +486,33 @@ def detail(item: dict, resolutions: set, now: datetime) -> str:
                  f"`log {n}` · `build {n}` · `edit {n}: <reply>` · "
                  f"`hold {n}` · `done {n}`")
     return "\n".join(lines)
+
+
+def _data_detail(item: dict, card: dict, data_lines: list[str],
+                 n) -> list[str]:
+    """A ticket the records decide: what they asked, what the code says,
+    the query, and a holding reply if there is one."""
+    asked = card.get("live_question") or item.get("summary") or ""
+    lines = [f"*Waiting on:* {asked}"]
+    if card.get("situation"):
+        lines.append(f"*Situation:* {card['situation']}")
+    code = card.get("code_check") or {}
+    if isinstance(code, dict) and code.get("verdict") not in (
+            None, "", "not_checked"):
+        lines.append(f"*Code check:* {code.get('verdict')} "
+                     f"({code.get('confidence') or '?'}) "
+                     f"{code.get('finding') or ''}")
+    lines += data_lines
+    draft = (item.get("draft") or "").strip()
+    holding = draft and item.get("draft_status") == "ok"
+    if holding:
+        lines.append("*Holding reply, if you want to answer before you "
+                     "check:* " + _recipients(item))
+        lines.append("```" + draft + "```")
+    lines.append((f"`send {n}` sends the holding reply · " if holding
+                  else "")
+                 + f"`route {n} to onlyg` · `hold {n}` · `done {n}`")
+    return lines
 
 
 def week_line(week: dict) -> str:
@@ -481,7 +550,13 @@ def render(batch_number: int, picked: dict, context: dict,
     """(top-level message, thread messages)."""
     resolutions = context.get("resolutions") or set()
     ready, fix, decide = picked[READY], picked[FIX], picked[DECIDE]
-    needs = len(ready) + len(fix) + len(decide)
+    data = picked.get(DATA) or []
+    shown_ids = {i.get("id") for i in ready + fix + decide + data}
+    # A `confirm` check on an item this batch does not otherwise show (the
+    # agent is fixing it, the client owes us) still gets its own block.
+    confirm = picked.get("confirm") or []
+    confirm_only = [i for i in confirm if i.get("id") not in shown_ids]
+    needs = len(ready) + len(fix) + len(decide) + len(data)
     title = context.get("title") or "Support batch"
     top = [f":inbox_tray: *{title} {batch_number}* · {_clock(now)} · "
            f"*{needs} need you*"]
@@ -501,6 +576,15 @@ def render(batch_number: int, picked: dict, context: dict,
     if decide:
         top.append(f"\n*NEEDS YOUR DECISION ({len(decide)})*")
         top += [_index_line(i, resolutions, now) for i in decide]
+    if data or confirm:
+        top.append(f"\n*DATA CHECK FIRST ({len(data) + len(confirm)})* · "
+                   "run the query in the thread in the prod shell, then "
+                   "`data N: <output>` and triage reads it")
+        top += [_index_line(i, resolutions, now) for i in data]
+        top += [f"*{i.get('number')}* {_star(i)}{_zoho(i)} {_account(i)} · "
+                "confirm before the fixed email"
+                + (" · fix PR open" if i.get("fix_pr") else "")
+                for i in confirm]
     if not needs:
         top.append("\nNothing needs you right now.")
     if picked.get("more"):
@@ -565,7 +649,8 @@ def render(batch_number: int, picked: dict, context: dict,
 
     blocks: list[str] = []
     for name, items in (("READY TO SEND", ready), ("FIX FIRST", fix),
-                        ("NEEDS YOUR DECISION", decide)):
+                        ("NEEDS YOUR DECISION", decide),
+                        ("DATA CHECK FIRST", data + confirm_only)):
         for index, item in enumerate(items):
             body = detail(item, resolutions, now)
             blocks.append(f"*{name}*\n\n{body}" if index == 0 else body)
@@ -722,7 +807,7 @@ def run_batch(kind: str = "scheduled", exclude: set | None = None,
     untriaged, queue_error = _queue_state(items)
     fill_received(items)
     picked = select(items, exclude=exclude, now=now)
-    chosen = picked[READY] + picked[FIX] + picked[DECIDE]
+    chosen = picked[READY] + picked[FIX] + picked[DECIDE] + picked[DATA]
     shown = {str(i["id"]): draft_hash(i.get("draft")) for i in chosen}
     prev = sprint_store.latest_batch()
 

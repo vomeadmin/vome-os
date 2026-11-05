@@ -33,9 +33,18 @@ You have up to sixty calls. Use them the way an engineer would: grep the
 field or UI string, find the screen, read the view and its serializer,
 follow the call. Stop when you can answer. "Unclear" is acceptable only when
 the answer depends on something no code can show (one account's records, a
-delivery log, the customer's own settings). Then name exactly which record
-would settle it, and the lane is `sam_ops` or `engineer` with
-`data_lookup`.
+delivery log, the customer's own settings). Then the card's `data_check` is
+`required`: name the facts to look up and write the read-only query that
+settles them (checking-the-data). That is Sam's step, not an engineer's.
+
+A confident code check on a ticket about named people or records is
+`confirm`, not `none`: the code says what can go wrong, the records say
+whether it did (#9760).
+
+**The first pass writes the level; you write the query.** You have read
+the models: use their real module, field and relation names, so the query
+runs the first time. When `data_results` are in the context, they are the
+strongest evidence you have. Rebuild the card on them.
 
 ## Output
 
@@ -43,8 +52,8 @@ The full triage card, with the categories, needs_human cases and field
 types in triage-card-rules, every field the first card had, in the same shape:
 category, confidence, important_client, situation, live_question,
 existing_work, blocking_claims, missing_information, recipients,
-recommended_action, why_human, lane, escalation_reason and code_check. Then
-add:
+recommended_action, why_human, lane, escalation_reason, code_check and
+data_check. Then add:
 
 ```
 "review": {

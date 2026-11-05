@@ -36,6 +36,7 @@ from __future__ import annotations
 import os
 import re
 
+import data_check
 import sprint_store
 from vomeos import store
 
@@ -261,6 +262,9 @@ def view(item: dict) -> dict:
         "blocking_claims": card.get("blocking_claims") or "",
         "missing_information": card.get("missing_information") or "",
         "code_check": code,
+        # One account's records decide it: what to look up, the read-only
+        # query for the prod shell, and what came back (data_check.py).
+        "data_check": data_check.view(item),
         "escalation_reason": card.get("escalation_reason") or "",
         "why_human": card.get("why_human") or "",
         "recommended_action": card.get("recommended_action") or "",
@@ -286,8 +290,8 @@ def view(item: dict) -> dict:
 # Read tools
 # ---------------------------------------------------------------------------
 
-SECTIONS = ("ready", "fix", "decide", "quiet", "owed_nothing", "held",
-            "in_flight")
+SECTIONS = ("ready", "fix", "decide", "data", "quiet", "owed_nothing",
+            "held", "in_flight")
 
 
 def sprint_queue(include_finished: bool = False) -> dict:
@@ -650,6 +654,32 @@ def send_ticket_reply(ticket: str, sam_said: str, caller: str,
             "sent": " sent to " in result}
 
 
+def data_check_result(ticket: str, output: str, caller: str) -> dict:
+    """Sam ran a ticket's data check in the prod shell: keep what it
+    printed on the sprint item and triage the ticket again with it, deep
+    pass included. Internal only: nothing reaches the client."""
+    _sam_only(caller, "add data check results")
+    _, item = find(ticket)
+    if not item:
+        _refuse("no sprint item for this ticket yet; call "
+                "ticket_first_pass first")
+    out = data_check.take(item, output, by=caller or "sam")
+    if not out["ok"]:
+        _refuse("the output is empty; pass what the shell printed")
+    return {
+        "kept_lines": out["lines"],
+        "state": "triaging" if out["queued"] else "kept, not re-triaged",
+        "next_step": ("The investigator is reading the results with the "
+                      "thread and the code (two to five minutes). Call "
+                      "ticket_first_pass for the new card; its data_check "
+                      "says `none` with `found` when the records settled "
+                      "it, or asks the next question.")
+        if out["queued"] else
+        "The re-triage could not be queued; call "
+        "ticket_first_pass(refresh=true).",
+    }
+
+
 def route_ticket(ticket: str, engineer: str, caller: str) -> dict:
     """Hand a ticket to an engineer: Priority Queue task with the agent's
     first pass as the engineer summary and a private Zoho note. The Zoho
@@ -942,8 +972,8 @@ DONE_STATES = ("fix_live", "shipped")
 # Reconcile states where the next move is ours, not the client's.
 INTERNAL_STATES = ("engineer_stalled", "unassigned", "task_closed",
                    "no_task")
-BOARD_LANES = ("send", "tell_them_done", "check", "decide", "internal",
-               "close_quietly")
+BOARD_LANES = ("send", "tell_them_done", "check", "decide", "data_check",
+               "internal", "close_quietly")
 COUNTED = ("agent_fixing", "held", "waiting_on_client")
 MAX_SEND = 40
 
@@ -1098,6 +1128,8 @@ def _place(item: dict, open_ids: set, rec: dict,
     import sprint_batch
 
     section = sprint_batch.section(item)
+    if section == sprint_batch.DATA:
+        return "data_check", _data_line(item, view(item))
     if section == sprint_batch.IN_FLIGHT:
         return "agent_fixing", {}
     if section == sprint_batch.HELD:
@@ -1139,6 +1171,19 @@ def _place(item: dict, open_ids: set, rec: dict,
         flags = [sprint_batch._fix_reason(item) or "the draft is held"] \
             + flags
     return ("check" if flags else "send"), _card(v, flags, "reply")
+
+
+def _data_line(item: dict, v: dict) -> dict:
+    """A ticket the records decide, for the board: what to run, and the
+    holding reply if one is drafted."""
+    line = {k: v.get(k) for k in ("item", "ticket", "header", "links",
+                                  "live_question", "situation")
+            if v.get(k)}
+    line["data_check"] = v.get("data_check") or {}
+    if item.get("draft_status") == "ok" and item.get("draft"):
+        line["holding_reply"] = item.get("draft")
+        line["recipients"] = v.get("recipients")
+    return line
 
 
 def _untold(rec: dict) -> bool:
@@ -1213,6 +1258,10 @@ def sprint_board() -> dict:
             counted[lane] += 1
         else:
             lanes[lane].append(line)
+        # A `confirm` check is owed wherever the item sits: the "fixed"
+        # email waits for it (resolution_scope).
+        if lane != "data_check" and sprint_batch.owes_data_check(item):
+            lanes["data_check"].append(_data_line(item, view(item)))
     # In Progress tickets with no sprint item: shipped and never told, or
     # stuck on our side. One line each, from the nightly reconcile.
     for tid, rec in reconcile.items():
@@ -1260,6 +1309,12 @@ def sprint_board() -> dict:
             "wording; they go only when Sam names them (send_replies "
             "`checked`, or send_ticket_reply with his edit). decide needs "
             "his call (feature, design question, data or billing). "
+            "data_check: one account's records decide it. Show each "
+            "one's questions and the setup plus query exactly, as one "
+            "code block Sam pastes into the prod Django shell; when he "
+            "pastes the output back, pass it verbatim to "
+            "data_check_result. `confirm` ones may already have a fix "
+            "PR; the fixed email waits for the check. "
             "internal never gets an email: one line each with `next`; on "
             "Sam's word, ping_team comments on the task and notifies its "
             "assignee. close_quietly: one line each, close_ticket_quietly "

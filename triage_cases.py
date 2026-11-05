@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 
 from vomeos import eval_cases, store
@@ -41,14 +42,50 @@ def parse_expect(pairs: list[str]) -> dict:
         if not sep or not key.strip():
             raise ValueError(f"expected key=value, got {pair!r}")
         value = value.strip()
+        if "|" in value:
+            # data_check.needed=confirm|required: either answer agrees.
+            expect[key.strip()] = [v.strip() for v in value.split("|")
+                                   if v.strip()]
+            continue
         expect[key.strip()] = {"true": True, "false": False}.get(
             value.lower(), value)
     return expect
 
 
-def from_ticket(ticket: str, expect: dict,
-                note: str) -> list[tuple[str, dict]]:
-    """(agent, case) pairs built from the ticket's live context."""
+# "[2026-10-30 13:57] Laurel: ..." (hand-written cases) or the live
+# format, "--- Laurel Gaffney [in] -- 2026-10-30T13:57:15.000Z ---".
+_STAMP = re.compile(r"^\[(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2})")
+_HEADER = re.compile(r"^--- .* -- (\S*) ---\s*$")
+_ISO = re.compile(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})")
+
+
+def thread_before(thread: str, before: str) -> str:
+    """The thread as it stood before `before` ("2026-11-01" or
+    "2026-11-01 12:00"): every message stamped at or after it is cut, so a
+    case can judge the ticket the way triage first saw it. A message with
+    no date (an internal note) is cut too: it may be from later."""
+    if not before:
+        return thread
+    kept, cutting = [], False
+    for line in (thread or "").splitlines():
+        header = _HEADER.match(line)
+        stamp = _STAMP.match(line)
+        if header:
+            found = _ISO.search(header.group(1))
+            cutting = (not found
+                       or f"{found.group(1)} {found.group(2)}" >= before)
+        elif stamp:
+            cutting = stamp.group(1).replace("T", " ") >= before
+        if not cutting:
+            kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def from_ticket(ticket: str, expect: dict, note: str,
+                before: str = "") -> list[tuple[str, dict]]:
+    """(agent, case) pairs built from the ticket's live context. `before`
+    cuts the thread to how it stood then; the stored card is from later,
+    so no investigator case is made."""
     import sprint
     import sprint_store
 
@@ -62,8 +99,19 @@ def from_ticket(ticket: str, expect: dict,
         context.pop(key)
     number = context.get("ticket_number") or ticket
     case_id = f"sam-{number}"
+    if before:
+        context["thread"] = thread_before(context.get("thread") or "",
+                                          before)
+        # The task search is today's: on #9760 it named the task filed for
+        # a later message, and read_task showed the agent that message.
+        context["existing_tasks"] = (
+            f"(not searched: this case judges the ticket as it stood before "
+            f"{before})")
+        case_id = f"{case_id}-before-{before[:10]}"
     cases = [(TRIAGE, {"id": case_id, "note": note, "context": context,
                        "expect": expect})]
+    if before:
+        return cases
     item = sprint_store.by_ticket(str(row.get("id"))) or {}
     card = dict(item.get("card") or {})
     first = card.pop("first_pass", None) or {}
@@ -95,6 +143,9 @@ def main(argv: list[str] | None = None) -> int:
                           "code_check.verdict=bug")
     add.add_argument("--note", default="")
     add.add_argument("--source", default="claude_code")
+    add.add_argument("--before", default="",
+                     help="judge the thread as it stood before this date "
+                          "(2026-11-01 or '2026-11-01 12:00')")
     show = sub.add_parser("list")
     show.add_argument("--agent", default="")
     drop = sub.add_parser("remove")
@@ -103,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "add":
         pairs = from_ticket(args.ticket, parse_expect(args.expect),
-                            args.note)
+                            args.note, before=args.before)
         for agent, case in pairs:
             new_id = eval_cases.add(agent, case, ticket=args.ticket,
                                     source=args.source)

@@ -326,8 +326,9 @@ def test_the_worker_refreshes_and_skips_the_cap_when_sam_asks(monkeypatch):
     shadow_triage.handle({"ticket_id": "1", "reason": "claude_ai",
                           "refresh": True})
     shadow_triage.handle({"ticket_id": "1", "reason": "reply"})
-    assert calls == [{"refresh": True, "ignore_cap": True},
-                     {"refresh": False, "ignore_cap": False}]
+    plain = {"force": False, "reply_thread": ""}
+    assert calls == [{"refresh": True, "ignore_cap": True, **plain},
+                     {"refresh": False, "ignore_cap": False, **plain}]
 
 
 def _conversation(text, author_type="END_USER"):
