@@ -97,7 +97,8 @@ def tier(row: dict) -> str:
 
 def render(rows: list[dict], edits: list[dict],
            lessons: list[dict] | None = None,
-           week: dict | None = None) -> str:
+           week: dict | None = None,
+           trust: list[str] | None = None) -> str:
     lines = [f":bar_chart: *Draft autonomy, last {WINDOW_DAYS} days*",
              f"_Proven at {PROVEN_SENT}+ sent and "
              f"{int(PROVEN_UNEDITED * 100)}%+ unedited; auto-send would "
@@ -114,6 +115,13 @@ def render(rows: list[dict], edits: list[dict],
             f"sent {r['sent']} · unedited {r['unedited']} ({rate}) · "
             f"edited {r['edited']} · redrafts {r['redrafts']}"
         )
+    if trust:
+        # G69: how often triage's card matched Sam's Claude Code audits.
+        # Drafts can only earn auto-send in a category whose cards are
+        # right too, so the two numbers sit together.
+        lines.append(f"\n:mag: *Triage cards vs your audits, last "
+                     f"{WINDOW_DAYS} days*")
+        lines += trust
     if week:
         import sprint_batch
 
@@ -145,8 +153,15 @@ def run_autonomy_report() -> dict:
 
     # #vome-agent-log, not #support-sprints: Sam keeps the sprint channel
     # for urgent work only (2026-10-19).
+    try:
+        import triage_cases
+
+        trust = triage_cases.trust_lines(
+            triage_cases.agreement_since(WINDOW_DAYS), WINDOW_DAYS)
+    except Exception as exc:
+        trust = [f"Audit agreement unavailable ({type(exc).__name__})."]
     ts = sprint_thread._post(render(rows, edits, lesson_store.all_active(),
-                                    sprint_store.week_counts()),
+                                    sprint_store.week_counts(), trust),
                              channel=sprint_thread.AGENT_LOG)
     return {"status": "ok" if ts else "post failed",
             "categories": len(rows), "edits": len(edits)}

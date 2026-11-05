@@ -322,12 +322,23 @@ def sprint_queue(include_finished: bool = False) -> dict:
                      and i.get("status") == sprint_store.DONE)]
     groups: dict[str, list] = {name: [] for name in SECTIONS}
     finished = []
+    open_cards = []
     for item in sorted(items, key=sprint_batch._priority):
         name = sprint_batch.section(item)
         if name in groups:
             groups[name].append(view(item))
+            if name not in ("held", "in_flight"):
+                open_cards.append(item)
         elif include_finished:
             finished.append(view(item))
+    # Which of these Sam should audit in Claude Code (G69): the cards most
+    # likely wrong or most costly if wrong, plus a fixed random sample.
+    try:
+        import triage_cases
+
+        audit_these = triage_cases.audit_picks(open_cards)
+    except Exception as exc:
+        audit_these = [{"error": f"audit picks unavailable ({exc})"}]
     untriaged: int | str
     try:
         if tickets is None:
@@ -350,7 +361,11 @@ def sprint_queue(include_finished: bool = False) -> dict:
         "nothing_owed": groups["owed_nothing"],
         "held": groups["held"],
         "agent_fixing": groups["in_flight"],
+        "audit_these": audit_these,
         "how_to_use_this": (
+            "audit_these lists the open tickets worth taking into Claude "
+            "Code with /audit N, each with why; mention them once at the "
+            "end, never instead of the sections. "
             "Every card opens with two lines given exactly: header, then "
             "links (the Zoho ticket and each ClickUp task as clickable "
             "links, with the list each task sits in, its status and "
