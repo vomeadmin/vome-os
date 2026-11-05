@@ -174,9 +174,19 @@ def last_exchange(ticket_id: str, skip=None) -> tuple[dict, dict]:
     return _newest(threads, "in", skip), _newest(threads, "out")
 
 
+TRASHED = "Trashed"
+
+
 def ticket_status(ticket_id: str) -> str:
-    """The ticket's Zoho status ("Closed", "Processing", ...)."""
-    return str(_get(f"/tickets/{ticket_id}").get("status") or "")
+    """The ticket's Zoho status ("Closed", "Processing", ...), or TRASHED
+    for a ticket in the Recycle Bin. Zoho still answers 200 for those with
+    their old status (#8194 read "In Progress" with isTrashed and
+    isDeleted true), so without this they looked live (Sam, 2026-11-05:
+    a deleted ticket always leaves the queue)."""
+    ticket = _get(f"/tickets/{ticket_id}")
+    if ticket.get("isTrashed") or ticket.get("isDeleted"):
+        return TRASHED
+    return str(ticket.get("status") or "")
 
 
 def _secondary_emails(ticket_id: str) -> list[str]:

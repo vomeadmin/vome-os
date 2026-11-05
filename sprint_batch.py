@@ -1055,7 +1055,7 @@ def _handled(item: dict, open_ids: set, pending: dict) -> str:
                   else zoho_actions.ticket_status(ticket_id))
         if not status:
             return ""
-        if status == "Closed":
+        if status in ("Closed", zoho_actions.TRASHED):
             return f"handled outside the sprint (Zoho: {status})"
         if status not in ("New", "Processing") and not adopted:
             # In Progress or Awaiting Client Response. A resolution waiting
