@@ -219,6 +219,14 @@ def section(item: dict, now: datetime | None = None) -> str:
     # first, so `send ready` must never send it (shadow_triage, #9501).
     if is_holding(item):
         return DECIDE
+    # The client owes us the next move, so nothing here needs Sam, even
+    # with a draft attached. Only a live fix drafts for this category, and
+    # its resolution goes out on its own once every problem has shipped
+    # (release_resolutions). A held one stays held. #9753 (2026-11-05):
+    # Awaiting Client Response, the card said "send no reply", and a
+    # partial fix's draft still listed it as ready to send.
+    if item.get("category") == "awaiting_client":
+        return OWED_NOTHING
     draft = (item.get("draft") or "").strip()
     if draft and item.get("draft_status") == "ok":
         # A reply with nowhere to go is not ready (#9538, 2026-10-18).
@@ -229,8 +237,6 @@ def section(item: dict, now: datetime | None = None) -> str:
         return FIX
     if (item.get("card") or {}).get("lane") == "housekeeping":
         return QUIET
-    if item.get("category") == "awaiting_client":
-        return OWED_NOTHING
     return DECIDE
 
 

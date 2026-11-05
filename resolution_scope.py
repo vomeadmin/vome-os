@@ -194,8 +194,20 @@ def check(ticket_id: str, ticket_number: str, fixes: list[dict],
         return {"complete": False, "open": [],
                 "reason": f"could not check what the client raised ({exc})"}
     if not result.ok:
-        return {"complete": False, "open": [],
-                "reason": f"no scope verdict ({result.why()})"}
+        reason = f"no scope verdict ({result.why()})"
+        # A held resolution is never asked again, so an empty verdict is a
+        # failure someone has to see (#9753, 2026-11-05: held silently).
+        import workflow_log
+
+        workflow_log.log_issue(
+            "resolution scope",
+            f"Scope check gave no verdict for ticket #{ticket_number}",
+            reason,
+            f"Zoho ticket id {ticket_id}. Fixes: "
+            + ", ".join(f.get("id") or "" for f in fixes)
+            + f". The agent was asked {_ASKS} times; the resolution is "
+            "held until someone re-runs the check or answers by hand.")
+        return {"complete": False, "open": [], "reason": reason}
     issues = [str(i) for i in (result.get("open_issues") or []) if i]
     if result.get("all_fixed") is True and not issues:
         return {"complete": True, "open": [],
