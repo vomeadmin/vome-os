@@ -291,6 +291,15 @@ def find_or_create_account(name: str) -> dict | None:
 # Tickets
 # ---------------------------------------------------------------------------
 
+def _account_refused(resp) -> bool:
+    """Zoho's 422 names /accountId as the invalid field."""
+    try:
+        errors = (resp.json() or {}).get("errors") or []
+    except Exception:
+        return False
+    return any("accountId" in str(e.get("fieldName") or "") for e in errors)
+
+
 def create_ticket(
     subject: str,
     description: str,
@@ -349,6 +358,21 @@ def create_ticket(
         payload["accountId"] = account_id
 
     resp = _api_request("POST", "/tickets", json_body=payload)
+
+    # An existing contact can belong to a different account than the one
+    # found or created by org name (a duplicate account, a renamed org).
+    # Zoho then refuses the whole ticket with a 422 on /accountId. From
+    # Nov 3 to Nov 5 2026 that lost every widget ticket (11 chats told
+    # "I wasn't able to create your ticket", #9762). The contact alone
+    # still links the ticket to its own account, so send it without.
+    if (resp is not None and resp.status_code == 422
+            and "accountId" in payload and _account_refused(resp)):
+        print(
+            f"[ZOHO-API] Account {payload['accountId']} is not linked to "
+            f"contact {payload.get('contactId')}: retrying without it"
+        )
+        payload.pop("accountId")
+        resp = _api_request("POST", "/tickets", json_body=payload)
 
     if not resp or resp.status_code not in (200, 201):
         print(
