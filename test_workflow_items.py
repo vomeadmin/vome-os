@@ -62,6 +62,9 @@ def after(monkeypatch):
 
     monkeypatch.setattr(zoho_actions, "set_status",
                         lambda tid, s: A.statuses.append((tid, s)))
+    monkeypatch.setattr(zoho_actions, "set_awaiting_client",
+                        lambda tid: A.statuses.append(
+                            (tid, "Awaiting Client Response")))
     monkeypatch.setattr(shadow_triage, "release_state",
                         lambda n, t: {"live": A.live, "task_id": "P1"})
     monkeypatch.setattr(sprint_thread, "_close_agent_fix",
