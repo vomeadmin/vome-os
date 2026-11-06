@@ -96,3 +96,17 @@ def test_a_forward_to_an_engineer_does_not_copy_them(monkeypatch):
            "createdTime": "2026-10-22", "to": "dev@vomevolunteer.com"}
     _chum(monkeypatch, [CHUM[2], fwd])
     assert za.recipients("9610")["cc"] == ["dominique@chum.qc.ca"]
+
+
+# #9823 (2026-11-06): Corinn wrote To Scott and support; the reply went to
+# her alone. A client colleague on the newest message's To line is copied.
+def test_a_client_colleague_on_the_to_line_is_copied(monkeypatch):
+    latest = {"id": "W1", "direction": "in", "createdTime": "2026-11-05T19:00",
+              "fromEmailAddress": '"Corinn Claydon"<corinnc@wellspringalberta.ca>',
+              "to": '"scott patterson"<scottp@wellspringalberta.ca>,'
+                    '"support"<support@vomevolunteer.zohodesk.com>',
+              "author": {"name": "Corinn Claydon", "firstName": "Corinn"}}
+    _chum(monkeypatch, [latest])
+    out = za.recipients("9823")
+    assert out["to"] == "corinnc@wellspringalberta.ca"
+    assert out["cc"] == ["scottp@wellspringalberta.ca"]

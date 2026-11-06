@@ -1270,9 +1270,20 @@ def _signed(item: dict, text: str) -> str:
     first = (item.get("recipients") or {}).get("first_name") or ""
     if first and not re.match(r"^(hi|hello|bonjour|dear)\b", body, re.I):
         body = f"Hi {first},\n\n{body}"
-    if "support.vomevolunteer.com" not in body:
-        body = f"{body}\n\nSam | Vome team\nsupport.vomevolunteer.com"
+    # The signature is the closing two lines, not any mention of the help
+    # centre: a reply with an article or portal link used to go out with no
+    # signature, and the required_signature guard then held it (#9720).
+    if not _SIGNATURE_END.search(body):
+        if re.search(r"Sam \| Vome team\s*$", body):
+            body = f"{body}\nsupport.vomevolunteer.com"
+        else:
+            body = f"{body}\n\nSam | Vome team\nsupport.vomevolunteer.com"
     return body
+
+
+_SIGNATURE_END = re.compile(
+    r"Vome team\s*\n\s*(?:https?://)?support\.vomevolunteer\.com/?\s*$",
+    re.IGNORECASE)
 
 
 def _guard_notes(text: str, item: dict) -> list[str]:

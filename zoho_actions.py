@@ -216,7 +216,13 @@ def recipients(ticket_id: str) -> dict:
     author = (latest.get("author") or {}).get("name") or ""
     given = (latest.get("author") or {}).get("firstName") or ""
     cc: list[str] = []
-    for address in (emails_in(latest.get("cc")) + _secondary_emails(ticket_id)
+    # The client's own colleagues on the latest message's To line are
+    # copied too: on #9823 (2026-11-06) Corinn wrote To Scott and us, and
+    # the reply reached her alone. Teammates on To are teammates_copied's.
+    client_to = [a for a in emails_in(latest.get("to"))
+                 if not a.endswith(_TEAM_DOMAINS)]
+    for address in (client_to + emails_in(latest.get("cc"))
+                    + _secondary_emails(ticket_id)
                     + teammates_copied(threads)):
         if address != to and not _ours(address) and address not in cc:
             cc.append(address)
