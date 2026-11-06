@@ -804,7 +804,8 @@ def test_a_ticket_taken_from_an_engineer_stays_until_answered(zoho_status):
 
 def test_a_reconcile_card_stays_until_answered(zoho_status):
     """Oct 25: the sweep finished 25 of 26 reconcile cards (In Progress
-    with no task, drafts and all) within the hour."""
+    with no task, drafts and all) within the hour. They also feed
+    sprint_board's internal lane."""
     statuses, decided = zoho_status
     statuses["R"] = "In Progress"
     EXCHANGES["R"] = _exchange("2026-10-10T10:00:00.000Z",

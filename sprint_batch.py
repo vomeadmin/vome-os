@@ -1045,7 +1045,9 @@ def _handled(item: dict, open_ids: set, pending: dict) -> str:
     # sprint finishes it (an older acknowledgment does not). On Oct 25 this
     # sweep finished 25 of 26 reconcile cards within the hour, drafts and
     # all. A reconcile card that only waits on the client still finishes:
-    # there is nothing in it for Sam to send.
+    # there is nothing in it for Sam to send. sprint_board shows these as
+    # its internal (ping the team) lane, so they must stay in the working
+    # set (2026-11-05: finishing them here emptied that lane).
     card = item.get("card") or {}
     adopted = bool(card.get("backlog_sweep")) or (
         bool(card.get("reconciled"))
