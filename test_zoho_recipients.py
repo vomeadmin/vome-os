@@ -193,3 +193,35 @@ def test_no_customer_found_never_falls_back_to_the_teammate(monkeypatch):
     out = za.recipients("R")
     assert out["to"] == ""
     assert out["forwarded_by"] == "r.segev@vomevolunteer.co"
+
+
+# #9823 (2026-11-05): the client wrote to support and to Scott. The reply
+# went to the sender, Cc and secondary contacts only, and Scott missed it.
+SCOTT = {"id": "T1", "direction": "in", "createdTime": "2026-11-05",
+         "fromEmailAddress": "amy@club.org",
+         "to": '"Vome"<support@vomevolunteer.zohodesk.com>,'
+               '"Scott"<Scott@Club.org>',
+         "author": {"name": "Amy B", "firstName": "Amy"}}
+
+
+def test_everyone_the_client_addressed_is_copied(monkeypatch):
+    _chum(monkeypatch, [SCOTT])
+    out = za.recipients("9823")
+    assert out["to"] == "amy@club.org"
+    assert out["cc"] == ["scott@club.org"]
+
+
+def test_a_teammate_on_the_to_line_is_still_decided_by_team_cc(monkeypatch):
+    thread = {**SCOTT, "to": SCOTT["to"] + ",r.segev@vomevolunteer.com"}
+    _chum(monkeypatch, [thread])
+    assert za.recipients("9823")["cc"] == [
+        "scott@club.org", "r.segev@vomevolunteer.com", za.SAM_CC]
+
+
+def test_a_send_adds_the_to_line_to_an_item_read_earlier():
+    assert za.with_to_line(["boss@club.org"], SCOTT, "amy@club.org") == [
+        "boss@club.org", "scott@club.org"]
+    assert za.with_to_line(["scott@club.org"], SCOTT, "amy@club.org") == [
+        "scott@club.org"]
+    # The sender is never copied on their own reply.
+    assert za.with_to_line([], {"to": "amy@club.org"}, "amy@club.org") == []

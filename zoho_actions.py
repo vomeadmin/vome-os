@@ -329,7 +329,7 @@ def recipients(ticket_id: str) -> dict:
     to = sender
     author = (latest.get("author") or {}).get("name") or ""
     given = (latest.get("author") or {}).get("firstName") or ""
-    extra = emails_in(latest.get("cc"))
+    extra = emails_in(latest.get("cc")) + to_line_clients(latest, sender)
     forwarded_by = ""
     if sender and is_team_address(sender):
         forwarded_by = sender
@@ -350,6 +350,33 @@ def recipients(ticket_id: str) -> dict:
         # When the customer last wrote: the age a batch shows.
         "received_at": str(latest.get("createdTime") or ""),
     }
+
+
+def to_line_clients(thread: dict, exclude: str = "") -> list[str]:
+    """Client addresses in a message's To line, other than `exclude`.
+
+    #9823 (2026-11-05): the client wrote to support and to Scott, and the
+    reply went to the sender, Cc and secondary contacts only, so Scott never
+    saw it. Everyone the client addressed is on the conversation. Vome's own
+    mailboxes are left out, and so are teammates: team_cc decides who from
+    Vome is copied (Sam only on customer threads)."""
+    exclude = (exclude or "").strip().lower()
+    return [a for a in emails_in(thread.get("to"))
+            if a != exclude and not _ours(a) and not is_team_address(a)]
+
+
+def with_to_line(cc: list[str], thread: dict, to: str) -> list[str]:
+    """`cc` plus the client addresses on `thread`'s To line, for a send
+    from a sprint item whose recipients were read before to_line_clients
+    existed (or before the client added someone). No duplicates, never the
+    `to` address itself."""
+    out = list(cc or [])
+    seen = {a.lower() for a in out} | {(to or "").lower()}
+    for address in to_line_clients(thread, to):
+        if address not in seen:
+            seen.add(address)
+            out.append(address)
+    return out
 
 
 def _reply_body(to: str, cc: list[str], content: str) -> dict:
@@ -389,6 +416,18 @@ def set_status(ticket_id: str, status: str) -> dict:
     if resp.status_code >= 400:
         raise RuntimeError(f"Zoho {resp.status_code}: {resp.text[:300]}")
     return resp.json() if resp.text.strip() else {}
+
+
+AWAITING = "Awaiting Client Response"
+
+
+def set_awaiting_client(ticket_id: str) -> dict:
+    """Awaiting Client Response with no assignee: the next move is the
+    client's, so the ticket belongs to nobody on our side. Leaving the old
+    owner (an engineer's team from an earlier acknowledgment, or Sam) kept
+    it on their list (868mu196v, 8 tickets fixed by hand on Nov 5-6)."""
+    return _send("PATCH", f"/tickets/{ticket_id}",
+                 {"status": AWAITING, "assigneeId": None})
 
 
 def set_in_progress(ticket_id: str, team: str) -> dict:
