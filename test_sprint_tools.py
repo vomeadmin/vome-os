@@ -210,7 +210,7 @@ def test_follow_up_sends_without_touching_the_draft(one, monkeypatch):
                         lambda *a, **k: recorded.append(a))
     monkeypatch.setattr(sprint_thread, "_post", lambda *a, **k: None)
     monkeypatch.setattr(sprint_thread, "_after_send",
-                        lambda item, resolved=False:
+                        lambda item, resolved=False, body="":
                         after.append(resolved) or "Zoho set to Closed.")
     out = sprint_thread._send_follow_up(one, "Hi Ana,\n\nbody", resolved=True)
     assert mails == [("ana@ms.org", ["mc@ms.org"], "Hi Ana,\n\nbody")]
@@ -218,6 +218,29 @@ def test_follow_up_sends_without_touching_the_draft(one, monkeypatch):
     assert after == [True] and " sent to " in out
     # sent_text stays the first reply; Zoho holds the follow-up.
     assert recorded == []
+
+
+def test_follow_up_copies_everyone_on_the_clients_to_line(one, monkeypatch):
+    """#9823 (2026-11-05): Scott was on the client's To line and missed
+    the reply. The item's recipients were read before the To line counted,
+    so the send itself adds it."""
+    import zoho_actions
+
+    one.update(status="sent", sent_at=NOW,
+               recipients={**one["recipients"], "cc": ["mc@ms.org"]})
+    mails = []
+    monkeypatch.setattr(zoho_actions, "latest_inbound", lambda t: {
+        "id": "TH1",
+        "to": "support@vomevolunteer.zohodesk.com, Scott <scott@ms.org>"})
+    monkeypatch.setattr(zoho_actions, "send_reply",
+                        lambda t, to, cc, body: mails.append((to, cc)))
+    monkeypatch.setattr(sprint_store, "decide", lambda *a: None)
+    monkeypatch.setattr(sprint_thread, "_post", lambda *a, **k: None)
+    monkeypatch.setattr(sprint_thread, "_after_send",
+                        lambda item, resolved=False, body="": "")
+    out = sprint_thread._send_follow_up(one, "Hi Ana,\n\nbody")
+    assert mails == [("ana@ms.org", ["mc@ms.org", "scott@ms.org"])]
+    assert "scott@ms.org" in out
 
 
 def test_follow_up_refused_when_the_customer_wrote_again(one, monkeypatch):
@@ -358,7 +381,8 @@ def test_an_out_of_office_is_never_triaged_as_a_reply(monkeypatch, text,
                         lambda tid, reason, **k: calls.append(reason) or {})
     out = shadow_triage.handle({"ticket_id": "1", "reason": "reply"})
     if skipped:
-        assert out == {"status": "skipped", "reason": "auto-reply"}
+        assert out == {"status": "skipped",
+                       "reason": "auto-reply or courtesy reply"}
         assert calls == []
     else:
         assert calls == ["reply"]

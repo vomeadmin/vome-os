@@ -1383,6 +1383,8 @@ def _send(item: dict, sam_wrote: bool = False,
 
     rcpt = item.get("recipients") or {}
     to, cc = rcpt.get("to") or "", list(rcpt.get("cc") or [])
+    # #9823: everyone the client addressed hears back, not only the sender.
+    cc = zoho_actions.with_to_line(cc, latest, to)
     if not to:
         # #9538 (2026-10-18): a ready draft whose latest message had no
         # readable sender. Never guess an address.
@@ -1410,7 +1412,7 @@ def _send(item: dict, sam_wrote: bool = False,
            else "on Sam's approval in the sprint")
     _post(f"Sent #{item.get('ticket_number')} to {to}{copied} {how}.",
           channel=AGENT_LOG)
-    after = _after_send(item, resolved=resolved)
+    after = _after_send(item, resolved=resolved, body=approved)
     return f"*{n}.* sent to {to}{copied}." + (f" {after}" if after else "")
 
 
@@ -1442,6 +1444,7 @@ def _send_follow_up(item: dict, body: str, resolved: bool = False) -> str:
                 "reply. It is being re-triaged; nothing was sent.")
     rcpt = item.get("recipients") or {}
     to, cc = rcpt.get("to") or "", list(rcpt.get("cc") or [])
+    cc = zoho_actions.with_to_line(cc, latest, to)
     if not to:
         return (f"*{n}.* has no recipient (no sender on the latest customer "
                 "message), so nothing was sent. Reply from Zoho.")
@@ -1453,7 +1456,7 @@ def _send_follow_up(item: dict, body: str, resolved: bool = False) -> str:
     copied = f" cc {', '.join(cc)}" if cc else ""
     _post(f"Sent a follow-up on #{item.get('ticket_number')} to {to}"
           f"{copied} on Sam's approval.", channel=AGENT_LOG)
-    after = _after_send(item, resolved=resolved)
+    after = _after_send(item, resolved=resolved, body=body)
     return (f"*{n}.* follow-up sent to {to}{copied}."
             + (f" {after}" if after else ""))
 
@@ -1524,13 +1527,41 @@ def _still_fixing(item: dict) -> bool:
     return not release.get("live")
 
 
+# A reply that asks the client to do or answer something: the next move is
+# theirs. Courtesy closings ("let us know if anything still looks off") are
+# not asks; a direct question or request is (868mu196v: 8 replies asking
+# clients to retry or confirm were left In Progress with an engineer).
+_ASK = re.compile(
+    r"\b(?:could|can|would|will) you\b"
+    r"|\bwould it be possible\b"
+    r"|\bplease (?:try|retry|send|resend|confirm|share|check|reply|forward"
+    r"|attach|clear|sign|log|refresh|reinstall|update|open|add|test"
+    r"|let us know (?:whether|which|what|when|how|if (?:it|that|this|you)))\b"
+    r"|\b(?:try|test) (?:it |this |that )?again\b"
+    r"|\bpourr(?:iez|ais)-(?:vous|tu)\b|\bpouvez-vous\b"
+    r"|\bmerci de (?:nous|confirmer|r[ée]essayer|essayer|v[ée]rifier)\b"
+    r"|\bvous (?:pouvez|pourriez) (?:r[ée]essayer|essayer|confirmer)\b",
+    re.I)
+
+
+def asks_client(body: str) -> bool:
+    """The reply asks the client something: a question mark, or a direct
+    request (retry, confirm, send us, could you). The signature and
+    anything after it are ignored."""
+    text = body or ""
+    cut = text.rfind("Vome team")
+    if cut > 0:
+        text = text[:cut]
+    return "?" in text or bool(_ASK.search(text))
+
+
 # What a sent reply means for the ticket. The reply is the decision; the
 # status follows from it, so nobody has to tidy two systems by hand.
 CLOSE_AFTER = {"user_education", "admin_action", "misdirected",
                "account_deletion"}
 
 
-def _after_send(item: dict, resolved: bool = False) -> str:
+def _after_send(item: dict, resolved: bool = False, body: str = "") -> str:
     """Zoho status and Agent Fixes closure after a sent reply.
 
     `resolved`: Sam says this reply resolves the ticket, so it closes like
@@ -1538,8 +1569,17 @@ def _after_send(item: dict, resolved: bool = False) -> str:
 
     A resolution (the linked fix is Live) or an answer closes the ticket,
     silently. A routed ticket or an agent fix in flight goes to In Progress.
-    Everything else waits for the customer. A sent reply never leaves the
-    ticket in New or Processing: Processing means the customer wrote and we
+    Everything else waits for the customer: Awaiting Client Response with
+    no assignee.
+
+    `body` is the text that went (the item's draft when empty). A reply
+    that asks the client something (asks_client) waits for them even when
+    an engineer task is open or the category is an answer: In Progress
+    with the engineer's team, or Closed, would say the next move is ours
+    (868mu196v, Nov 5-6). An agent fix in flight keeps its In Progress on
+    the Agent Fixes team, and `resolved` or a live fix still closes.
+
+    A sent reply never leaves the ticket in New or Processing: Processing means the customer wrote and we
     still owe them, which stops being true the moment this email goes
     (Sam, #9394, 2026-10-22). Failures are reported, never raised: the email
     already went, and that must not look like it failed.
@@ -1568,7 +1608,10 @@ def _after_send(item: dict, resolved: bool = False) -> str:
     # (2026-10-23) went to In Progress "emailed when it ships" on tasks
     # that had closed days before.
     done = declined or bool(task.get("shipped")) or resolved
-    if filed.get("url") and not release.get("live") and not done:
+    asks = (not resolved and not release.get("live")
+            and asks_client(body or item.get("draft") or ""))
+    if filed.get("url") and not release.get("live") and not done \
+            and not asks:
         reason = re.sub(r"\W+", "_", str(filed.get("reason") or "auto"))
         sprint_store.decide(item["id"], sprint_store.ROUTED,
                             f"routed to {filed.get('owner')} "
@@ -1590,19 +1633,28 @@ def _after_send(item: dict, resolved: bool = False) -> str:
             return f":warning: Zoho status NOT set to In Progress ({exc})."
     # A closed task only closes the ticket when the reply is a complete
     # answer (CLOSE_AFTER); otherwise the reply asked something and waits.
-    if release.get("live") or category in CLOSE_AFTER or declined or resolved:
+    # A reply that asks the client something waits for them, whatever the
+    # category says.
+    answer = category in CLOSE_AFTER or declined
+    if release.get("live") or resolved or (answer and not asks):
         status = "Closed"
     else:
-        status = "Awaiting Client Response"
+        status = zoho_actions.AWAITING
 
     notes = []
     try:
-        zoho_actions.set_status(item["ticket_id"], status)
-        notes.append(f"Zoho set to {status}"
-                     + (" with no closure email." if status == "Closed"
-                        else "."))
+        if status == "Closed":
+            zoho_actions.set_status(item["ticket_id"], status)
+            notes.append("Zoho set to Closed with no closure email.")
+        else:
+            zoho_actions.set_awaiting_client(item["ticket_id"])
+            notes.append(f"Zoho set to {status} with no assignee.")
     except Exception as exc:
         notes.append(f":warning: Zoho status NOT set to {status} ({exc}).")
+    if asks and filed.get("url") and not done:
+        notes.append(f"The reply asks the client, so it waits for them; "
+                     f"{filed.get('owner')}'s task stays open "
+                     f"({filed['url']}).")
 
     if release.get("live"):
         notes.append(_close_agent_fix(item))
