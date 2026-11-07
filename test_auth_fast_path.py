@@ -187,3 +187,45 @@ def test_process_ticket_routes_an_admin_report_to_the_faq(monkeypatch, sent):
     assert result == "admin_signin_help_sent"
     assert called == [], "the admin's own account must not go through the volunteer flow"
     assert "same email address that you invited them from" in sent[0][1]
+
+
+def test_a_widget_ticket_gets_no_auth_reply(monkeypatch, sent):
+    # #9897: a widget ticket about hours got "your account is already
+    # active" because the model said SELF. Vic already triaged widget
+    # tickets in chat, so the fast path must not run on them at all.
+    _model_says(monkeypatch, "SELF")
+    monkeypatch.setattr(agent, "_dedup_check", lambda ticket_id: False)
+    monkeypatch.setattr(agent, "fetch_ticket_from_zoho", lambda ticket_id: None)
+    monkeypatch.setattr(agent, "fetch_ticket_conversations", lambda ticket_id: None)
+    checked = []
+    monkeypatch.setattr(agent, "_run_auth_check",
+                        lambda email: checked.append(email) or
+                        {"found": True, "is_active": True})
+    result = agent.process_ticket({
+        "ticket_id": "W1",
+        "contact_name": "Pat Volunteer",
+        "contact_email": "pat@example.com",
+        "subject": "Hours not showing after I log in",
+        "body": "<p>I can log in but my hours are missing.</p>"
+                "<hr style='border:none;border-top:1px solid #ddd;'>"
+                "<p style='color:#999;font-size:11px;'>"
+                f"{agent.WIDGET_TICKET_FOOTER}</p>",
+    })
+    assert result is None
+    assert sent == [] and checked == []
+
+
+def test_the_widget_footer_matches_what_intake_writes():
+    intake_src = open(os.path.join(os.path.dirname(__file__), "intake.py"),
+                      encoding="utf-8").read()
+    assert "WIDGET_TICKET_FOOTER" in intake_src
+    assert agent.WIDGET_TICKET_FOOTER == "Submitted via Support Widget"
+
+
+def test_the_classifier_prompt_keeps_feature_workflows_out():
+    # #9899: a Sterling background check question that mentioned logging
+    # in got the claim-your-profile FAQ as OTHER.
+    prompt = agent._AUTH_CLASSIFIER_PROMPT
+    assert "Reply OTHER only when they explicitly say" in prompt
+    assert "Sterling" in prompt and "is NO even when it mentions logging in" in prompt
+    assert prompt.rstrip().endswith("Reply with only SELF, OTHER or NO.")
