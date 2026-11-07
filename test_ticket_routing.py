@@ -840,6 +840,40 @@ def test_a_short_title_is_kept_whole():
 
 
 # ---------------------------------------------------------------------------
+# Sam's own build
+# ---------------------------------------------------------------------------
+
+def test_sams_own_build_is_not_routed_to_an_engineer(world):
+    """#9470 (2026-10-27): the promise lived in Sam's Build Now list as
+    868mkc7cn, and OnlyG got a second, urgent task for the same work."""
+    world.linked = [{"id": "868mkc7cn", "list": "Sam Accepted (Build Now)",
+                     "status": "queued",
+                     "url": "https://app.clickup.com/t/868mkc7cn"}]
+    out = tr.route(_item(), _card(), {}, {}, 7000)
+    assert out["routed"] is False
+    assert "Sam is building it" in out["why"] and "868mkc7cn" in out["why"]
+    assert world.created == [] and world.notes == [] and world.filed == []
+
+
+def test_a_shipped_build_does_not_hold_the_route(world):
+    world.linked = [{"id": "86sam", "list": "Sam Accepted (Build Now)",
+                     "status": "closed"}]
+    assert tr.route(_item(), _card(), {}, {}, 0)["routed"] is True
+
+
+def test_sam_can_still_route_his_build_by_hand(world):
+    world.linked = [{"id": "86sam", "list": "Sam Accepted (Build Now)",
+                     "status": "queued"}]
+    assert tr.route(_item(), _card(), {}, {}, 0, owner="onlyg")["routed"]
+
+
+def test_an_unsearchable_build_list_files_nothing(world):
+    world.search_fails = True
+    out = tr.route(_item(), _card(), {}, {}, 0)
+    assert out["routed"] is False and world.created == []
+
+
+# ---------------------------------------------------------------------------
 # A reply that asks the client something waits for them (868mu196v)
 # ---------------------------------------------------------------------------
 # Nov 5-6: replies asking clients to retry or confirm were set to In

@@ -381,7 +381,8 @@ def test_an_out_of_office_is_never_triaged_as_a_reply(monkeypatch, text,
                         lambda tid, reason, **k: calls.append(reason) or {})
     out = shadow_triage.handle({"ticket_id": "1", "reason": "reply"})
     if skipped:
-        assert out == {"status": "skipped", "reason": "auto-reply"}
+        assert out == {"status": "skipped",
+                       "reason": "auto-reply or courtesy reply"}
         assert calls == []
     else:
         assert calls == ["reply"]

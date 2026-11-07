@@ -263,6 +263,38 @@ def _existing_task(item: dict, incident: dict) -> tuple[dict, str]:
     return {}, ""
 
 
+SAM_ACCEPTED = "Sam Accepted (Build Now)"
+
+
+def _sam_building(item: dict) -> dict:
+    """An open task in Sam's own Build Now list for this ticket, or {}.
+
+    #9470 (2026-10-27): the promise to Stephanie lived there as 868mkc7cn,
+    the lookup above only joins the Priority Queue, and OnlyG got a second,
+    urgent task for the same work (868mnhgcz). Sam's build is not routed
+    to an engineer by itself; he still can by hand. Raises when ClickUp
+    cannot be searched, like _existing_task.
+    """
+    import clickup_search
+
+    for task in clickup_search.linked_tasks(
+            str(item.get("ticket_number") or ""),
+            str(item.get("ticket_id") or "")):
+        if task.get("list") != SAM_ACCEPTED:
+            continue
+        if (task.get("status") or "").lower() in SHIPPED:
+            continue
+        live = _read_state(task["id"])
+        if live.get("status") == "unreadable":
+            raise RuntimeError(f"could not read task {task['id']}")
+        if live.get("shipped") or live.get("declined"):
+            continue
+        return {"id": task["id"],
+                "url": task.get("url")
+                or f"https://app.clickup.com/t/{task['id']}"}
+    return {}
+
+
 def _title(text: str) -> str:
     """At most TITLE_LENGTH characters, cut between words (#9596's title
     ended "every other profile opens, an")."""
@@ -354,6 +386,12 @@ def _route(item: dict, card: dict, incident: dict, arr: float,
     priority = priority_for(item, arr, incident)
     zoho_url = zoho_actions.ticket_url(item.get("ticket_id"))
     summary = _title(card.get("live_question") or item.get("summary") or "")
+
+    if not forced:
+        building = _sam_building(item)
+        if building:
+            return {"routed": False,
+                    "why": f"Sam is building it ({building['url']})"}
 
     task, joined = _existing_task(item, incident)
     owner = forced or task.get("owner") or engineer_for(card)

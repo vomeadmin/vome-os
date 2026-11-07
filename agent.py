@@ -17,12 +17,6 @@ from status_constants import (
     THREAD_ON_PROD_SENT,
     THREAD_WAITING_CLIENT,
     CU_AWAITING_CLIENT,
-    CU_WAITING_ON_CLIENT,
-    CU_ON_PROD,
-    CU_QUEUED,
-    CU_IN_PROGRESS,
-    CU_ON_DEV,
-    CU_DONE,
     CU_ESCALATED,
     CU_NEEDS_REVIEW,
     ZOHO_PROCESSING,
@@ -1916,13 +1910,55 @@ _ACTION_SIGNAL_RE = re.compile(
     r"|\bisn'?t\b|\bcan'?t\b|\bcannot\b|\bwon'?t\b|\berror\b|\bissue\b"
     r"|\bproblem\b|\bbroken\b|\bfail|\bcrash|\bhow\b|\bwhen\b|\bwhy\b"
     r"|\bwhere\b|can you|could you|\bhelp\b|\bunable\b|\bwrong\b|\bagain\b"
+    r"|\bbelow\b|\battached\b|ci-dessous|ci-joint"
     r")"
+)
+
+# Outlook and Gmail send an emoji reaction as an email of its own: "Stephanie
+# Sielaty reacted to your message:" over a copy of our message. #9470
+# (2026-10-27): her "Thank you, very helpful!" and her reaction landed five
+# seconds apart, only the reaction was judged, it did not read as a
+# thank-you, and the ticket went back to triage and on to OnlyG as a new
+# urgent task.
+_REACTION_RE = re.compile(
+    r"(?i)(reacted to your message|reacted via gmail"
+    r"|a réagi à votre message|a réagi via gmail)"
+)
+
+# Where the copy of an earlier message starts: Outlook's From/Sent block,
+# Zoho's "---- on <date> <name> wrote ----", Gmail's "On <date> <name> wrote:".
+_QUOTE_START_RE = re.compile(
+    r"(?is)(\bFrom:.{0,300}?\bSent:|-----\s*Original Message\s*-----"
+    r"|----\s*on .{0,120}?wrote\s*----|\bOn .{5,120}?wrote:"
+    r"|\bDe\s?:.{0,300}?\bEnvoy[ée]\s?:|\bLe .{5,120}?a écrit\s?:)"
 )
 
 
 def _looks_like_auto_reply(text: str) -> bool:
     """True if the text looks like an out-of-office / autoresponder."""
     return bool(_AUTO_REPLY_RE.search(text or ""))
+
+
+def _looks_like_reaction(text: str) -> bool:
+    """An emoji reaction sent as an email (Outlook, Gmail)."""
+    return bool(_REACTION_RE.search((text or "")[:300]))
+
+
+def _strip_quoted(text: str) -> str:
+    """The client's own words, without the copy of our message under them.
+    Our own "when" and "?" in the quote read as action signals."""
+    text = text or ""
+    found = _QUOTE_START_RE.search(text)
+    return (text[:found.start()] if found else text).strip()
+
+
+def _has_attachment(entry: dict) -> bool:
+    if entry.get("hasAttach"):
+        return True
+    try:
+        return int(entry.get("attachmentCount") or 0) > 0
+    except (ValueError, TypeError):
+        return False
 
 
 # Zoho's "Customer Reply to Processing Status" workflow moves a ticket to
@@ -1943,23 +1979,13 @@ def _zoho_time(value: str):
         return None
 
 
-def _restore_status_after_auto_reply(ticket_id: str, reply: dict) -> str | None:
-    """Put back the status Zoho's reply workflow overwrote for an
-    out-of-office. Returns the restored status, or None if nothing changed.
-
-    #9526 (2026-10-20): our answer closed the ticket, Allie's out-of-office
-    arrived 10 seconds later, the workflow flipped Closed -> Processing, and
-    the ticket sat there looking owed for days. Only the newest status change
-    is undone, and only when a workflow made it, to Processing, around the
-    time of the auto-reply: a status a person set since is never overridden.
-    """
+def _reply_workflow_flip(changes: list[dict], reply: dict) -> dict | None:
+    """The newest status change (from status_history) when it is Zoho's
+    reply workflow moving the ticket to Processing for this reply. None for
+    anything else, a status a person set since included."""
     from datetime import timedelta
-    from zoho_desk_api import status_history
 
-    changes = status_history(ticket_id)
     if not changes:
-        print(f"[NO-ACTION] OOO on ticket {ticket_id}: no status history "
-              "read -- status left as is")
         return None
     newest = changes[0]
     replied = _zoho_time(reply.get("createdTime") or "")
@@ -1973,6 +1999,30 @@ def _restore_status_after_auto_reply(ticket_id: str, reply: dict) -> str | None:
     )
     if not by_reply_workflow or not newest["from"] \
             or newest["from"].lower() == newest["to"].lower():
+        return None
+    return newest
+
+
+def _restore_status_after_auto_reply(ticket_id: str, reply: dict) -> str | None:
+    """Put back the status Zoho's reply workflow overwrote for an
+    out-of-office. Returns the restored status, or None if nothing changed.
+
+    #9526 (2026-10-20): our answer closed the ticket, Allie's out-of-office
+    arrived 10 seconds later, the workflow flipped Closed -> Processing, and
+    the ticket sat there looking owed for days. Only the newest status change
+    is undone, and only when a workflow made it, to Processing, around the
+    time of the auto-reply: a status a person set since is never overridden.
+    """
+    from zoho_desk_api import status_history
+
+    changes = status_history(ticket_id)
+    if not changes:
+        print(f"[NO-ACTION] OOO on ticket {ticket_id}: no status history "
+              "read -- status left as is")
+        return None
+    newest = _reply_workflow_flip(changes, reply)
+    if not newest:
+        newest = changes[0]
         print(f"[NO-ACTION] OOO on ticket {ticket_id}: newest status change "
               f"({newest['actor']}: {newest['from']} -> {newest['to']}) is "
               "not the reply workflow -- status left as is")
@@ -2075,46 +2125,260 @@ def _is_confident_ack(reply_text: str, has_attachment: bool) -> bool:
     return _classify_no_action_reply(text)
 
 
-def _get_clickup_status(task_id: str) -> str:
-    """Return the live ClickUp task status (raw string), or '' on failure."""
-    import httpx as _httpx
-    cu_token = os.environ.get("CLICKUP_API_TOKEN", "")
-    if not cu_token or not task_id:
-        return ""
-    try:
-        r = _httpx.get(
-            f"https://api.clickup.com/api/v2/task/{task_id}",
-            headers={"Authorization": cu_token},
-            timeout=15,
-        )
-        r.raise_for_status()
-        return (r.json().get("status") or {}).get("status", "") or ""
-    except Exception as e:
-        print(f"[NO-ACTION] ClickUp get status failed ({task_id}): {e}")
-        return ""
+def _new_client_messages(conversations_result: dict | None) -> list[dict]:
+    """Every customer email since our last one to them, newest first.
 
-
-def _map_clickup_to_zoho_status(cu_norm: str) -> str | None:
-    """Map a NORMALIZED ClickUp status to the Zoho status that mirrors it.
-
-    Matches both new and legacy ClickUp names. Returns None for statuses we
-    don't mirror (leave Zoho unchanged).
+    Zoho fires a webhook per email but the dedup lets only the first run,
+    so a thank-you and a reaction seconds apart (#9470) are judged together
+    here instead of by whichever came last.
     """
-    if cu_norm in ("closed", CU_DONE):
-        return ZOHO_CLOSED
-    if cu_norm == CU_ON_PROD:
-        return ZOHO_CLOSED
-    if cu_norm in (CU_AWAITING_CLIENT, CU_WAITING_ON_CLIENT):
-        return ZOHO_AWAITING_CLIENT_RESPONSE
-    if cu_norm in (CU_QUEUED, CU_IN_PROGRESS, CU_ON_DEV):
-        return ZOHO_IN_PROGRESS
-    return None
+    data = _unwrap_mcp_result(conversations_result)
+    if isinstance(data, dict):
+        data = data.get("data", [])
+    found = []
+    for entry in data if isinstance(data, list) else []:
+        if (entry.get("type") or "thread") != "thread":
+            continue
+        if entry.get("direction") == "out":
+            break
+        author = entry.get("author") or {}
+        if (author.get("type") or "").upper() == "END_USER" \
+                or (author.get("email") or "").lower() not in TEAM_EMAILS:
+            found.append(entry)
+    return found
 
 
-def _log_auto_handled(
-    ticket_id: str, reply_text: str, clickup_state: str, zoho_status: str
-) -> None:
-    """Log an auto-handled no-action reply to #vome-agent-log."""
+def _reply_kind(entry: dict) -> str:
+    """"auto" (an out-of-office), "courtesy" (a thank-you, a reaction, an
+    emoji) or "action" (anything else)."""
+    raw = _extract_reply_text(entry)
+    if _looks_like_auto_reply(raw):
+        return "auto"
+    if _looks_like_reaction(raw):
+        return "courtesy"
+    if _has_attachment(entry):
+        return "action"
+    text = _strip_quoted(raw)
+    # A bare emoji or "!" has no word in it; a lone "?" is a question.
+    if text and "?" not in text and not re.search(r"\w", text):
+        return "courtesy"
+    return "courtesy" if _is_no_action_reply(text, False) else "action"
+
+
+def _burst_verdict(messages: list[dict]) -> tuple[str, dict]:
+    """("auto" | "courtesy" | "action", the message to act on) for the
+    customer's emails since our last one. One message needing action makes
+    the whole burst need it."""
+    courtesy = None
+    for message in messages:
+        kind = _reply_kind(message)
+        if kind == "action":
+            return "action", message
+        if kind == "courtesy" and courtesy is None:
+            courtesy = message
+    if courtesy is not None:
+        return "courtesy", courtesy
+    return "auto", messages[0] if messages else {}
+
+
+def is_courtesy_burst(ticket_id: str) -> bool:
+    """The customer's newest emails only thank us, react or are away. For
+    shadow triage, which the webhook queues beside process_ticket_update:
+    a thank-you must not come back as a fresh card (#9470)."""
+    conversations = fetch_ticket_conversations(ticket_id)
+    is_reply, latest = _is_client_reply(conversations, ticket_id)
+    if not is_reply:
+        return False
+    verdict, _ = _burst_verdict(_new_client_messages(conversations)
+                                or [latest])
+    return verdict in ("auto", "courtesy")
+
+
+# Lists whose open tasks are work still being done for the client.
+_WORK_LISTS = ("Priority Queue", "Sam Accepted (Build Now)")
+# A feature request here outlives its ticket and holds nothing open.
+_IDEA_LISTS = ("Raw Intake", "Accepted Backlog", "Sleeping", "Declined")
+_ESCALATED_TASK = (CU_ESCALATED, CU_NEEDS_REVIEW)
+
+COURTESY_CLOSE_NOTE = (
+    "Closed automatically: the client thanked us on the Zoho ticket after "
+    "this was done, and the ticket is closed. Nothing was sent to the "
+    "client. Reopen it if there is still work here."
+)
+
+
+def _ticket_work(ticket_id: str) -> dict:
+    """What is still being done for this ticket, read live.
+
+    {"open": [task], "finished": [task], "shipped": bool, "owed": bool,
+     "escalated": bool, "item": sprint item}. "owed": a fix is live and the
+    client has not been told (a resolution waits on Sam). Raises when
+    ClickUp or Agent Fixes cannot be read: "could not look" must never read
+    as "nothing open".
+    """
+    import clickup_search
+    import shadow_triage
+    import sprint_batch
+    import sprint_store
+    import ticket_routing
+    from database import get_thread_by_ticket_id
+
+    item = sprint_store.by_ticket(ticket_id)
+    number = str(item.get("ticket_number") or "")
+    ids = {t["id"] for t in clickup_search.linked_tasks(number, ticket_id)
+           if t.get("list") in _WORK_LISTS and t.get("id")}
+    thread = get_thread_by_ticket_id(ticket_id)
+    for task_id in ((thread[1] if thread else {}).get("clickup_task_id"),
+                    (item.get("eng_task") or {}).get("id")):
+        if task_id:
+            ids.add(task_id)
+
+    work = {"open": [], "finished": [], "shipped": False, "owed": False,
+            "escalated": False, "item": item}
+    for task_id in sorted(ids):
+        state = ticket_routing._read_state(task_id)
+        if state.get("status") == "unreadable":
+            raise RuntimeError(f"could not read task {task_id}")
+        if state.get("list") in _IDEA_LISTS:
+            continue
+        task = {**state, "id": task_id}
+        if normalize_status(state.get("status") or "") in _ESCALATED_TASK:
+            work["escalated"] = True
+        if state.get("shipped") or state.get("declined"):
+            work["finished"].append(task)
+            work["shipped"] = work["shipped"] or bool(state.get("shipped"))
+        else:
+            work["open"].append(task)
+
+    release = shadow_triage.release_state(number, ticket_id)
+    if (release.get("text") or "").startswith("Agent Fixes could not be read"):
+        raise RuntimeError(release["text"])
+    if not release.get("live") and (release.get("task_id")
+                                    or item.get("fix_pr")):
+        work["open"].append({"id": release.get("task_id") or "",
+                             "url": item.get("fix_pr") or "",
+                             "status": "agent fix not live"})
+    if release.get("live"):
+        work["shipped"] = True
+    work["owed"] = ticket_id in sprint_batch._pending_resolutions()
+    return work
+
+
+def _courtesy_outcome(prior: str, work: dict) -> str:
+    """"close", "in_progress", "restore" or "leave" for a courtesy reply.
+    `prior` is the status before Zoho's reply workflow moved it ("" when
+    the history could not be read)."""
+    if work["escalated"] or work["owed"]:
+        return "leave"
+    if work["open"]:
+        return "in_progress"
+    # Closing is safe to get wrong: their next email reopens the ticket
+    # (Zoho's reply workflow) and triage reads it.
+    if work["shipped"] or prior in (ZOHO_CLOSED, ZOHO_IN_PROGRESS,
+                                    ZOHO_AWAITING_CLIENT_RESPONSE):
+        return "close"
+    if prior == ZOHO_ON_HOLD:
+        return "restore"
+    # New or Processing: a reply was owed before this thank-you came.
+    return "leave"
+
+
+def _handle_courtesy_reply(ticket_id: str, reply: dict) -> str:
+    """A thank-you, a thumbs up or a reaction. Nothing is ever sent back.
+    Returns the outcome.
+
+    Sam, 2026-11-04: once the fix is made, a thank-you needs no reply, and
+    these tickets kept coming back into the queue. So:
+      * the fix shipped, or the ticket was finished or waiting on them:
+        Closed in Zoho (no closure email) and in ClickUp, and its sprint
+        item finished
+      * work still open: In Progress with that work, out of triage
+      * a live fix the client has not been told about, or an escalation:
+        left for Sam
+      * On Hold: that status comes back
+    Statuses go through zoho_actions.set_status so Zoho never sends its own
+    "your ticket is closed" email.
+    """
+    import sprint_store
+    import ticket_reconciler
+    import zoho_actions
+    from database import get_thread_by_ticket_id, update_thread
+    from zoho_desk_api import status_history
+
+    text = _strip_quoted(_extract_reply_text(reply))
+    try:
+        work = _ticket_work(ticket_id)
+    except Exception as exc:
+        restored = _restore_status_after_auto_reply(ticket_id, reply)
+        _log_courtesy(ticket_id, text,
+                      f"Could not read the work ({exc}), so nothing was "
+                      "closed. Status "
+                      + (f"put back to {restored}." if restored
+                         else "left as is."))
+        return "unreadable"
+
+    changes = status_history(ticket_id) or []
+    flip = _reply_workflow_flip(changes, reply)
+    prior = flip["from"] if flip else (changes[0]["to"] if changes else "")
+    current = changes[0]["to"] if changes else ""
+    outcome = _courtesy_outcome(prior, work)
+    item = work["item"]
+
+    if outcome == "close":
+        zoho_actions.set_status(ticket_id, ZOHO_CLOSED)
+        closed = [t["id"] for t in work["finished"]
+                  if t.get("status") not in ticket_reconciler.CLOSED_TASK
+                  and ticket_reconciler.close_task(t, COURTESY_CLOSE_NOTE)]
+        if item.get("status") in sprint_store.CARRIES:
+            sprint_store.decide(item["id"], sprint_store.DONE,
+                                "closed automatically: the client thanked "
+                                "us after the work was done")
+        thread = get_thread_by_ticket_id(ticket_id)
+        if thread:
+            update_thread(thread[0], status=THREAD_CLOSED)
+        done = (f"Closed in Zoho, and in ClickUp: {', '.join(closed)}."
+                if closed else "Closed in Zoho; no ClickUp task was open.")
+    elif outcome == "in_progress":
+        if current != ZOHO_IN_PROGRESS:
+            zoho_actions.set_status(ticket_id, ZOHO_IN_PROGRESS)
+        done = ("Work is still open ("
+                + ", ".join(t.get("url") or t["id"] for t in work["open"])
+                + "), so Zoho is In Progress with it. Not closed.")
+    elif outcome == "restore":
+        if current != prior:
+            zoho_actions.set_status(ticket_id, prior)
+        done = f"Nothing shipped, so the status went back to {prior}."
+    else:
+        why = ("a live fix the client has not been told about"
+               if work["owed"] else "an escalation" if work["escalated"]
+               else f"it was already {prior or 'in an unknown status'}")
+        done = f"Left for Sam: {why}."
+    _log_courtesy(ticket_id, text, done,
+                  number=str(item.get("ticket_number") or ""))
+    return outcome
+
+
+def _handle_courtesy_reply_later(ticket_id: str, reply: dict) -> None:
+    """_handle_courtesy_reply once Zoho's reply workflow has run: closing
+    before it does would have the workflow flip the ticket back to
+    Processing a few seconds later."""
+    import threading
+
+    def _run():
+        try:
+            _handle_courtesy_reply(ticket_id, reply)
+        except Exception as exc:
+            print(f"[COURTESY] ticket {ticket_id} failed: {exc}")
+
+    timer = threading.Timer(AUTO_REPLY_SETTLE_SECONDS, _run)
+    timer.daemon = True
+    timer.start()
+
+
+def _log_courtesy(ticket_id: str, reply_text: str, done: str,
+                  number: str = "") -> None:
+    """One line per courtesy reply in #vome-agent-log."""
+    print(f"[COURTESY] ticket {ticket_id}: {done}")
     channel = os.environ.get("SLACK_CHANNEL_AGENT_LOG", "")
     if not channel:
         return
@@ -2129,85 +2393,14 @@ def _log_auto_handled(
             f"/ShowHomePage.do#Cases/dv/{ticket_id}"
         )
         text = (
-            ":robot_face: *Auto-handled no-action reply*\n"
-            f"Ticket: <{zoho_url}|#{ticket_id}>\n"
-            f"Reply: \"{preview or '(no text)'}\"\n"
-            f"ClickUp state read: {clickup_state or '(none)'}\n"
-            f"Zoho status set: {zoho_status or '(unchanged)'}"
+            ":+1: *Courtesy reply, nothing sent to the client*\n"
+            f"Ticket: <{zoho_url}|#{number or ticket_id}>\n"
+            f"Reply: \"{preview or '(a reaction)'}\"\n"
+            f"{done}"
         )
         wc.chat_postMessage(channel=channel, text=text)
     except Exception as e:
-        print(f"[NO-ACTION] agent-log post failed: {e}")
-
-
-def _handle_no_action_reply(ticket_id: str, reply_text: str) -> None:
-    """Realign the Zoho status to mirror the linked ClickUp task. No email, no
-    draft, no resurface; ClickUp is left exactly as-is. STATUS ONLY -- the
-    Zoho owner is never touched.
-    """
-    from database import get_thread_by_ticket_id, update_thread
-
-    thread_info = get_thread_by_ticket_id(ticket_id)
-    thread_ts = None
-    clickup_task_id = None
-    if thread_info:
-        thread_ts, thread_data = thread_info
-        clickup_task_id = thread_data.get("clickup_task_id")
-
-    # DB row missing the link? Locate the task by its Zoho Ticket Link field
-    # before assuming there's nothing to mirror -- otherwise a courtesy reply
-    # on a still-in-progress task would be wrongly closed just because the row
-    # never recorded clickup_task_id.
-    if not clickup_task_id:
-        clickup_task_id = _find_clickup_task_by_zoho_ticket(ticket_id)
-        if clickup_task_id and thread_ts:
-            update_thread(thread_ts, clickup_task_id=clickup_task_id)
-            print(
-                f"[NO-ACTION] backfilled thread {thread_ts} with "
-                f"clickup_task_id={clickup_task_id}"
-            )
-
-    # Still no linked ClickUp task -> Zoho Closed (nothing to mirror)
-    if not clickup_task_id:
-        _set_zoho_ticket_status(ticket_id, ZOHO_CLOSED)
-        print(f"[NO-ACTION] ticket {ticket_id}: no ClickUp task -> Zoho Closed")
-        _log_auto_handled(
-            ticket_id, reply_text, "(no linked ClickUp task)", ZOHO_CLOSED
-        )
-        return
-
-    cu_status_raw = _get_clickup_status(clickup_task_id)
-    cu_norm = normalize_status(cu_status_raw)
-
-    # Escalated -> skip entirely, leave in Processing for Sam.
-    # Match both the new "escalated" and legacy "needs review".
-    if cu_norm in (CU_ESCALATED, CU_NEEDS_REVIEW):
-        print(
-            f"[NO-ACTION] ticket {ticket_id}: ClickUp '{cu_status_raw}'"
-            " is escalated -- leaving for Sam"
-        )
-        _log_auto_handled(
-            ticket_id, reply_text, cu_status_raw or cu_norm,
-            "(skipped -- escalated)",
-        )
-        return
-
-    zoho_status = _map_clickup_to_zoho_status(cu_norm)
-    if zoho_status:
-        _set_zoho_ticket_status(ticket_id, zoho_status)
-        print(
-            f"[NO-ACTION] ticket {ticket_id}: ClickUp '{cu_status_raw}'"
-            f" -> Zoho {zoho_status}"
-        )
-    else:
-        print(
-            f"[NO-ACTION] ticket {ticket_id}: ClickUp '{cu_status_raw}'"
-            " has no Zoho mapping -- left unchanged"
-        )
-    _log_auto_handled(
-        ticket_id, reply_text, cu_status_raw or cu_norm or "(unknown)",
-        zoho_status or "(unchanged)",
-    )
+        print(f"[COURTESY] agent-log post failed: {e}")
 
 
 _processing_updates: dict[str, float] = {}
@@ -2235,6 +2428,13 @@ def process_ticket_update(ticket_id: str) -> str | None:
         # --- Classify the reply and sync ClickUp/Zoho ---
         from database import get_thread_by_ticket_id, update_thread
 
+        # Every email since our last one is judged, not just the newest: a
+        # reaction a few seconds after a thank-you must not hide it (#9470),
+        # and one email needing action makes the whole burst need it. The
+        # rest of this handler works on the email that needs action.
+        verdict, latest = _burst_verdict(
+            _new_client_messages(conversations_result) or [latest])
+
         # Read the reply text from content, falling back to summary -- the
         # conversations list endpoint omits `content` on reply threads, so
         # without the fallback every classifier below would judge empty text.
@@ -2242,7 +2442,7 @@ def process_ticket_update(ticket_id: str) -> str | None:
 
         # OOO / autoresponder guard -- never treat an out-of-office as a reply,
         # and undo the Processing flip Zoho's reply workflow made for it.
-        if _looks_like_auto_reply(reply_content_clean):
+        if verdict == "auto":
             print(
                 f"[NO-ACTION] OOO/autoresponder on ticket {ticket_id}"
                 " -- not treating as a reply, restoring its status"
@@ -2250,26 +2450,19 @@ def process_ticket_update(ticket_id: str) -> str | None:
             _restore_status_after_auto_reply_later(ticket_id, latest)
             return None
 
-        # NO-ACTION fast path. A pure courtesy ack needs no response: realign
-        # the Zoho status to mirror the linked ClickUp task and stop here --
-        # never draft, never resurface, never email. This runs BEFORE the
-        # resurface/draft logic below, so a courtesy reply on an
-        # awaiting-client task does NOT pull it back into the queue.
-        _latest_has_attach = bool(latest.get("hasAttach"))
-        if not _latest_has_attach:
-            try:
-                _latest_has_attach = int(
-                    latest.get("attachmentCount") or 0
-                ) > 0
-            except (ValueError, TypeError):
-                _latest_has_attach = False
-        if _is_no_action_reply(reply_content_clean, _latest_has_attach):
+        # A thank-you, a thumbs up or a reaction needs no response: close it
+        # when the work is done, keep it with the work when it is not, and
+        # never draft, resurface or email (_handle_courtesy_reply). This runs
+        # BEFORE the resurface/draft logic below, so a courtesy reply does
+        # NOT pull a ticket back into the queue.
+        if verdict == "courtesy":
             print(
                 f"[NO-ACTION] courtesy reply on ticket {ticket_id}"
-                " -- realigning Zoho to ClickUp (no draft/resurface/email)"
+                " -- closing or realigning (no draft/resurface/email)"
             )
-            _handle_no_action_reply(ticket_id, reply_content_clean)
+            _handle_courtesy_reply_later(ticket_id, latest)
             return None
+        _latest_has_attach = _has_attachment(latest)
 
         classification = _classify_client_reply(
             reply_content_clean or "(no text content)"
