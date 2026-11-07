@@ -17,6 +17,7 @@ import vic_security
 import vic_tools
 
 from agent import (
+    WIDGET_TICKET_FOOTER,
     fetch_crm_account,
     _run_auth_check,
     _run_auth_bypass,
@@ -398,7 +399,7 @@ def _build_ticket_html(
     html += (
         "<hr style='border:none;border-top:1px solid #ddd;'>"
         "<p style='color:#999;font-size:11px;'>"
-        "Submitted via Support Widget</p>"
+        f"{WIDGET_TICKET_FOOTER}</p>"
     )
 
     return html

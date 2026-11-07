@@ -822,6 +822,44 @@ _FORWARDED_SUBJECT_RE = re.compile(r"^\s*(?:re\s*:\s*)*(?:fw|fwd|tr)\s*:", re.IG
 AUTH_TICKET_SELF = "self"
 AUTH_TICKET_OTHER = "other"
 
+# Footer intake.py writes on every ticket the support widget creates. Vic has
+# already triaged those in chat, so the auth fast path never answers them
+# (#9897 got "your account is already active" for an hours question; earlier
+# #9549, #9615, #9622).
+WIDGET_TICKET_FOOTER = "Submitted via Support Widget"
+
+
+def _is_widget_ticket(body: str) -> bool:
+    return WIDGET_TICKET_FOOTER.lower() in (body or "").lower()
+
+
+_AUTH_CLASSIFIER_PROMPT = (
+    "You read a support ticket and decide who has a sign-in "
+    "problem. Sign-in problems include: not receiving a "
+    "verification, activation or invitation email, can't "
+    "authenticate or verify an email address, account not "
+    "yet activated, or similar sign-up/login blockers.\n"
+    "Reply SELF when the person who wrote the ticket has the "
+    "problem with their own account.\n"
+    "Reply OTHER only when they explicitly say someone else "
+    "cannot sign in or never received their invitation, for "
+    "example an admin or coordinator reporting that a volunteer "
+    "can't log in or never got the invite, or a forwarded "
+    "message from that person.\n"
+    "Reply NO for anything else. A question about a feature or "
+    "workflow (forms, sequences, background checks such as "
+    "Sterling, schedules, shifts, hours, reports, integrations) "
+    "is NO even when it mentions logging in, a login link, an "
+    "account or sending a link to a user, unless someone "
+    "explicitly cannot sign in.\n"
+    "Examples of NO: \"I sent the background check link to a "
+    "user, how do I log in to our Sterling account to see the "
+    "result?\"; \"After logging in, where do I see my hours?\"; "
+    "\"Volunteers log in to fill out the form but the sequence "
+    "step doesn't advance.\"\n"
+    "Reply with only SELF, OTHER or NO."
+)
+
 
 def _classify_auth_ticket(subject: str, body: str) -> str | None:
     """Who has the sign-in problem: the sender, someone else, or nobody.
@@ -840,21 +878,7 @@ def _classify_auth_ticket(subject: str, body: str) -> str | None:
         response = client.messages.create(
             model=SUPPORT_MODEL_FAST,
             max_tokens=5,
-            system=(
-                "You read a support ticket and decide who has a sign-in "
-                "problem. Sign-in problems include: not receiving a "
-                "verification, activation or invitation email, can't "
-                "authenticate or verify an email address, account not "
-                "yet activated, or similar sign-up/login blockers.\n"
-                "Reply SELF when the person who wrote the ticket has the "
-                "problem with their own account.\n"
-                "Reply OTHER when they write about someone else who has "
-                "it, for example an admin or coordinator reporting that a "
-                "volunteer can't log in or never received their invitation, "
-                "or a forwarded message from that person.\n"
-                "Reply NO for anything else.\n"
-                "Reply with only SELF, OTHER or NO."
-            ),
+            system=_AUTH_CLASSIFIER_PROMPT,
             messages=[{"role": "user", "content": text}],
         )
         answer = response.content[0].text.strip().upper()
@@ -1367,6 +1391,13 @@ def process_ticket(ticket_data: dict) -> str | None:
         # Error reports from Vome frontend -- Sam handles these directly
         if is_error_report(subject, body):
             print(f"Vome Error Report detected in ticket {ticket_id} -- leaving as New for Sam")
+            return None
+
+        # Widget tickets: Vic already triaged the problem in chat, so a
+        # canned sign-in reply only misfires (#9897, #9549, #9615, #9622).
+        if _is_widget_ticket(body):
+            print(f"Ticket {ticket_id} came from the support widget -- "
+                  f"no auth fast path")
             return None
 
         # Auth fast path: a sender who can't get into their own account is
