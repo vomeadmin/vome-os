@@ -162,6 +162,13 @@ def should_attempt(card: dict, sam_approved: bool = False
         return False, "no code check on the card"
     verdict = code.get("verdict")
     if not sam_approved:
+        # The records decide whether this bug is what happened (#9760: a
+        # real bug, a PR, and the client's uploads had never saved). A
+        # `confirm` check still fixes: the code is wrong either way.
+        import data_check
+
+        if data_check.level(card) == data_check.REQUIRED:
+            return False, "data check first: the records decide the cause"
         if verdict == "design_question":
             return False, "design question: needs Sam's decision"
         if verdict != "bug":
@@ -307,7 +314,7 @@ def _propose(ticket_id, ticket_number, account, card, zoho_url,
         "files": [path],
     }
     issue_key = f"zoho-{ticket_number}"
-    proposal = sentry_fix.propose(analysis, {
+    context = {
         "source": gathered.get("files", ""), "repo": repo.slug,
         # #9501: told only "master", the author declined because it never
         # writes to a production branch. It reads production; the PR does
@@ -321,7 +328,22 @@ def _propose(ticket_id, ticket_number, account, card, zoho_url,
                    f" and the pull request goes into "
                    f"{target or 'the dev branch'}, never {repo.branch})"),
         "issue_id": issue_key,
-    }, allow_risk=RISKS_THE_AGENT_FIXES)
+    }
+    proposal = sentry_fix.propose(analysis, context,
+                                  allow_risk=RISKS_THE_AGENT_FIXES)
+    # Declined for source it was not shown, and it named the lines: one
+    # more try with them (#9813: the banner had a second call site 93
+    # lines past the window, and the author said exactly where).
+    asked = "" if proposal.get("diff") else asked_source(
+        source, proposal.get("reason") or "")
+    if asked:
+        context["source"] += "\n\n" + asked
+        proposal = sentry_fix.propose(analysis, context,
+                                      allow_risk=RISKS_THE_AGENT_FIXES)
+        if not proposal.get("diff"):
+            proposal["reason"] = ("after a retry with the source it asked "
+                                  "for: " + (proposal.get("reason")
+                                             or "no diff"))
     if not proposal.get("diff"):
         _record(ticket_id, ticket_number, "declined",
                 proposal.get("reason") or "no diff", thread_id=thread_id)
@@ -511,6 +533,17 @@ OTHER_FILE_LINES = 60   # either side of a declaration in another file
 WHOLE_FILE_LINES = 400
 MAX_NAMES = 12
 MAX_OTHER_FILES = 2
+# Every other place the same file uses a name, so a fix that must change
+# each call site sees them all (#9813: GetInvolvedBanner at 601 and 694,
+# the window ended at 656). A name used more often than MAX_USES is state
+# threaded through the file, not a call site to change.
+USE_LINES = 12
+MAX_USES = 6
+MAX_USE_WINDOWS = 8
+# Lines the fix author asked for when it declined, and the margin read
+# around them.
+ASKED_LINES = 15
+MAX_ASKED = 4
 
 _IDENT = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{5,}\b")
 
@@ -640,6 +673,19 @@ def extra_context(repo, path: str, line: int, card: dict) -> str:
                            f"where {name} is declared"))
         chunks = [_numbered(path, lines, s, e, why)
                   for s, e, why in _merge(ranges)]
+        covered = [shown] + [(s, e) for s, e, _ in ranges]
+        uses = []
+        for name in names:
+            word = re.compile(rf"\b{re.escape(name)}\b")
+            at = [i for i, text in enumerate(lines, start=1)
+                  if word.search(text)
+                  and not any(s <= i <= e for s, e in covered)]
+            if not at or len(at) > MAX_USES:
+                continue
+            uses += [(max(1, i - USE_LINES), min(len(lines), i + USE_LINES),
+                      f"another use of {name}") for i in at]
+        chunks += [_numbered(path, lines, s, e, why)
+                   for s, e, why in _merge(uses)[:MAX_USE_WINDOWS]]
         for name in elsewhere[:MAX_OTHER_FILES]:
             other, other_lines, at = _defining_file(repo, name, path)
             if not other:
@@ -655,6 +701,48 @@ def extra_context(repo, path: str, line: int, card: dict) -> str:
         return text[:CONTEXT_CHARS]
     except Exception as exc:  # weaker context, never a failed attempt
         print(f"[TICKET FIX] extra context failed: {exc}")
+        return ""
+
+
+# A path and its lines as a declining fix author names them:
+# "src/x/OrgSiteView.js lines about 680-700", "app/v4/api.py:1328".
+_ASKED = re.compile(
+    r"([\w./-]+\.(?:py|jsx?|tsx?|html|css|scss))"
+    r"(?::(\d+)(?:\s*[-–]\s*(\d+))?"
+    r"|,?\s+lines?\s+(?:about\s+|around\s+|near\s+|~)?(\d+)"
+    r"(?:\s*(?:[-–]|to)\s*(\d+))?)")
+
+
+def asked_for(reason: str) -> list[tuple[str, int, int]]:
+    """Every (path, first, last) line range named in a decline, in order."""
+    found: list[tuple[str, int, int]] = []
+    for path, a1, b1, a2, b2 in _ASKED.findall(reason or ""):
+        first = int(a1 or a2)
+        last = int(b1 or b2 or first)
+        ref = (path, min(first, last), max(first, last))
+        if ref not in found:
+            found.append(ref)
+    return found[:MAX_ASKED]
+
+
+def asked_source(repo, reason: str) -> str:
+    """The source a declining fix author asked for, numbered, else ''.
+
+    Never raises: an unreadable ask is the decline standing as it was.
+    """
+    try:
+        chunks = []
+        for path, first, last in asked_for(reason):
+            lines = _read_text(repo, path).splitlines()
+            if not lines or first > len(lines):
+                continue
+            chunks.append(_numbered(
+                path, lines, max(1, first - ASKED_LINES),
+                min(len(lines), last + ASKED_LINES),
+                "you asked for these lines"))
+        return "\n\n".join(chunks)[:CONTEXT_CHARS]
+    except Exception as exc:
+        print(f"[TICKET FIX] asked source failed: {exc}")
         return ""
 
 

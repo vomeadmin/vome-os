@@ -130,6 +130,11 @@ def load_cases(manifest: AgentManifest) -> list[dict]:
 
 
 def _same(expected, actual) -> bool:
+    # A list against a single value is "any of these": where two answers
+    # are both right and the miss is a third (#9760: a data check is
+    # `confirm` or `required`, never `none`).
+    if isinstance(expected, list) and not isinstance(actual, list):
+        return any(_same(option, actual) for option in expected)
     if isinstance(expected, str) and isinstance(actual, str):
         return expected.strip().lower() == actual.strip().lower()
     return expected == actual

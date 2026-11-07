@@ -131,6 +131,15 @@ def should_route(card: dict, fix: dict) -> tuple[bool, str]:
     # his feature call; he can still route it by hand.
     if code.get("verdict") == "works_as_designed":
         return False, "works as designed: Sam decides"
+    # The answer is in one account's records: Sam runs the read query and
+    # the results come back to triage (data_check.py, 2026-11-05). Until
+    # then a data lookup went to OnlyG by default and Sam never saw the
+    # question. Old cards still say engineer + data_lookup.
+    import data_check
+
+    if (data_check.level(card) == data_check.REQUIRED
+            or card.get("escalation_reason") == "data_lookup"):
+        return False, "data check first: Sam runs it"
     if lane == "engineer":
         reason = card.get("escalation_reason") or ""
         if reason == "product_decision":

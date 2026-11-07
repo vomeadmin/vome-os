@@ -533,6 +533,9 @@ def test_a_reply_on_a_closed_task_is_the_answer_not_in_progress(
     statuses = []
     monkeypatch.setattr(zoho_actions, "set_status",
                         lambda tid, s: statuses.append(s))
+    monkeypatch.setattr(zoho_actions, "set_awaiting_client",
+                        lambda tid: statuses.append(
+                            "Awaiting Client Response"))
     monkeypatch.setattr(zoho_actions, "set_in_progress",
                         lambda *a: pytest.fail("not In Progress"))
     item = _item(eng_task={"id": "86x", "url": "https://cu/86x",
@@ -868,3 +871,99 @@ def test_an_unsearchable_build_list_files_nothing(world):
     world.search_fails = True
     out = tr.route(_item(), _card(), {}, {}, 0)
     assert out["routed"] is False and world.created == []
+
+
+# ---------------------------------------------------------------------------
+# A reply that asks the client something waits for them (868mu196v)
+# ---------------------------------------------------------------------------
+# Nov 5-6: replies asking clients to retry or confirm were set to In
+# Progress with the engineer's team as owner, so the queue read as ours.
+# Eight tickets were moved to Awaiting Client Response by hand.
+
+TID = "569440000043000001"
+
+
+def _zoho_calls(monkeypatch):
+    import shadow_triage
+    import zoho_actions
+
+    calls = []
+    monkeypatch.setattr(shadow_triage, "release_state",
+                        lambda n, t: {"live": False})
+    monkeypatch.setattr(zoho_actions, "set_awaiting_client",
+                        lambda tid: calls.append(("Awaiting", tid)))
+    monkeypatch.setattr(zoho_actions, "set_status",
+                        lambda tid, s: calls.append((s, tid)))
+    return calls
+
+
+def test_a_reply_that_asks_the_client_waits_for_them(monkeypatch, world):
+    calls = _zoho_calls(monkeypatch)
+    monkeypatch.setattr(tr, "task_state",
+                        lambda filed: {"status": "queued", "shipped": False})
+    item = _item(eng_task={"id": "86x", "url": "https://cu/86x",
+                           "owner": "onlyg"})
+    out = sprint_thread._after_send(
+        item, body="Hi Scott,\n\nCould you try once more and tell us what "
+                   "you see?\n\nSam | Vome team\nsupport.vomevolunteer.com")
+    assert world.zoho == [] and world.decided == []
+    assert calls == [("Awaiting", TID)]
+    assert "no assignee" in out and "onlyg's task stays open" in out
+
+
+def test_without_a_body_the_draft_decides(monkeypatch, world):
+    calls = _zoho_calls(monkeypatch)
+    monkeypatch.setattr(tr, "task_state",
+                        lambda filed: {"status": "queued", "shipped": False})
+    item = _item(draft="Hi,\n\nPlease try again from Settings.\n\n"
+                       "Sam | Vome team",
+                 eng_task={"id": "86x", "url": "https://cu/86x",
+                           "owner": "onlyg"})
+    sprint_thread._after_send(item)
+    assert world.zoho == [] and calls == [("Awaiting", TID)]
+
+
+def test_an_answer_that_asks_them_to_confirm_is_not_closed(monkeypatch,
+                                                           world):
+    calls = _zoho_calls(monkeypatch)
+    sprint_thread._after_send(
+        _item(category="user_education"),
+        body="Hi,\n\nIt is under Settings. Please try again and let us "
+             "know if it works.\n\nSam | Vome team")
+    assert calls == [("Awaiting", TID)]
+
+
+def test_resolved_still_closes_with_a_question_in_it(monkeypatch, world):
+    calls = _zoho_calls(monkeypatch)
+    sprint_thread._after_send(_item(), resolved=True,
+                              body="Hi,\n\nThis is fixed. Anything else?")
+    assert calls == [("Closed", TID)]
+
+
+def test_an_agent_fix_in_flight_keeps_the_agent_fixes_team(monkeypatch,
+                                                           world):
+    import zoho_actions
+
+    calls = _zoho_calls(monkeypatch)
+    moved = []
+    monkeypatch.setattr(zoho_actions, "set_agent_fixing",
+                        lambda tid: moved.append(tid))
+    sprint_thread._after_send(_item(fix_pr="https://pr/1"),
+                              body="Hi,\n\nCould you send a screenshot?")
+    assert moved == [TID] and calls == []
+
+
+def test_asks_client_reads_requests_not_courtesy():
+    ask = sprint_thread.asks_client
+    assert ask("Hi,\n\nCould you send the file?\n\nSam | Vome team")
+    assert ask("Hi,\n\nPlease confirm the form name.\n\nSam | Vome team")
+    assert ask("Bonjour,\n\nMerci de nous confirmer le nom du "
+               "formulaire.\n\nSam | Vome team")
+    assert ask("Hi,\n\nTry it again after a refresh.")
+    assert not ask("Hi Janet,\n\nThanks, our team is going to look into "
+                   "this.\n\nSam | Vome team\nsupport.vomevolunteer.com")
+    assert not ask("Hi,\n\nThis is fixed. Let us know if anything still "
+                   "looks off.\n\nSam | Vome team")
+    # A question mark after the signature (a link) is not a question.
+    assert not ask("Hi,\n\nThanks.\n\nSam | Vome team\n"
+                   "support.vomevolunteer.com/faq?id=1")

@@ -146,6 +146,28 @@ def thread_text(ticket_id: str) -> str:
     return _format_conversations(fetch_ticket_conversations(ticket_id))
 
 
+def data_check_hold(ticket_id: str) -> str:
+    """Why the "fixed" email waits for a data check, or ''.
+
+    #9760 (2026-11-05): a real bug was fixed and the client's case was not,
+    because their uploads had never saved. When the card says the records
+    decide whether a fix is theirs, nobody hears "fixed" until Sam has run
+    the check and triage has read it (data_check.py). Unreadable holds."""
+    try:
+        import data_check
+        import sprint_store
+
+        item = sprint_store.by_ticket(ticket_id)
+    except Exception as exc:
+        return f"could not read the ticket's data check ({exc})"
+    if not item or not data_check.pending(item):
+        return ""
+    check = data_check.of(item.get("card"))
+    first = (check["questions"] or [check.get("why") or "see the card"])[0]
+    return (f"the data check is not done ({first}). Run it and paste the "
+            f"output: `data {item.get('number')}: ...`")
+
+
 def check(ticket_id: str, ticket_number: str, fixes: list[dict],
           thread: str | None = None, exclude: set[str] | None = None) -> dict:
     """May the automatic "it is fixed" email go out for this ticket?
@@ -158,6 +180,9 @@ def check(ticket_id: str, ticket_number: str, fixes: list[dict],
     one line for Sam. Never raises; anything unreadable holds.
     """
     exclude = set(exclude or ()) | {f["id"] for f in fixes if f.get("id")}
+    held = data_check_hold(ticket_id)
+    if held:
+        return {"complete": False, "open": [held], "reason": held}
     try:
         open_, shipped = open_work(ticket_number, ticket_id, exclude)
     except Exception as exc:
@@ -194,8 +219,20 @@ def check(ticket_id: str, ticket_number: str, fixes: list[dict],
         return {"complete": False, "open": [],
                 "reason": f"could not check what the client raised ({exc})"}
     if not result.ok:
-        return {"complete": False, "open": [],
-                "reason": f"no scope verdict ({result.why()})"}
+        reason = f"no scope verdict ({result.why()})"
+        # A held resolution is never asked again, so an empty verdict is a
+        # failure someone has to see (#9753, 2026-11-05: held silently).
+        import workflow_log
+
+        workflow_log.log_issue(
+            "resolution scope",
+            f"Scope check gave no verdict for ticket #{ticket_number}",
+            reason,
+            f"Zoho ticket id {ticket_id}. Fixes: "
+            + ", ".join(f.get("id") or "" for f in fixes)
+            + f". The agent was asked {_ASKS} times; the resolution is "
+            "held until someone re-runs the check or answers by hand.")
+        return {"complete": False, "open": [], "reason": reason}
     issues = [str(i) for i in (result.get("open_issues") or []) if i]
     if result.get("all_fixed") is True and not issues:
         return {"complete": True, "open": [],

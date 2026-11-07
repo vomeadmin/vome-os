@@ -154,6 +154,17 @@ TARGETS = {
         workflow="cicd-prod.yml",
         stamp_url="https://www.vomevolunteer.com/index.html",
     ),
+    # No prod workflow: the app ships through the stores, and Sanjay merges
+    # into `master` only once the release is live there (Sam, 2026-11-04,
+    # #9801). So merged into master is the live signal, with no build to
+    # wait for.
+    "app": Target(
+        alias="app",
+        host="github",
+        owner="vomeadmin",
+        repo="VomeApp",
+        branch="master",
+    ),
 }
 # Other spellings people write in Fix Commit. Same names as the VomeOS repo
 # map, so a task written from that page parses here.
@@ -163,6 +174,8 @@ ALIASES = {
     "frontend": "web",
     "react": "web",
     "vome-react": "web",
+    "mobile": "app",
+    "vomeapp": "app",
 }
 
 
@@ -372,6 +385,9 @@ def check_pair(
         )
     if not merged:
         return PairCheck(alias, sha, PENDING_MERGE, f"not on {target.branch}")
+    if not target.workflow and target.host == "github":
+        return PairCheck(alias, sha, DEPLOYED,
+                         f"on {target.branch} (store release)")
 
     if alias not in runs_cache:
         runs_cache[alias] = _runs(target, github, bitbucket)

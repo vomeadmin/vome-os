@@ -338,8 +338,10 @@ def _extract_ticket_fields(raw_result: dict) -> dict:
     )
 
     cc_email = _ticket_cc_emails(ticket, exclude=contact_email)
-    # A teammate the client wrote to (Ron, #9610) stays on every reply.
+    # A teammate the client wrote to (Ron, #9610) stays on every reply, and
+    # Sam is copied on those customer threads (zoho_actions.team_cc).
     # _ticket_cc_emails drops all Vome addresses, so add them back here.
+    filed_by_teammate = ""
     if ticket.get("id"):
         import zoho_actions
         cc = [e for e in cc_email.split(",") if e]
@@ -347,6 +349,21 @@ def _extract_ticket_fields(raw_result: dict) -> dict:
             if email.lower() not in {c.lower() for c in cc}:
                 cc.append(email)
         cc_email = ",".join(cc)
+        # Ron forwarded or copied a customer's thread: the ticket's contact
+        # is Ron, but every reply is for the customer (2026-11-06). With no
+        # customer found the contact is left empty, never Ron.
+        if zoho_actions.is_team_address(contact_email):
+            filed_by_teammate = contact_email.strip().lower()
+            try:
+                rcpt = zoho_actions.recipients(str(ticket["id"]))
+            except Exception as e:
+                print(f"[RECIPIENTS] ticket {ticket['id']} filed by "
+                      f"{filed_by_teammate}, customer not resolved: {e}")
+                rcpt = {}
+            contact_email = rcpt.get("to") or ""
+            contact_name = rcpt.get("name") or rcpt.get("first_name") or ""
+            if rcpt:
+                cc_email = ",".join(rcpt.get("cc") or [])
 
     # Origin signals — distinguish a client-submitted ticket (inbound email /
     # web form) from one an agent created by hand inside Zoho Desk. Zoho marks
@@ -360,6 +377,7 @@ def _extract_ticket_fields(raw_result: dict) -> dict:
         "contact_name": contact_name,
         "contact_email": contact_email,
         "cc_email": cc_email,
+        "filed_by_teammate": filed_by_teammate,
         "status": ticket.get("status", ""),
         "ticket_number": str(ticket.get("ticketNumber", "") or ""),
         "created_time": ticket.get("createdTime", ""),
@@ -1320,10 +1338,12 @@ def process_ticket(ticket_data: dict) -> str | None:
             print(f"Agent already replied to ticket {ticket_id} -- skipping to prevent duplicate")
             return None
 
+        filed_by_teammate = ""
         if zoho_ticket:
             fields = _extract_ticket_fields(zoho_ticket)
             contact_name = fields["contact_name"]
             contact_email = fields["contact_email"]
+            filed_by_teammate = fields.get("filed_by_teammate", "")
             subject = fields["subject"]
             body = fields["description"]
         else:
@@ -1333,6 +1353,16 @@ def process_ticket(ticket_data: dict) -> str | None:
             subject = ticket_data.get("subject", "")
             body = ticket_data.get("body", "")
             print(f"Zoho fetch failed -- falling back to webhook payload for ticket {ticket_id}")
+
+        # A teammate (Ron) forwarded or copied a customer's thread: he is
+        # already handling it, and the account to check is not his. Never
+        # auto-reply; the sprint card drafts the customer reply for Sam
+        # (2026-11-06: Vic sent Ron the "claim your profile" email on
+        # Heather's 2FA thread).
+        if filed_by_teammate or _is_own_address(contact_email):
+            print(f"Ticket {ticket_id} filed by a Vome teammate "
+                  f"({filed_by_teammate or contact_email}) -- no auto-reply")
+            return None
 
         # Error reports from Vome frontend -- Sam handles these directly
         if is_error_report(subject, body):

@@ -140,6 +140,33 @@ def test_volunteer_flow_is_unchanged(monkeypatch, sent, auth_result, phrase):
     assert phrase in sent[0][1]
 
 
+@pytest.mark.parametrize("contact", [
+    "r.segev@vomevolunteer.co", "r.segev@vomevolunteer.com",
+])
+def test_a_ticket_a_teammate_filed_gets_no_auto_reply(monkeypatch, sent,
+                                                      contact):
+    # 2026-11-06: Ron copied support on his reply to Heather ("2FA Sign-in
+    # prompt") and Vic emailed Ron the claim-your-profile reply.
+    _model_says(monkeypatch, "SELF")
+    monkeypatch.setattr(agent, "_dedup_check", lambda ticket_id: False)
+    monkeypatch.setattr(agent, "fetch_ticket_from_zoho", lambda ticket_id: None)
+    monkeypatch.setattr(agent, "fetch_ticket_conversations", lambda ticket_id: None)
+    checked = []
+    monkeypatch.setattr(agent, "_run_auth_check",
+                        lambda email: checked.append(email) or
+                        {"found": True, "is_offline_profile": True})
+    result = agent.process_ticket({
+        "ticket_id": "R1",
+        "contact_name": "Ron Segev",
+        "contact_email": contact,
+        "subject": "Re: VOME - 2FA Sign-in prompt",
+        "body": "Good morning Heather, thanks for your patience with the "
+                "sign-in prompt, and for confirming you're on Edge.",
+    })
+    assert result is None
+    assert sent == [] and checked == []
+
+
 def test_process_ticket_routes_an_admin_report_to_the_faq(monkeypatch, sent):
     # #9549 end to end: forwarded admin report, model says OTHER.
     _model_says(monkeypatch, "OTHER")

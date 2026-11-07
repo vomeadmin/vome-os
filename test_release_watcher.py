@@ -403,6 +403,35 @@ def test_multi_repo_fix_goes_live_when_both_ship(world):
     assert _state(summary, "p1")["state"] == rw.FIX_LIVE
 
 
+def test_app_commit_parses():
+    pairs, errors = rw.parse_fix_commit("core@c2c2c22; app@a2a2a22")
+    assert pairs == [("core", "c2c2c22"), ("app", "a2a2a22")]
+    assert errors == []
+    assert rw.parse_fix_commit("VomeApp@a2a2a22")[0] == [("app", "a2a2a22")]
+
+
+def test_app_fix_is_live_once_on_master_with_no_build(world):
+    """#9801: the app has no prod workflow. Merged into master is the store
+    release, so it is live without a build or a live stamp."""
+    world.github.runs_error = "HTTP 404: no such workflow"
+    world.tasks = [parent("p1", "app@a2a2a22")]
+    summary = rw.run_release_watcher(dry_run=False)
+    fix = _state(summary, "p1")
+    assert fix["state"] == rw.FIX_LIVE
+    assert fix["pairs"][0]["state"] == rw.DEPLOYED
+
+
+def test_app_fix_off_master_is_waiting(world):
+    world.github.history.head = "a1a1a11"
+    world.tasks = [parent("p1", "core@c2c2c22; app@a2a2a22")]
+    world.bitbucket.runs = [bb_run(40, "c3c3c33")]
+    summary = rw.run_release_watcher(dry_run=False)
+    fix = _state(summary, "p1")
+    assert fix["state"] == rw.FIX_WAITING
+    states = {p["repo"]: p["state"] for p in fix["pairs"]}
+    assert states == {"core": rw.DEPLOYED, "app": rw.PENDING_MERGE}
+
+
 def test_failed_build_is_failed(world):
     world.bitbucket.runs = [bb_run(41, "c3c3c33", result="FAILED"),
                             bb_run(40, "c1c1c11")]

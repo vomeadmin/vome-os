@@ -88,32 +88,79 @@ def _ours(address: str) -> bool:
 
 
 _TEAM_DOMAINS = ("@vomevolunteer.com", "@vomevolunteer.co")
-# Shared inboxes, and Sam, who answers from the desk and sees every reply.
-_NOT_TEAMMATES = {
-    "admin@vomevolunteer.com", "sam@vomevolunteer.com",
+_SAM_ADDRESSES = {
+    "sam@vomevolunteer.com",
     "s.fagen@vomevolunteer.com", "s.fagen@vomevolunteer.co",
 }
+# Shared inboxes, and Sam, who is copied only on customer threads (below).
+_NOT_TEAMMATES = {"admin@vomevolunteer.com"} | _SAM_ADDRESSES
+# Where Sam is copied when a thread is a customer conversation and no Sam
+# address is on it already.
+SAM_CC = (os.environ.get("SAM_CC_EMAIL") or "s.fagen@vomevolunteer.co").lower()
+
+
+def is_team_address(address: str) -> bool:
+    """A Vome person (Ron, Sam, an engineer), not a shared support mailbox."""
+    address = (address or "").strip().lower()
+    return address.endswith(_TEAM_DOMAINS) and not _ours(address)
+
+
+def _sender(t: dict) -> str:
+    # Web-form tickets (channel WEB) carry no fromEmailAddress; the address
+    # is only on the author.
+    found = (emails_in(t.get("fromEmailAddress"))
+             or emails_in((t.get("author") or {}).get("email")))
+    return found[0] if found else ""
 
 
 def teammates_copied(threads: list[dict]) -> list[str]:
-    """Vome teammates a message on the ticket was addressed or copied to.
-    Forwards (a ticket sent on to an engineer) do not count."""
+    """Vome teammates on the ticket: addressed or copied on a message, or
+    the one who sent it in (Ron forwarding a customer's thread to support).
+    Forwards we send out (a ticket sent on to an engineer) do not count."""
     found: list[str] = []
     for t in threads:
         if t.get("isForward"):
             continue
-        for address in emails_in(t.get("to")) + emails_in(t.get("cc")):
-            if (address.endswith(_TEAM_DOMAINS) and not _ours(address)
+        addresses = emails_in(t.get("to")) + emails_in(t.get("cc"))
+        if t.get("direction") == "in":
+            addresses.append(_sender(t))
+        for address in addresses:
+            if (is_team_address(address)
                     and address not in _NOT_TEAMMATES
                     and address not in found):
                 found.append(address)
     return found
 
 
+def team_cc(threads: list[dict]) -> list[str]:
+    """Vome people a reply on this ticket copies.
+
+    Every teammate on the thread (teammates_copied), plus Sam when it is a
+    customer conversation: a teammate is on it, or the client wrote to Sam
+    himself. A plain inquiry (a volunteer or admin writing to support with
+    nobody from Vome on it) copies no one (Sam, 2026-11-06).
+    """
+    found = teammates_copied(threads)
+    sam_on_thread = ""
+    for t in threads:
+        if t.get("isForward"):
+            continue
+        addresses = emails_in(t.get("to")) + emails_in(t.get("cc"))
+        if t.get("direction") == "in":
+            addresses.append(_sender(t))
+        sam_on_thread = next(
+            (a for a in addresses if a in _SAM_ADDRESSES), "")
+        if sam_on_thread:
+            break
+    if found or sam_on_thread:
+        found.append(sam_on_thread or SAM_CC)
+    return found
+
+
 def ticket_teammates(ticket_id: str) -> list[str]:
-    """teammates_copied for one ticket, [] if the thread cannot be read."""
+    """team_cc for one ticket, [] if the thread cannot be read."""
     try:
-        return teammates_copied(_threads(ticket_id))
+        return team_cc(_threads(ticket_id))
     except Exception:
         return []
 
@@ -123,11 +170,15 @@ def first_name(author: str, email: str = "", given: str = "") -> str:
 
     `given` is the first name Zoho keeps on the author, and wins when set:
     the display name cannot say where a two-word first name ends ("Ia Faye
-    Sison" was greeted as "Ia", #9596).
+    Sison" was greeted as "Ia", #9596). A "Last, First" Outlook name can land
+    whole in that field, so a comma sends it through the display-name rules
+    ("Hi Phan, Dalena", #9521).
     """
-    given = (given or "").strip()
+    given = (given or "").strip().strip('"')
     if given and "@" not in given:
-        return given
+        if "," not in given:
+            return given
+        author = author or given
     author = (author or "").strip().strip('"')
     if "," in author:
         after = author.split(",", 1)[1].strip()
@@ -170,9 +221,19 @@ def last_exchange(ticket_id: str, skip=None) -> tuple[dict, dict]:
     return _newest(threads, "in", skip), _newest(threads, "out")
 
 
+TRASHED = "Trashed"
+
+
 def ticket_status(ticket_id: str) -> str:
-    """The ticket's Zoho status ("Closed", "Processing", ...)."""
-    return str(_get(f"/tickets/{ticket_id}").get("status") or "")
+    """The ticket's Zoho status ("Closed", "Processing", ...), or TRASHED
+    for a ticket in the Recycle Bin. Zoho still answers 200 for those with
+    their old status (#8194 read "In Progress" with isTrashed and
+    isDeleted true), so without this they looked live (Sam, 2026-11-05:
+    a deleted ticket always leaves the queue)."""
+    ticket = _get(f"/tickets/{ticket_id}")
+    if ticket.get("isTrashed") or ticket.get("isDeleted"):
+        return TRASHED
+    return str(ticket.get("status") or "")
 
 
 def _secondary_emails(ticket_id: str) -> list[str]:
@@ -190,30 +251,132 @@ def _secondary_emails(ticket_id: str) -> list[str]:
     return found
 
 
+_NAMED = re.compile(r'"?([^"<>,]*?)"?\s*<\s*([\w.+\'-]+@[\w-]+(?:\.[\w-]+)+)\s*>')
+# The original sender in a forwarded message: "From: Heather <h@x.org>",
+# Outlook's "From: Heather Smith <h@x.org>", French "De : ...".
+_FORWARDED_FROM = re.compile(
+    r"(?:^|\n)\s*\*?(?:From|De)\s*:\s*\*?\s*(.{0,120}?)"
+    r"[<\[(]?(?:mailto:)?([\w.+'-]+@[\w-]+(?:\.[\w-]+)+)", re.I)
+
+
+def _display_name(header, address: str) -> str:
+    """The name a header gives an address ('"Heather S"<h@x.org>'), or ""."""
+    for name, email in _NAMED.findall(str(header or "")):
+        if email.lower() == address and "@" not in name:
+            return name.strip()
+    return ""
+
+
+def _forwarded_sender(ticket_id: str, thread_id: str) -> tuple[str, str]:
+    """(address, name) of the customer quoted in a teammate's forward."""
+    if not thread_id:
+        return "", ""
+    try:
+        thread = _get(f"/tickets/{ticket_id}/threads/{thread_id}")
+    except Exception:
+        return "", ""
+    text = str(thread.get("content") or thread.get("summary") or "")
+    text = re.sub(r"<br\s*/?>|</(?:p|div|tr|li)>", "\n", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", text).replace("&lt;", "<").replace(
+        "&gt;", ">").replace("&nbsp;", " ").replace("&quot;", '"')
+    for name, address in _FORWARDED_FROM.findall(text):
+        address = address.lower()
+        if not is_team_address(address) and not _ours(address):
+            return address, name.strip().strip('"<[(').strip()
+    return "", ""
+
+
+def _customer_for(ticket_id: str, threads: list[dict],
+                  latest: dict) -> tuple[str, str, list[str]]:
+    """(to, name, other clients) when a teammate sent the newest message.
+
+    Ron forwards or copies a customer's thread to support so that we answer
+    the customer, not him (2026-11-06, Heather's 2FA thread). In order:
+    the clients his message was addressed or copied to, the newest client
+    who wrote on the ticket themselves, then the sender his forward quotes.
+    ("", "", []) when none is found, so nothing goes to Ron by mistake.
+    """
+    clients = [a for a in emails_in(latest.get("to")) + emails_in(
+        latest.get("cc")) if not is_team_address(a) and not _ours(a)]
+    if clients:
+        to = clients[0]
+        name = (_display_name(latest.get("to"), to)
+                or _display_name(latest.get("cc"), to))
+        return to, name, clients[1:]
+    client_msg = _newest(threads, "in",
+                         lambda t: is_team_address(_sender(t))
+                         or _ours(_sender(t)) or not _sender(t))
+    if client_msg:
+        author = client_msg.get("author") or {}
+        return (_sender(client_msg),
+                author.get("firstName") or author.get("name") or "",
+                [a for a in emails_in(client_msg.get("cc"))
+                 if not is_team_address(a) and not _ours(a)])
+    to, name = _forwarded_sender(ticket_id, str(latest.get("id") or ""))
+    return to, name, []
+
+
 def recipients(ticket_id: str) -> dict:
-    """{"to", "cc", "first_name", "thread_id"} for a reply to this ticket."""
+    """{"to", "cc", "first_name", "thread_id"} for a reply to this ticket.
+
+    `forwarded_by` is set when a teammate sent the newest message: the reply
+    goes to the customer and the teammate is copied. When no customer can be
+    found, `to` is "" (send_reply refuses) rather than the teammate.
+    """
     threads = _threads(ticket_id)
     latest = _newest(threads, "in")
-    # Web-form tickets (channel WEB) carry no fromEmailAddress; the address
-    # is only on the author.
-    sender = (emails_in(latest.get("fromEmailAddress"))
-              or emails_in((latest.get("author") or {}).get("email")))
-    to = sender[0] if sender else ""
+    sender = _sender(latest)
+    to = sender
     author = (latest.get("author") or {}).get("name") or ""
     given = (latest.get("author") or {}).get("firstName") or ""
+    extra = emails_in(latest.get("cc")) + to_line_clients(latest, sender)
+    forwarded_by = ""
+    if sender and is_team_address(sender):
+        forwarded_by = sender
+        to, author, extra = _customer_for(ticket_id, threads, latest)
+        given = ""
     cc: list[str] = []
-    for address in (emails_in(latest.get("cc")) + _secondary_emails(ticket_id)
-                    + teammates_copied(threads)):
+    for address in (extra + _secondary_emails(ticket_id)
+                    + team_cc(threads)):
         if address != to and not _ours(address) and address not in cc:
             cc.append(address)
     return {
         "to": to,
         "cc": cc,
-        "first_name": first_name(author, to, given),
+        "first_name": first_name(author, to, given) if to else "",
+        "name": author,
+        "forwarded_by": forwarded_by,
         "thread_id": str(latest.get("id") or ""),
         # When the customer last wrote: the age a batch shows.
         "received_at": str(latest.get("createdTime") or ""),
     }
+
+
+def to_line_clients(thread: dict, exclude: str = "") -> list[str]:
+    """Client addresses in a message's To line, other than `exclude`.
+
+    #9823 (2026-11-05): the client wrote to support and to Scott, and the
+    reply went to the sender, Cc and secondary contacts only, so Scott never
+    saw it. Everyone the client addressed is on the conversation. Vome's own
+    mailboxes are left out, and so are teammates: team_cc decides who from
+    Vome is copied (Sam only on customer threads)."""
+    exclude = (exclude or "").strip().lower()
+    return [a for a in emails_in(thread.get("to"))
+            if a != exclude and not _ours(a) and not is_team_address(a)]
+
+
+def with_to_line(cc: list[str], thread: dict, to: str) -> list[str]:
+    """`cc` plus the client addresses on `thread`'s To line, for a send
+    from a sprint item whose recipients were read before to_line_clients
+    existed (or before the client added someone). No duplicates, never the
+    `to` address itself."""
+    out = list(cc or [])
+    seen = {a.lower() for a in out} | {(to or "").lower()}
+    for address in to_line_clients(thread, to):
+        if address not in seen:
+            seen.add(address)
+            out.append(address)
+    return out
 
 
 def _reply_body(to: str, cc: list[str], content: str) -> dict:
@@ -253,6 +416,18 @@ def set_status(ticket_id: str, status: str) -> dict:
     if resp.status_code >= 400:
         raise RuntimeError(f"Zoho {resp.status_code}: {resp.text[:300]}")
     return resp.json() if resp.text.strip() else {}
+
+
+AWAITING = "Awaiting Client Response"
+
+
+def set_awaiting_client(ticket_id: str) -> dict:
+    """Awaiting Client Response with no assignee: the next move is the
+    client's, so the ticket belongs to nobody on our side. Leaving the old
+    owner (an engineer's team from an earlier acknowledgment, or Sam) kept
+    it on their list (868mu196v, 8 tickets fixed by hand on Nov 5-6)."""
+    return _send("PATCH", f"/tickets/{ticket_id}",
+                 {"status": AWAITING, "assigneeId": None})
 
 
 def set_in_progress(ticket_id: str, team: str) -> dict:

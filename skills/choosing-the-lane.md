@@ -36,8 +36,6 @@ to be detailed.
 
 **escalation_reason** (engineer lane only), the first that applies:
 
-- `data_lookup`: needs a record we cannot read (a delivery log, a specific
-  account's data)
 - `mobile_unreadable`: the behaviour lives in the mobile app and its code
   could not be read (it is readable as `mobile` since 2026-10-18; read it
   first)
@@ -58,5 +56,11 @@ Never `engineer` when the code check says works_as_designed or
 design_question: nothing is broken. "Can Vome do X?" is `answer` when it
 can and `feature` when it cannot (#9547, whether the waitlist can skip a
 user with a conflict, went to OnlyG as a data lookup, 2026-10-20).
-`data_lookup` is for a record that proves what happened (a delivery log,
-an import result), not for a question about how the product behaves.
+**A record we need to see is never an engineer's job (Sam, 2026-11-05).**
+There is no `data_lookup` any more. When the answer is in one account's
+records (a delivery log, an import result, whether a file saved), set the
+card's `data_check` (checking-the-data): Sam runs the query himself and the
+results come back to triage. Pick the lane the ticket would have once the
+records are known (`answer`, `agent_fix`, `sam_ops`), and use `engineer`
+only for a reason on the list above. Before this, data lookups went to
+OnlyG by default and Sam never saw the question.

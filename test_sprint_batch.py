@@ -90,6 +90,16 @@ def test_nothing_owed_is_one_line_not_a_decision():
     assert "*1 need you*" in top
 
 
+def test_waiting_on_the_client_is_not_ready_even_with_a_draft():
+    # #9753: Awaiting Client Response, the card said "send no reply", and
+    # a partial fix's resolution draft listed it under ready to send.
+    item = _item(12, category="awaiting_client",
+                 fix_pr="https://github.com/vomeadmin/vome-react/pull/854")
+    assert sprint_batch.section(item) == sprint_batch.OWED_NOTHING
+    picked = sprint_batch.select([item, _item(1)], now=NOW)
+    assert [i["number"] for i in picked[sprint_batch.READY]] == [1]
+
+
 def test_missing_customer_times_are_looked_up_once(monkeypatch):
     import zoho_actions
 

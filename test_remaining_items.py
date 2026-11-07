@@ -804,7 +804,8 @@ def test_a_ticket_taken_from_an_engineer_stays_until_answered(zoho_status):
 
 def test_a_reconcile_card_stays_until_answered(zoho_status):
     """Oct 25: the sweep finished 25 of 26 reconcile cards (In Progress
-    with no task, drafts and all) within the hour."""
+    with no task, drafts and all) within the hour. They also feed
+    sprint_board's internal lane."""
     statuses, decided = zoho_status
     statuses["R"] = "In Progress"
     EXCHANGES["R"] = _exchange("2026-10-10T10:00:00.000Z",
@@ -823,6 +824,32 @@ def test_a_reconcile_card_that_only_waits_on_the_client_finishes(
     item = _item(1, ticket_id="W", category="awaiting_client",
                  card={"live_question": "q", "reconciled": True})
     assert sprint_batch.sync_handled_elsewhere([item], set()) == 1
+
+
+def test_a_trashed_ticket_always_leaves_the_queue(zoho_status):
+    """#8194 and #9539 sat in the Recycle Bin for days and kept coming back:
+    Zoho answers 200 with the old status, and both cards were adopted."""
+    import zoho_actions
+
+    statuses, decided = zoho_status
+    statuses.update({"T": zoho_actions.TRASHED, "TP": zoho_actions.TRASHED})
+    items = [_item(1, ticket_id="T", card={"live_question": "q",
+                                           "reconciled": True}),
+             _item(2, ticket_id="TP", fix_pr="https://bb/pr/9")]
+    assert sprint_batch.sync_handled_elsewhere(items, set()) == 2
+    assert decided[0][2] == "handled outside the sprint (Zoho: Trashed)"
+
+
+def test_ticket_status_reads_the_recycle_bin(monkeypatch):
+    import zoho_actions
+
+    tickets = {"A": {"status": "In Progress", "isTrashed": True,
+                     "isDeleted": True},
+               "B": {"status": "Processing", "isTrashed": False}}
+    monkeypatch.setattr(zoho_actions, "_get",
+                        lambda path, params=None: tickets[path.split("/")[-1]])
+    assert zoho_actions.ticket_status("A") == zoho_actions.TRASHED
+    assert zoho_actions.ticket_status("B") == "Processing"
 
 
 def test_an_item_the_agent_is_fixing_is_left_alone(zoho_status):
