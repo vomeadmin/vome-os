@@ -418,6 +418,35 @@ def _escape_html(text: str) -> str:
 # Ticket creation
 # ---------------------------------------------------------------------------
 
+# From Nov 3 to Nov 5 2026 every widget ticket failed (Zoho 422 on the
+# account) and nobody knew for three days: 11 people were told to try
+# again. A failure now posts in #support-sprints, at most once an hour.
+_ALERT_EVERY_SECONDS = 3600
+_last_failure_alert = 0.0
+
+
+def _alert_ticket_failure(session_context: dict) -> bool:
+    global _last_failure_alert
+    now = time.time()
+    if now - _last_failure_alert < _ALERT_EVERY_SECONDS:
+        return False
+    _last_failure_alert = now
+    try:
+        import sprint_thread
+
+        sprint_thread._post(
+            ":rotating_light: The support widget could not create a Zoho "
+            f"ticket for {session_context.get('user_email') or 'a user'} "
+            f"({session_context.get('org_name') or 'no org'}). The chat is "
+            "saved in SupportConversation with no zoho_ticket_id. Check the "
+            "vome-support-agent log for `[ZOHO-API] Ticket creation "
+            "failed`. Further failures this hour are not posted.")
+        return True
+    except Exception as exc:
+        print(f"[INTAKE] failure alert not posted: {exc}")
+        return False
+
+
 def _create_ticket_from_intake(
     extracted: dict,
     session_context: dict,
@@ -1129,6 +1158,7 @@ def run_intake_turn(
                 f"{session_context.get('user_email')} — "
                 f"overriding reply text"
             )
+            _alert_ticket_failure(session_context)
             reply_text = (
                 "I'm sorry, I wasn't able to create your ticket "
                 "right now due to a system issue. Your conversation "

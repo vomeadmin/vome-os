@@ -423,13 +423,23 @@ def _language(thread: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _triaged_today() -> int:
+    """Triage runs today, from the run log every triage writes.
+
+    It used to count sprint items *updated* today, so sends, status syncs
+    and draft edits used up the cap. On a busy day new customer replies
+    were then skipped as "daily cap reached" and never seen: Corinn's
+    Oct 28 error report on #9661 waited 8 days (found 2026-11-06).
+    """
+    import deep_triage
     from vomeos import store
 
-    rows = store.query(
-        f"SELECT COUNT(*) AS n FROM {sprint_store.ITEMS}"
-        " WHERE updated_at >= date_trunc('day', NOW())"
-    )
-    return int(rows[0]["n"]) if rows else 0
+    if store.ensure_table(deep_triage.TABLE):
+        rows = store.query(
+            f"SELECT COUNT(*) AS n FROM {deep_triage.TABLE}"
+            " WHERE created_at >= date_trunc('day', NOW())"
+        )
+        return int(rows[0]["n"]) if rows else 0
+    return 0
 
 
 def handle(message: dict) -> dict:

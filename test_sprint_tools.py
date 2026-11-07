@@ -110,7 +110,7 @@ def test_an_edited_reply_is_guarded_and_teaches(sam, one, monkeypatch):
                         "\n:brain: Learned L2")
     monkeypatch.setattr(sprint_thread, "_send",
                         lambda item, sam_wrote=False, **k:
-                        f"sent to x with {item['draft'][:8]}")
+                        f"*4.* sent to x with {item['draft'][:8]}")
     out = sprint_tools.send_ticket_reply(
         "9604", "send this instead", SAM, text="Use the People tab.")
     assert stored[0].startswith("Hi Ana,") and "Sam | Vome team" in stored[0]

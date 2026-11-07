@@ -225,3 +225,17 @@ def test_a_send_adds_the_to_line_to_an_item_read_earlier():
         "scott@club.org"]
     # The sender is never copied on their own reply.
     assert za.with_to_line([], {"to": "amy@club.org"}, "amy@club.org") == []
+
+
+# #9823 (2026-11-06): Corinn wrote To Scott and support; the reply went to
+# her alone. A client colleague on the newest message's To line is copied.
+def test_a_client_colleague_on_the_to_line_is_copied(monkeypatch):
+    latest = {"id": "W1", "direction": "in", "createdTime": "2026-11-05T19:00",
+              "fromEmailAddress": '"Corinn Claydon"<corinnc@wellspringalberta.ca>',
+              "to": '"scott patterson"<scottp@wellspringalberta.ca>,'
+                    '"support"<support@vomevolunteer.zohodesk.com>',
+              "author": {"name": "Corinn Claydon", "firstName": "Corinn"}}
+    _chum(monkeypatch, [latest])
+    out = za.recipients("9823")
+    assert out["to"] == "corinnc@wellspringalberta.ca"
+    assert out["cc"] == ["scottp@wellspringalberta.ca"]

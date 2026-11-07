@@ -455,6 +455,31 @@ def _resolution(ticket_id: str) -> dict:
     return rows[0] if rows else {}
 
 
+def _opened_pr_summary(pr: str) -> str:
+    """The ledger says a PR opened; the PR itself says what happened since.
+
+    The ledger never moves past pr_opened, so fix_status said "waiting on
+    your merge" for PRs merged and live for days (#9623, #9372, #9813 and
+    #9528 on 2026-11-06: all inside production build 5c7cf86).
+    """
+    try:
+        import ticket_fix
+
+        state, alias, sha = ticket_fix._pr_state(pr)
+    except Exception:
+        state, alias, sha = "unknown", "", ""
+    if state == "merged":
+        return (f"Agent fix PR merged ({alias}@{sha}): {pr}. Its Agent Fixes "
+                "tasks are not at on dev, so the release watcher is not "
+                "tracking it. Check the production branch before telling "
+                "the client it is live.")
+    if state == "closed":
+        return (f"Agent fix PR closed without merging: {pr}. Next: Sam. Run "
+                "propose_fix again, or route it to an engineer.")
+    return (f"Agent fix PR open: {pr}. Next: Sam reviews and merges it into "
+            "the dev branch.")
+
+
 def _production_owner(commits: str) -> str:
     """Who takes a merged fix to production (Sam, 2026-10-18). A fix in
     both repos needs both."""
@@ -518,8 +543,7 @@ def fix_status(ticket: str) -> dict:
                    f"{_production_owner(release.get('text') or '')}. The "
                    "release watcher proves it live.")
     elif ledger.get("outcome") == "pr_opened":
-        summary = (f"Agent fix PR open: {pr}. Next: Sam reviews and merges "
-                   "it into the dev branch.")
+        summary = _opened_pr_summary(pr)
     elif ledger:
         summary = (f"The agent tried and did not open a PR "
                    f"({ledger.get('outcome')}: {ledger.get('reason')}). "
@@ -578,6 +602,23 @@ def propose_fix(ticket: str, caller: str) -> dict:
     if not item:
         _refuse("this ticket has no agent first pass yet; call "
                 "ticket_first_pass first")
+    # A second run on a ticket whose PR is still open fails on "branch
+    # already exists" and records that over the PR that did open (#9881,
+    # 2026-11-05). A merged PR may still need a second fix, so only an
+    # open one stops it.
+    ledger = _ledger(ticket_id)
+    pr = ledger.get("pr_url") or item.get("fix_pr") or ""
+    if ledger.get("outcome") == "pr_opened" and pr:
+        import ticket_fix
+
+        try:
+            state = ticket_fix._pr_state(pr)[0]
+        except Exception:
+            state = "unknown"
+        if state == "open":
+            _refuse(f"this ticket already has an open fix PR: {pr}. Review "
+                    "or close it first; a second run would fail on the "
+                    "branch and overwrite its record")
     from vomeos.worker import enqueue_event
 
     enqueue_event(PROPOSE_FIX_KEY, {"ticket_id": ticket_id,
@@ -652,21 +693,30 @@ def send_ticket_reply(ticket: str, sam_said: str, caller: str,
         return {"result": result, "lesson": "",
                 "sent": " sent to " in result}
     learned = ""
-    if text.strip():
-        body = sprint_thread._signed(item, text)
-        status, why = sprint_thread._check_draft(
-            item, body, sam_wrote=True, sam_verified=resolved)
-        before = item.get("draft") or ""
+    if not text.strip():
+        result = sprint_thread._send(item, resolved=resolved)
+        return {"result": result, "lesson": "",
+                "sent": " sent to " in result}
+    body = sprint_thread._signed(item, text)
+    status, why = sprint_thread._check_draft(
+        item, body, sam_wrote=True, sam_verified=resolved)
+    # Nothing is saved or learned until the edit has actually gone out.
+    # Before (2026-11-06, #9623) a held edit overwrote the agent's draft
+    # and taught the drafter a sentence the guard had just refused, and a
+    # send that failed in Zoho did the same.
+    if status != "ok":
+        _refuse(f"the edited reply is held by a guard ({why}); nothing "
+                "was sent")
+    before = item.get("draft") or ""
+    result = sprint_thread._send({**item, "draft": body,
+                                  "draft_status": status},
+                                 sam_wrote=True, resolved=resolved)
+    sent = " sent to " in result
+    learned = ""
+    if sent:
         sprint_store.set_draft(item["id"], body, status, why)
         learned = sprint_thread._learn(item, before, body, sam_said)
-        if status != "ok":
-            _refuse(f"the edited reply is held by a guard ({why}); nothing "
-                    "was sent")
-        item = sprint_store.get_item(item["id"])
-    result = sprint_thread._send(item, sam_wrote=bool(text.strip()),
-                                 resolved=resolved)
-    return {"result": result, "lesson": learned.strip(),
-            "sent": " sent to " in result}
+    return {"result": result, "lesson": learned.strip(), "sent": sent}
 
 
 def data_check_result(ticket: str, output: str, caller: str) -> dict:
